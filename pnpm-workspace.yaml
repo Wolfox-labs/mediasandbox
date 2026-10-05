@@ -1,2 +1,15 @@
 packages:
   - 'packages/*'
+
+# dockerode 的原生构建脚本处理。
+#
+# 三者都是可选依赖，我们这条链路用不到：
+#   cpu-features  只在 ssh2 传输时用于加速，我们走本地 unix socket / named pipe
+#   ssh2          仅 Docker over SSH 时需要，本项目不涉及
+#   protobufjs    其 postinstall 只生成可选的类型定义，运行不需要
+#
+# 明确设为 false 而不是留空：留空会让 pnpm 每次 install 都报错中断。
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

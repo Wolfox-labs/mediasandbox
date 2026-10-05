@@ -17,7 +17,9 @@
     "test": "tsc -p tsconfig.json && node --test \"dist/**/*.test.js\""
   },
   "devDependencies": {
+    "@types/dockerode": "^4.0.1",
     "@types/node": "^24.9.2",
+    "dockerode": "^5.0.1",
     "typescript": "^5.9.3"
   }
 }
