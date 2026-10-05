@@ -31,6 +31,7 @@ import { getPreset } from '../env-presets.js';
 import { assertValidProjectId, resolveInside, toPosixRelative } from '../util/paths.js';
 import { matchesGlob } from '../util/glob.js';
 import { mimeHintFor } from '../util/mime.js';
+import { isDeliverableArtifact } from '../util/artifacts.js';
 import {
   DEFAULT_LIMITS,
   isConflict,
@@ -505,7 +506,10 @@ export class DockerSandbox implements SandboxProvider {
     const dir = resolveInside(handle.workDir, 'artifacts');
     if ((await fs.stat(dir).catch(() => undefined)) === undefined) return [];
     const files = await this.listFiles(handle, 'artifacts/**');
-    return files.map((f) => ({ path: f.path, size: f.size, mimeHint: mimeHintFor(f.path) }));
+    // 与 LocalSandbox 保持同一判定：空文件与 .gitkeep 不算产物。
+    return files
+      .filter((f) => isDeliverableArtifact(f))
+      .map((f) => ({ path: f.path, size: f.size, mimeHint: mimeHintFor(f.path) }));
   }
 
   async stats(handle: SandboxHandle): Promise<ResourceStats> {

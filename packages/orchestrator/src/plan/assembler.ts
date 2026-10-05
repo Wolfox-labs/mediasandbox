@@ -65,6 +65,9 @@ const FINALIZE_BY_ENV: Readonly<Record<EnvType, string>> = {
 /**
  * 该环境下**可以当主产出**的工具（角色为 generate）。
  * 收尾与校验类不参与主工具选择，否则模型可能选个"校验"当第一步，计划就废了。
+ *
+ * `excludeTools` 用于"换方案"：把已失败的工具排除，逼决策层改选别的。
+ * 排除后若一个候选都不剩，会回落到"不排除"（宁可重试同一工具，也不能无工具可用）。
  */
 function primaryCandidates(
   registry: ToolRegistry,
@@ -80,6 +83,28 @@ function primaryCandidates(
   const filtered = all.filter((spec) => !excludeTools.includes(spec.id));
   // 全被排除时退回全集：有工具可用比"严格遵守排除"更重要。
   return filtered.length > 0 ? filtered : all;
+}
+
+/**
+ * 收尾工具的候选集。
+ *
+ * 两组排除，都是真实运行里暴露出来的：
+ *
+ *   1. **process-image** 需要 `in/` 下已有源图。渲染出来的图不在这里，
+ *      选它当收尾会引用不存在的输入。
+ *
+ *   2. **refine-copy** 已经有自己的 `needsRefine` 问句。把它同时列为通用收尾选项
+ *      是重复建模——而且会出事：模板路线（不调模型）配上 refine-copy 收尾，
+ *      生成层不可用时整条链路熔断，尽管主产出本来完全不需要模型。
+ *
+ * 收尾只留纯落盘/构建类工具，它们的成败不依赖生成层。
+ */
+function finalizeCandidates(registry: ToolRegistry, envType: EnvType): ToolSpec[] {
+  const EXCLUDED = new Set(['process-image', 'refine-copy']);
+  return registry
+    .filter({ envType })
+    .filter((spec) => spec.role === 'transform' || spec.role === 'execute')
+    .filter((spec) => !EXCLUDED.has(spec.id));
 }
 
 /** 生成节点 id：按序号 + 工具 id，稳定可读且便于人看。 */
@@ -130,15 +155,13 @@ export class PlanAssembler {
       instructions: '该目标是否需要在交付前做一次产物校验？',
     };
 
-    const finalizeCandidates = registry
-      .filter({ envType })
-      .filter((spec) => spec.role === 'transform' || spec.role === 'execute');
-    if (finalizeCandidates.length >= 2) {
+    const finalizeOptions = finalizeCandidates(registry, envType);
+    if (finalizeOptions.length >= 2) {
       questions[Q.finalize] = {
         type: 'choice',
         instructions: '选择把主产出落盘为最终交付物的收尾方式。',
         criteria: Object.fromEntries(
-          finalizeCandidates.map((spec) => [spec.id, `${spec.label}：${spec.description}`]),
+          finalizeOptions.map((spec) => [spec.id, `${spec.label}：${spec.description}`]),
         ),
       };
     }

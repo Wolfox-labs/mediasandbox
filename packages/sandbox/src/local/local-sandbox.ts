@@ -17,6 +17,7 @@ import { runCommand } from '../util/proc.js';
 import { assertValidProjectId, resolveInside, toPosixRelative } from '../util/paths.js';
 import { matchesGlob } from '../util/glob.js';
 import { mimeHintFor } from '../util/mime.js';
+import { isDeliverableArtifact } from '../util/artifacts.js';
 
 export interface LocalSandboxOptions {
   /** 所有项目工作区的根目录。默认 `<cwd>/workspaces`。 */
@@ -232,7 +233,11 @@ export class LocalSandbox implements SandboxProvider {
     if ((await fs.stat(dir).catch(() => undefined)) === undefined) return [];
 
     const files = await this.listFiles(live, 'artifacts/**');
-    return files.map((f) => ({ path: f.path, size: f.size, mimeHint: mimeHintFor(f.path) }));
+    // 排除空文件与 .gitkeep 之类的占位：环境预设会建空 .gitkeep 来保留目录，
+    // 那是脚手架，不是交付产物。把它们算进来会让"第一个产物"变成空文件。
+    return files
+      .filter((f) => isDeliverableArtifact(f))
+      .map((f) => ({ path: f.path, size: f.size, mimeHint: mimeHintFor(f.path) }));
   }
 
   async stats(handle: SandboxHandle): Promise<ResourceStats> {

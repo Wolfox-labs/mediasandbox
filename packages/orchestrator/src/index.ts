@@ -49,6 +49,16 @@ export {
   type FallbackState,
 } from './fallback/state-machine.js';
 
+// ── 编排入口 ──────────────────────────────────────────────────────────────
+export {
+  Orchestrator,
+  type AttemptRecord,
+  type OrchestrationEvent,
+  type RunOptions,
+  type RunRequest,
+  type RunResult,
+} from './orchestrator.js';
+
 // ── 测试辅助 ──────────────────────────────────────────────────────────────
 export {
   defineDecisionContract,
