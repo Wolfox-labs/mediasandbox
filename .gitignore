@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# 运行期数据
+projects/
+workspaces/
+artifacts/
+logs/
