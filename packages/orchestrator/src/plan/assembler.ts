@@ -66,11 +66,20 @@ const FINALIZE_BY_ENV: Readonly<Record<EnvType, string>> = {
  * 该环境下**可以当主产出**的工具（角色为 generate）。
  * 收尾与校验类不参与主工具选择，否则模型可能选个"校验"当第一步，计划就废了。
  */
-function primaryCandidates(registry: ToolRegistry, envType: EnvType): ToolSpec[] {
-  return registry.filter({ envType, role: 'generate' }).filter((spec) => {
+function primaryCandidates(
+  registry: ToolRegistry,
+  envType: EnvType,
+  excludeTools: readonly string[] = [],
+): ToolSpec[] {
+  const all = registry.filter({ envType, role: 'generate' }).filter((spec) => {
     // 图像后处理需要已有源图，不能作为第一步。
     return spec.id !== 'process-image';
   });
+  if (excludeTools.length === 0) return all;
+  // 换方案时排除已失败的工具，逼决策层改选别的。
+  const filtered = all.filter((spec) => !excludeTools.includes(spec.id));
+  // 全被排除时退回全集：有工具可用比"严格遵守排除"更重要。
+  return filtered.length > 0 ? filtered : all;
 }
 
 /** 生成节点 id：按序号 + 工具 id，稳定可读且便于人看。 */
@@ -82,13 +91,15 @@ export class PlanAssembler {
   constructor(
     private readonly registry: ToolRegistry,
     private readonly decision: DecisionClient,
+    /** 换方案时排除的工具 id（已试过且失败的）。 */
+    private readonly options: { readonly excludeTools?: readonly string[] } = {},
   ) {}
 
   async assemble(request: AssembleRequest): Promise<AssembleResult> {
     const { registry, decision } = this;
     const { context, envType } = request;
 
-    const candidates = primaryCandidates(registry, envType);
+    const candidates = primaryCandidates(registry, envType, this.options.excludeTools ?? []);
     if (candidates.length === 0) {
       throw new PlanError(
         `环境 ${envType} 下没有任何可作为主产出的工具（角色为 generate）`,
