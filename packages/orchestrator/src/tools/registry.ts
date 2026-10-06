@@ -118,6 +118,17 @@ export class ToolRegistry {
     return this.get(toolId).spec;
   }
 
+  /**
+   * 该工具声明的产出端口名。未注册的工具返回 `undefined`（不抛错）。
+   *
+   * 供 `validatePlan` 做静态端口校验用：它拿不到注册表，只能依赖调用方注入。
+   * 未注册时返回 `undefined` 而不是抛错，是为了让校验函数自己决定怎么报。
+   */
+  outputPortsOf(toolId: string): readonly string[] | undefined {
+    const entry = this.tools.get(toolId);
+    return entry === undefined ? undefined : entry.spec.outputs.map((p) => p.name);
+  }
+
   /** 全部工具 spec，按 id 排序保证确定性。 */
   specs(): ToolSpec[] {
     return [...this.tools.values()].map((e) => e.spec).sort((a, b) => (a.id < b.id ? -1 : 1));

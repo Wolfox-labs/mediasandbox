@@ -14,7 +14,7 @@ import type { EnvType } from '@mediasandbox/sandbox';
 import type { DecisionClient, DecisionContext, Question } from '../decision/types.js';
 import { argmaxDeterministic } from '../decision/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { ToolSpec } from '../tools/types.js';
+import type { PortType, ToolSpec } from '../tools/types.js';
 import {
   PlanError,
   validatePlan,
@@ -243,31 +243,46 @@ export class PlanAssembler {
     cursor += 1;
 
     // ── 2. 可选：打磨一轮 ─────────────────────────────────────────────
+    //
+    // `lastNode` 成对记录「节点 id + 工具 spec」：下游连端口时要查上游**实际**产出了
+    // 什么，只拿 id 是查不到的。端口名一律从这里推导，不写死。
     const refineAnswer = decided.answers[Q.needsRefine];
-    let lastTextNode = primaryNodeId;
+    let lastNode: UpstreamNode = { id: primaryNodeId, spec: primarySpec };
     if (refineAnswer !== undefined && refineAnswer.type === 'noul') {
       answersOut[Q.needsRefine] = refineAnswer;
       const wantsRefine = refineAnswer.value ?? (refineAnswer.yesProbability ?? 0) >= 0.5;
       if (wantsRefine && registry.has('refine-copy')) {
         const refineSpec = registry.getSpec('refine-copy');
-        const refineNodeId = nodeId(cursor, refineSpec.id);
-        nodes.push({
-          id: refineNodeId,
-          toolId: refineSpec.id,
-          inputs: {
-            text: { kind: 'ref', nodeId: lastTextNode, port: 'text' },
-            instruction: {
-              kind: 'literal',
-              value: '保持原意，让表达更凝练、更有说服力，去掉空话。',
+        // 打磨的对象是**文案正文**，所以要求上游真的产出了文案（端口 text）。
+        // html 类工具产出 html、图像类工具产出 prompt，都没有可打磨的文案：
+        // 这里若硬接一个 text 端口，节点必在执行期拿不到值而失败。宁可不插。
+        const upstreamHasText = lastNode.spec.outputs.some(
+          (p) => p.name === 'text' && p.type === 'text',
+        );
+        if (!upstreamHasText) {
+          rationale.push(
+            `决策层要求打磨，但 ${lastNode.spec.id} 没有文案产出，跳过 refine-copy`,
+          );
+        } else {
+          const refineNodeId = nodeId(cursor, refineSpec.id);
+          nodes.push({
+            id: refineNodeId,
+            toolId: refineSpec.id,
+            inputs: {
+              text: { kind: 'ref', nodeId: lastNode.id, port: 'text' },
+              instruction: {
+                kind: 'literal',
+                value: '保持原意，让表达更凝练、更有说服力，去掉空话。',
+              },
             },
-          },
-          dependsOn: [lastTextNode],
-          retryable: true,
-          note: '打磨文案表达',
-        });
-        rationale.push('决策层要求打磨文案，插入 refine-copy');
-        lastTextNode = refineNodeId;
-        cursor += 1;
+            dependsOn: [lastNode.id],
+            retryable: true,
+            note: '打磨文案表达',
+          });
+          rationale.push('决策层要求打磨文案，插入 refine-copy');
+          lastNode = { id: refineNodeId, spec: refineSpec };
+          cursor += 1;
+        }
       }
     }
 
@@ -278,16 +293,28 @@ export class PlanAssembler {
     const finalizeId = pickFinalize(registry, envType, finalizeAnswer);
     if (finalizeId !== null) {
       const finalizeSpec = registry.getSpec(finalizeId);
-      const inputs = buildFinalizeInputs(finalizeSpec, lastTextNode, request);
-      if (finalizeId !== primarySpec.id) {
+      const inputs = buildFinalizeInputs(finalizeSpec, lastNode, request);
+      if (inputs === null) {
+        // 收尾工具接不上上游（上游没有文本产出）。
+        // 记录依据后跳过——插一个必挂的节点比不插更糟。
+        rationale.push(
+          `收尾工具 ${finalizeId} 需要文本入参，但上游 ${lastNode.spec.id} 没有文本产出，跳过收尾`,
+        );
+      } else if (finalizeId !== primarySpec.id) {
+        // 依赖分两部分：
+        //   1. 数据依赖——入参里引用了哪个节点；
+        //   2. 顺序依赖——收尾必须在主产出/打磨之后跑。
+        // 第 2 条不能省：`build-frontend` 的 entry 是字面量，没有数据依赖，
+        // 但它必须等 src/index.html 被写出来，否则会因入口文件不存在而失败。
+        const refNodeIds = Object.values(inputs)
+          .filter((i): i is Extract<PlanInput, { kind: 'ref' }> => i.kind === 'ref')
+          .map((i) => i.nodeId);
         const finalizeNodeId = nodeId(cursor, finalizeSpec.id);
         nodes.push({
           id: finalizeNodeId,
           toolId: finalizeSpec.id,
           inputs,
-          dependsOn: unique([lastTextNode, ...Object.values(inputs)
-            .filter((i): i is Extract<PlanInput, { kind: 'ref' }> => i.kind === 'ref')
-            .map((i) => i.nodeId)]),
+          dependsOn: unique([lastNode.id, ...refNodeIds]),
           retryable: false,
           note: `收尾落盘（${finalizeSpec.label}）`,
         });
@@ -326,8 +353,9 @@ export class PlanAssembler {
       createdAt: Date.now(),
     };
 
-    // 组装完立刻静态校验：环、悬空依赖、端口引用一次查清。
-    validatePlan(plan);
+    // 组装完立刻静态校验：环、悬空依赖、**端口存在性**一次查清。
+    // 传 registry 才能查端口——这正是此前漏掉、导致 10 种组合执行期才失败的那一项。
+    validatePlan(plan, registry);
 
     return {
       plan,
@@ -420,24 +448,88 @@ function pickFinalize(
   return null;
 }
 
-/** 收尾工具的入参：把上游产出接进来。 */
+/**
+ * 上游节点：id + 它的工具 spec。
+ *
+ * 连端口必须知道上游**实际产出**了哪些端口，只拿节点 id 是查不到的——
+ * 这正是"硬写 port: 'text'"这个 bug 的成因。
+ */
+interface UpstreamNode {
+  readonly id: string;
+  readonly spec: ToolSpec;
+}
+
+/**
+ * 按上游**真实产出**挑一个能供数给 `wantedType` 入参的端口。
+ *
+ * 优先同名端口（`html` ← `html`），其次按常见程度回落（`text` → `html` → `copy`），
+ * 最后取任意类型相符的端口。**都没有就返回 null** —— 让调用方决定跳过这个节点，
+ * 而不是连一个上游根本不存在的端口，把失败推迟到执行期。
+ */
+function pickUpstreamPort(
+  upstream: ToolSpec,
+  wantedType: PortType,
+  preferredNames: readonly string[] = [],
+): string | null {
+  const compatible = upstream.outputs.filter((p) => p.type === wantedType);
+  if (compatible.length === 0) return null;
+  for (const name of preferredNames) {
+    if (compatible.some((p) => p.name === name)) return name;
+  }
+  return compatible[0]!.name;
+}
+
+/**
+ * 收尾工具的入参：把上游产出接进来。
+ *
+ * 返回 `null` 表示**接不上**：收尾工具需要文本入参，而上游一个文本端口都没有。
+ * 这时调用方应当**跳过这个收尾节点**，而不是插一个注定在执行期失败的节点。
+ */
 function buildFinalizeInputs(
   spec: ToolSpec,
-  upstreamNodeId: string,
+  upstream: UpstreamNode,
   request: AssembleRequest,
-): Record<string, PlanInput> {
+): Record<string, PlanInput> | null {
   const inputs: Record<string, PlanInput> = {};
   for (const port of spec.inputs) {
     switch (port.name) {
-      case 'entry':
-        inputs[port.name] = { kind: 'literal', value: 'src/index.html' };
+      case 'entry': {
+        // `entry` 是"要构建哪个文件"。此前这里写死 `src/index.html`，
+        // 等于**断言**上游把页面写在了那里——但只有 html 类工具（scaffold-frontend /
+        // static-page-from-template）真写那；draft-copy / template-copy 写 artifacts/copy.md、
+        // render-image 写 artifacts/image.png，于是 build-frontend 必然报"入口文件不存在"。
+        //
+        // 改为从上游**真实产出**推导：上游有 html 产出，就用它报告的 file 路径。
+        // 没有 html 产出，说明这不是一个网页，构建前端就没有意义 → 不插这个节点。
+        const upstreamFilePort = upstream.spec.outputs.some(
+          (p) => p.name === 'html' && p.type === 'text',
+        )
+          ? pickUpstreamPort(upstream.spec, 'file', ['file'])
+          : null;
+        if (upstreamFilePort === null) return null;
+        inputs[port.name] = { kind: 'ref', nodeId: upstream.id, port: upstreamFilePort };
         break;
+      }
       case 'text':
       case 'content':
       case 'html':
-      case 'copy':
-        inputs[port.name] = { kind: 'ref', nodeId: upstreamNodeId, port: 'text' };
+      case 'copy': {
+        // 连上游**真实存在**的文本类端口，而不是写死 'text'。
+        // 图像类工具产出 prompt、html 类工具产出 html，两者都没有 text 端口。
+        const picked = pickUpstreamPort(upstream.spec, 'text', [
+          port.name,
+          'text',
+          'html',
+          'copy',
+        ]);
+        if (picked !== null) {
+          inputs[port.name] = { kind: 'ref', nodeId: upstream.id, port: picked };
+        } else if (port.required) {
+          // 必需入参拿不到数据来源，这个节点接不起来。
+          return null;
+        }
         break;
+      }
       case 'instruction':
         inputs[port.name] = { kind: 'literal', value: '整理为最终交付版本。' };
         break;

@@ -80,8 +80,15 @@ export type PlanErrorCode =
  *
  * 在执行之前把所有结构性问题一次性查清。这样执行器可以假设计划是良构的，
  * 不必在每个节点里重复做防御性检查——也避免"跑到一半才发现环"这种浪费。
+ *
+ * 传入 `registry` 时**额外校验端口存在性**：入参引用的端口必须真的在上游工具的
+ * `outputs` 里声明过。不传则跳过这一项（纯结构校验不需要注册表）。
+ *
+ * 为什么要把端口校验放在这里：它是**结构错误**，不是运行时意外。放在执行期查，
+ * 前面节点已经跑完、文件已写、生成层的钱已花，才发现引用了一个不存在的端口。
+ * 放在这里查，则在**任何副作用发生之前**就拦下。
  */
-export function validatePlan(plan: ExecutionPlan): void {
+export function validatePlan(plan: ExecutionPlan, registry?: PortLookup): void {
   if (plan.nodes.length === 0) {
     throw new PlanError('执行计划为空', 'EMPTY_PLAN');
   }
@@ -120,8 +127,45 @@ export function validatePlan(plan: ExecutionPlan): void {
     }
   }
 
+  // 端口存在性校验：需要注册表才能查"上游工具声明了哪些产出"。
+  if (registry !== undefined) {
+    for (const node of plan.nodes) {
+      for (const [portName, input] of Object.entries(node.inputs)) {
+        if (input.kind !== 'ref') continue;
+        const upstream = byId.get(input.nodeId);
+        if (upstream === undefined) continue; // 上面已报过
+        const outputs = registry.outputPortsOf(upstream.toolId);
+        if (outputs === undefined) {
+          throw new PlanError(
+            `节点 ${node.id} 的上游 ${upstream.id} 引用了未注册的工具 ${upstream.toolId}`,
+            'UNKNOWN_TOOL',
+          );
+        }
+        if (!outputs.includes(input.port)) {
+          throw new PlanError(
+            `节点 ${node.id} 的入参 ${portName} 引用了 ${input.nodeId} 的产出端口 ${input.port}，` +
+              `但该节点只产出了 [${outputs.join(', ')}]`,
+            'BAD_PORT_REF',
+          );
+        }
+      }
+    }
+  }
+
   // 拓扑排序同时检测环。
   topologicalOrder(plan);
+}
+
+/**
+ * `validatePlan` 查端口存在性所需的最小信息。
+ *
+ * 刻意**不依赖 `ToolRegistry` 具体类**——`plan/types.ts` 是数据结构层，
+ * 让它 import 工具层会把两层绑死。任何能回答"这个工具声明了哪些产出端口"
+ * 的对象都行，`ToolRegistry` 天然满足。
+ */
+export interface PortLookup {
+  /** 返回该工具声明的产出端口名；工具未注册时返回 undefined。 */
+  outputPortsOf(toolId: string): readonly string[] | undefined;
 }
 
 /**
