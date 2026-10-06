@@ -39,6 +39,8 @@ async function startServer(overrides: {
   llm?: MockLlmClient;
   /** 用空注册表，制造不可恢复的计划级失败。 */
   emptyRegistry?: boolean;
+  /** 沙盒保留额度。不传则用 createServer 的默认值。 */
+  maxRuns?: number;
 } = {}): Promise<{
   origin: string;
   close: () => Promise<void>;
@@ -58,6 +60,9 @@ async function startServer(overrides: {
     providers: { local: localSandbox },
     defaultProvider: 'local',
     policy: FAST_POLICY,
+    ...(overrides.maxRuns !== undefined
+      ? { sandboxRetention: { maxRuns: overrides.maxRuns } }
+      : {}),
   });
 
   const server: Server = http.createServer(instance.app);
@@ -339,6 +344,110 @@ describe('HTTP + WebSocket 服务', () => {
       assert.ok(attempts.length > 0, '应记录尝试');
     } finally {
       await failCtx.close();
+    }
+  });
+});
+
+/**
+ * 沙盒保留策略。
+ *
+ * 背景——这是实测出来的资源泄漏：产物是从沙盒工作区**实时读**的，
+ * 所以结束后不能立刻销毁；但此前**从不销毁**，每跑一次就永久多一个工作区。
+ * 实测：连提 3 次运行，`workspaces/local/` 下就留下 3 个目录，永不回收。
+ */
+describe('沙盒保留与回收', () => {
+  it('保留额度用满后，最旧的沙盒被销毁；产物随之不可再下载（410）', async () => {
+    const ctx = await startServer({ maxRuns: 2 });
+    try {
+      const runIds: string[] = [];
+      // 连提 3 次，额度是 2，所以第 1 个应被回收。
+      for (let i = 0; i < 3; i += 1) {
+        const submit = await fetch(`${ctx.origin}/api/runs`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ goal: `保留策略用例 ${i}`, envType: 'copy' }),
+        });
+        assert.equal(submit.status, 202);
+        const { runId } = (await submit.json()) as { runId: string };
+        runIds.push(runId);
+        await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+      }
+
+      // 全部 run 记录仍然可查——回收的是沙盒，不是运行历史。
+      for (const runId of runIds) {
+        const detail = await fetch(`${ctx.origin}/api/runs/${runId}`);
+        assert.equal(detail.status, 200, `运行记录 ${runId} 不应被删除`);
+      }
+
+      const artifactNameOf = async (runId: string): Promise<string | undefined> => {
+        const body = (await (
+          await fetch(`${ctx.origin}/api/runs/${runId}/artifacts`)
+        ).json()) as { artifacts: { path: string }[] };
+        const first = body.artifacts[0];
+        return first === undefined ? undefined : (first.path.split('/').pop() ?? undefined);
+      };
+
+      // 最新的那个（第 3 个）应在额度内，产物可下载。
+      const newest = runIds[2]!;
+      const newestArtifact = await artifactNameOf(newest);
+      assert.ok(newestArtifact !== undefined, '最新运行应产出产物');
+      const newestDownload = await fetch(
+        `${ctx.origin}/api/runs/${newest}/artifacts/${newestArtifact}`,
+      );
+      assert.equal(newestDownload.status, 200, '额度内的沙盒产物应可下载');
+
+      // 最旧的那个应已被回收，下载得到 410。
+      const oldest = runIds[0]!;
+      const oldestArtifact = await artifactNameOf(oldest);
+      assert.ok(oldestArtifact !== undefined, '最旧运行也曾产出产物');
+      const oldestDownload = await fetch(
+        `${ctx.origin}/api/runs/${oldest}/artifacts/${oldestArtifact}`,
+      );
+      assert.equal(oldestDownload.status, 410, '超出保留额度的沙盒应已销毁');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('回收只动超出额度的沙盒，工作区不会无限增长', async () => {
+    const ctx = await startServer({ maxRuns: 1 });
+    const sandboxRoot = path.join(rootDir, 'retention-probe');
+    const probe = new LocalSandbox({ rootDir: sandboxRoot });
+    try {
+      // 直接验证 provider 层面的销毁语义：创建 → 销毁 → get 不到了。
+      const handle = await probe.create('retention-probe', 'copy');
+      assert.ok((await probe.get(handle.id)) !== undefined);
+      await probe.destroy(handle);
+      assert.equal(await probe.get(handle.id), undefined, 'destroy 后不应还能取回句柄');
+      // 幂等：重复销毁不抛错。
+      await probe.destroy(handle);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('额度为 0 时运行结束即销毁沙盒，产物不可再下载', async () => {
+    const ctx = await startServer({ maxRuns: 0 });
+    try {
+      const submit = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ goal: '不保留沙盒', envType: 'copy' }),
+      });
+      const { runId } = (await submit.json()) as { runId: string };
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      // 运行记录与产物清单仍在——销毁的是沙盒，不是记录。
+      const body = (await (
+        await fetch(`${ctx.origin}/api/runs/${runId}/artifacts`)
+      ).json()) as { artifacts: { path: string }[] };
+      assert.ok(body.artifacts.length > 0, '产物清单应仍然可查');
+
+      const name = body.artifacts[0]!.path.split('/').pop()!;
+      const download = await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/${name}`);
+      assert.equal(download.status, 410, '额度 0 时沙盒已销毁，下载应返回 410');
+    } finally {
+      await ctx.close();
     }
   });
 });

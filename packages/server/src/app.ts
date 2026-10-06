@@ -33,6 +33,24 @@ export interface ServerDeps {
   readonly policy?: FallbackPolicy | undefined;
   readonly nodeTimeoutMs?: number | undefined;
   readonly decisionTimeoutMs?: number | undefined;
+  /**
+   * 沙盒保留策略。
+   *
+   * 产物下载是**从沙盒工作区实时读**的（本层刻意不缓存产物内容），
+   * 所以 run 结束后不能立刻销毁沙盒，否则产物下不下来。
+   * 但也不能永不销毁——每跑一次就永久留下一个工作区（Local 是目录，Docker 是容器），
+   * 跑 100 次就有 100 个。
+   *
+   * 取折中：**保留最近 N 个**，超出后按完成时间从旧到新销毁。
+   * 被淘汰的 run 再下载产物会得到 410（该分支本来就已存在）。
+   * 设为 0 表示不保留（run 一结束就销毁，产物不可再下载）。
+   */
+  readonly sandboxRetention?:
+    | {
+        /** 最多保留多少个已结束 run 的沙盒。默认 20。 */
+        readonly maxRuns?: number | undefined;
+      }
+    | undefined;
 }
 
 export interface CreateServerResult {
@@ -73,6 +91,38 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   const inFlight = new Set<Promise<void>>();
   /** WebSocket 订阅者。显式记录 socket，便于断开时精确移除。 */
   const subscribers = new Map<WebSocket, { runId: string | null }>();
+  /** 已结束的 run 的完成时间，按结束先后排序，用于淘汰最旧的沙盒。 */
+  const finishedRuns: { runId: string; finishedAt: number }[] = [];
+
+  const retention = deps.sandboxRetention?.maxRuns ?? 20;
+
+  /**
+   * 淘汰超出保留额度的沙盒，从最旧的已结束 run 开始销毁。
+   *
+   * 只销毁**已结束**的 run：在途运行的沙盒正在被写，不能碰。
+   * 额度为 0 时每个 run 一结束就销毁（产物随之下不下来，这是调用方的选择）。
+   */
+  async function reclaimSandboxes(): Promise<void> {
+    // 额度为 0 时这个循环同样会执行：它会把刚登记的那个 run 也淘汰掉。
+    while (finishedRuns.length > retention) {
+      const oldest = finishedRuns.shift();
+      if (oldest === undefined) break;
+      const sandboxId = sandboxIdByRun.get(oldest.runId);
+      if (sandboxId === undefined) continue;
+      const record = store.get(oldest.runId);
+      const provider = record === undefined ? undefined : deps.providers[record.provider];
+      try {
+        if (provider !== undefined) {
+          const handle = await provider.get(sandboxId);
+          if (handle !== undefined) await provider.destroy(handle);
+        }
+      } catch {
+        // 销毁失败不该影响新运行的提交：最坏结果是多留一个工作区。
+      } finally {
+        sandboxIdByRun.delete(oldest.runId);
+      }
+    }
+  }
 
   function broadcast(runId: string, event: OrchestrationEvent): void {
     const payload = JSON.stringify(toWireEvent(runId, event));
@@ -167,6 +217,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         finishedAt: Date.now(),
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      // 运行已结束，登记后按保留额度淘汰最旧的沙盒。
+      // 放在 finally 里：失败与取消的 run 同样留下工作区，同样要算进额度。
+      finishedRuns.push({ runId: record.id, finishedAt: Date.now() });
+      await reclaimSandboxes();
     }
   }
 

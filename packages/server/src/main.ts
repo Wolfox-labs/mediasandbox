@@ -37,6 +37,17 @@ function log(message: string): void {
   process.stdout.write(`[mediasandbox] ${message}\n`);
 }
 
+/** 读一个非负整数环境变量。缺失或非法时用默认值。 */
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    log(`环境变量值非法（${raw}），回落到默认值 ${fallback}`);
+    return fallback;
+  }
+  return value;
+}
+
 /** 决策层：默认连本地 rizzo-flow；显式设 STUB=1 时用桩（无模型也能跑通链路）。 */
 function buildDecision(): DecisionClient {
   if (process.env['MEDIASANDBOX_STUB_DECISION'] === '1') {
@@ -98,6 +109,10 @@ async function main(): Promise<void> {
   const llm = buildLlm();
   const { providers, defaultProvider } = await buildProviders();
 
+  // 产物是从沙盒工作区实时读的，所以结束后要留一段时间才能下载。
+  // 但必须设上限，否则每跑一次就永久多一个工作区（Local 目录 / Docker 容器）。
+  const sandboxRetention = parseNonNegativeInt(process.env['SANDBOX_RETENTION'], 20);
+
   const instance = createServer({
     registry,
     decision,
@@ -105,6 +120,7 @@ async function main(): Promise<void> {
     providers,
     defaultProvider,
     policy: DEFAULT_POLICY,
+    sandboxRetention: { maxRuns: sandboxRetention },
   });
 
   const server = http.createServer(instance.app);
@@ -123,6 +139,7 @@ async function main(): Promise<void> {
   log(`  WebSocket ws://${host}:${port}/ws`);
   log(`  沙盒      ${defaultProvider}（可用: ${Object.keys(providers).join(', ')}）`);
   log(`  工作区    ${WORKSPACE_ROOT}`);
+  log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
 
   const shutdown = (signal: string): void => {
     log(`收到 ${signal}，正在关闭`);
