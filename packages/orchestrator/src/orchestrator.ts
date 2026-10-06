@@ -13,14 +13,20 @@
  *   - **重试与换方案的次数由兜底状态机控制**，执行器本身不做这个决策。
  *   - **换方案**的做法是：把已试过的工具加入 `exclude`，让决策层重选。
  */
-import type { EnvType, SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
+import type { EnvType, SandboxErrorCode, SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
+import { SandboxError } from '@mediasandbox/sandbox';
 import type { DecisionClient, DecisionContext } from './decision/types.js';
 import type { LlmClient } from './llm/types.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { ToolError } from './tools/types.js';
 import { PlanAssembler } from './plan/assembler.js';
-import { PlanExecutor, type ExecutionEvent, type ExecutionResult } from './plan/executor.js';
-import type { ExecutionPlan } from './plan/types.js';
+import {
+  PlanExecutor,
+  type ExecutionEvent,
+  type ExecutionResult,
+  type NodeErrorInfo,
+} from './plan/executor.js';
+import { PlanError, type ExecutionPlan } from './plan/types.js';
 import {
   DEFAULT_POLICY,
   FallbackStateMachine,
@@ -245,10 +251,9 @@ export class Orchestrator {
         // ── 3. 失败 → 兜底 ────────────────────────────────────────────
         const failedNode = execution.outcomes.find((o) => o.status === 'failed');
         const failureDetail = failedNode?.error ?? '执行失败';
-        const failureError = new Error(failureDetail);
-        // 让归类能认出工具错误：执行器把 ToolError 压成了字符串，这里用前缀还原。
+        // 归类靠 `errorInfo` 里的类型与错误码，不去猜 `failureDetail` 的措辞。
         const classified = fallback.onFailure(
-          rehydrateToolError(failureDetail),
+          rehydrateToolError(failedNode ?? { error: failureDetail }),
           attemptNumber,
         );
 
@@ -265,7 +270,6 @@ export class Orchestrator {
           kind: classified.kind,
           at: Date.now(),
         });
-        void failureError;
 
         // 换方案时把失败节点用到的工具排除掉，逼决策层换一个。
         if (classified.action === 'switch_plan') {
@@ -337,13 +341,61 @@ export class Orchestrator {
 }
 
 /**
- * 从执行器的错误字符串还原成真正的错误对象，让归类能判断该不该重试。
+ * 把执行器带出来的结构化错误信息还原成真正的错误实例，供 `classifyFailure` 归类。
  *
- * 执行器为了保持 NodeOutcome 可序列化，把异常压成了 message 字符串。
- * 这里**必须构造真实的错误实例**（而不是设一下 name）——因为 `classifyFailure`
- * 用 `instanceof` 判类型，只改 name 会被归成 unknown，重试策略就错了。
+ * **优先用 `errorInfo`（按类型判断），不猜消息文本。**
+ * 旧实现靠正则匹配错误消息前缀（`/命令退出码/` 之类），那是个脆弱点：
+ * 谁改一句措辞，分类就静默退化成 `unknown`，重试策略跟着错——
+ * 而且这种退化在结果里看不出来。
+ *
+ * `errorInfo` 缺失时才回落到文本匹配，兼容外部直接构造 `NodeOutcome` 的调用方。
  */
-function rehydrateToolError(detail: string): Error {
+function rehydrateToolError(outcome: {
+  readonly error?: string | undefined;
+  readonly errorInfo?: NodeErrorInfo | undefined;
+}): Error {
+  const detail = outcome.error ?? '执行失败';
+  const info = outcome.errorInfo;
+  if (info === undefined) return rehydrateFromText(detail);
+
+  const toolId = info.toolId ?? '(rehydrated)';
+  switch (info.kind) {
+    case 'tool':
+      return new ToolError(
+        detail,
+        info.code === 'UNKNOWN_TOOL' ? 'UNKNOWN_TOOL' : 'EXECUTION_FAILED',
+        toolId,
+      );
+    case 'plan':
+      return new PlanError(detail, info.code === 'BAD_PORT_REF' ? 'BAD_PORT_REF' : 'MISSING_INPUT');
+    case 'sandbox':
+      return new SandboxError(detail, sandboxCodeOf(info.code));
+    case 'unknown':
+      return new Error(detail);
+  }
+}
+
+/** 把 `SandboxErrorCode` 字符串收敛回合法值；无法识别时给一个保守的默认。 */
+function sandboxCodeOf(code: string | undefined): SandboxErrorCode {
+  switch (code) {
+    case 'PATH_ESCAPE':
+    case 'NO_SUCH_SANDBOX':
+    case 'NO_SUCH_FILE':
+    case 'UNSUPPORTED':
+    case 'CREATE_FAILED':
+      return code;
+    default:
+      return 'UNSUPPORTED';
+  }
+}
+
+/**
+ * 兼容路径：`NodeOutcome` 没带 `errorInfo` 时按消息前缀猜。
+ *
+ * 保留它是为了不破坏外部直接构造 `NodeOutcome` 的调用方；
+ * 编排层自己的执行器**总会**填 `errorInfo`，所以正常路径不走这里。
+ */
+function rehydrateFromText(detail: string): Error {
   if (/超时|timeout/i.test(detail)) {
     return new ToolError(detail, 'EXECUTION_FAILED', '(rehydrated)');
   }

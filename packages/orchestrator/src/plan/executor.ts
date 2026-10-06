@@ -11,9 +11,10 @@
  *   3. **状态回调是纯观察**。回调抛错不会影响执行结果。
  */
 import type { Artifact, SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
+import { SandboxError } from '@mediasandbox/sandbox';
 import type { LlmClient } from '../llm/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import { ToolError, type ToolResult } from '../tools/types.js';
+import { ToolError, type ToolRegistration, type ToolResult } from '../tools/types.js';
 import {
   PlanError,
   planLayers,
@@ -36,6 +37,8 @@ export interface NodeState {
   readonly durationMs?: number | undefined;
   readonly summary?: string | undefined;
   readonly error?: string | undefined;
+  /** 结构化的失败信息。`outcomes` 由 `states` 重建，所以必须存在这里才传得出去。 */
+  readonly errorInfo?: NodeErrorInfo | undefined;
   /** 该节点产出的文件。 */
   readonly artifacts: readonly Artifact[];
 }
@@ -78,8 +81,31 @@ export interface NodeOutcome {
   readonly status: Exclude<NodeStatus, 'pending' | 'running'>;
   readonly result?: ToolResult | undefined;
   readonly error?: string | undefined;
+  /**
+   * 结构化的错误信息，供兜底状态机归类用。
+   *
+   * `error` 是给人看的字符串；**归类不该靠正则去猜这个字符串**——
+   * 一旦有人改了错误措辞，分类会静默退化，重试策略跟着错。
+   * 这里把机器可判的类别与原始错误码一并带出去。
+   */
+  readonly errorInfo?: NodeErrorInfo | undefined;
   readonly attempts: number;
   readonly durationMs: number;
+}
+
+/**
+ * 节点失败的机器可读描述。
+ *
+ * `kind` 对应抛出异常的**类型**，`code` 是那个类型自己的错误码。
+ * 两者都来自真实的错误实例，不是从消息文本推断的。
+ */
+export interface NodeErrorInfo {
+  readonly message: string;
+  readonly kind: 'tool' | 'plan' | 'sandbox' | 'unknown';
+  /** `ToolError.code` / `PlanError.code` / `SandboxError.code`。 */
+  readonly code?: string | undefined;
+  /** 出错节点的工具 id，便于定位。 */
+  readonly toolId?: string | undefined;
 }
 
 export interface ExecutionResult {
@@ -114,7 +140,8 @@ export class PlanExecutor {
     } = options;
 
     // 执行前先校验。计划是坏的就不该开始跑。
-    validatePlan(plan);
+    // 带上 registry 才能在**任何副作用发生之前**发现端口引用错误。
+    validatePlan(plan, registry);
     const layers = planLayers(plan);
     const byId = new Map(plan.nodes.map((n) => [n.id, n]));
 
@@ -226,6 +253,7 @@ export class PlanExecutor {
         status: state.status === 'succeeded' ? 'succeeded' : state.status === 'failed' ? 'failed' : 'skipped',
         ...(result !== undefined ? { result } : {}),
         ...(state.error !== undefined ? { error: state.error } : {}),
+        ...(state.errorInfo !== undefined ? { errorInfo: state.errorInfo } : {}),
         attempts: state.attempts,
         durationMs: state.durationMs ?? 0,
       };
@@ -283,16 +311,22 @@ export class PlanExecutor {
       emit,
     } = args;
 
-    const registration = registry.get(node.toolId); // 未注册会抛 UNKNOWN_TOOL
     const nodeStartedAt = Date.now();
 
-    // 入参解析失败（引用不存在的上游产出等）属于节点自身的失败，
-    // 必须记成 failed 并带上原因，否则会被误标为 skipped，排查时看不到真实错误。
+    // 注册表查询与入参解析都在这个 try 里。两者失败都是**节点自身的失败**，
+    // 必须记成 failed 并带上原因。
+    //
+    // 尤其是 `registry.get`：它曾写在 try 之外，导致"工具未注册"直接穿透
+    // `execute()` 抛给调用方，而这个节点在结果里被标成 `skipped` 且**不带任何错误**——
+    // 排查时完全看不到真实原因（正是文件头注释里说要避免的那种情况）。
+    let registration: ToolRegistration;
     let inputs: Record<string, unknown>;
     try {
+      registration = registry.get(node.toolId);
       inputs = resolveInputs(node, results);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const info = describeError(error, node.toolId);
+      const message = info.message;
       states.set(node.id, {
         ...states.get(node.id)!,
         status: 'failed',
@@ -300,6 +334,7 @@ export class PlanExecutor {
         finishedAt: Date.now(),
         durationMs: Date.now() - nodeStartedAt,
         error: message,
+        errorInfo: info,
       });
       emit({
         type: 'node_failed',
@@ -314,6 +349,7 @@ export class PlanExecutor {
         toolId: node.toolId,
         status: 'failed',
         error: message,
+        errorInfo: info,
         attempts: 0,
         durationMs: Date.now() - nodeStartedAt,
       };
@@ -322,6 +358,7 @@ export class PlanExecutor {
     const attemptLimit = node.retryable ? maxRetries + 1 : 1;
 
     let lastError: string | undefined;
+    let lastErrorInfo: NodeErrorInfo | undefined;
     let attempts = 0;
 
     for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
@@ -388,7 +425,8 @@ export class PlanExecutor {
           durationMs: Date.now() - nodeStartedAt,
         };
       } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error);
+        lastErrorInfo = describeError(error, node.toolId);
+        lastError = lastErrorInfo.message;
         const willRetry = attempt < attemptLimit;
         emit({
           type: 'node_failed',
@@ -411,16 +449,38 @@ export class PlanExecutor {
       finishedAt: Date.now(),
       durationMs,
       ...(lastError !== undefined ? { error: lastError } : {}),
+      ...(lastErrorInfo !== undefined ? { errorInfo: lastErrorInfo } : {}),
     });
     return {
       nodeId: node.id,
       toolId: node.toolId,
       status: 'failed',
       ...(lastError !== undefined ? { error: lastError } : {}),
+      ...(lastErrorInfo !== undefined ? { errorInfo: lastErrorInfo } : {}),
       attempts,
       durationMs,
     };
   }
+}
+
+/**
+ * 把捕获到的异常转成机器可读描述。
+ *
+ * **按类型判断，不碰消息文本。** 这是修掉"靠正则匹配错误前缀"那个脆弱点的关键：
+ * 消息措辞可以随便改，分类不会跟着退化。
+ */
+function describeError(error: unknown, toolId: string): NodeErrorInfo {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ToolError) {
+    return { message, kind: 'tool', code: error.code, toolId };
+  }
+  if (error instanceof PlanError) {
+    return { message, kind: 'plan', code: error.code, toolId };
+  }
+  if (error instanceof SandboxError) {
+    return { message, kind: 'sandbox', code: error.code, toolId };
+  }
+  return { message, kind: 'unknown', toolId };
 }
 
 /** 把节点的入参解析成实际值：字面量直接用，引用从上游结果取。 */

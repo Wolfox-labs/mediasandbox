@@ -13,7 +13,6 @@
  *      兜底状态机要把它当作合法输入处理。
  */
 import type { EnvType } from '@mediasandbox/sandbox';
-import { SandboxError } from '@mediasandbox/sandbox';
 
 /** 每问候选数上限，rizzo-flow 官方限制。 */
 export const MAX_OPTIONS_PER_QUESTION = 26;
@@ -157,15 +156,27 @@ export interface DecisionClient {
   health(): Promise<{ readonly ok: boolean; readonly detail: string }>;
 }
 
-/** 决策层错误。兜底状态机据此区分「模型不可用」与「工具执行失败」。 */
-export class DecisionError extends SandboxError {
+/**
+ * 决策层错误。兜底状态机据此区分「模型不可用」与「工具执行失败」。
+ *
+ * **刻意不继承 `SandboxError`。** 决策层不是沙盒，把它挂进沙盒的错误体系会带来
+ * 两个问题：
+ *   1. 语义错位——`SandboxErrorCode` 里没有"决策层不可用"这一项，只能硬塞成
+ *      `'UNSUPPORTED'`（"环境预设不支持该操作"），与真实原因无关。
+ *   2. 判定顺序依赖——`classifyFailure` 里 `instanceof DecisionError` 必须排在
+ *      `instanceof SandboxError` **之前**才不出错。谁调换顺序，决策层不可用就会被
+ *      误判成工具错误，进而按错误的重试策略处理（不可重试的故障被反复重试）。
+ *
+ * 独立继承 `Error` 后，两条 `instanceof` 互不干扰，顺序不再重要。
+ */
+export class DecisionError extends Error {
   override readonly name = 'DecisionError';
   constructor(
     message: string,
     readonly reason: DecisionErrorReason,
     options?: { cause?: unknown },
   ) {
-    super(message, 'UNSUPPORTED', options);
+    super(message, options);
   }
 }
 

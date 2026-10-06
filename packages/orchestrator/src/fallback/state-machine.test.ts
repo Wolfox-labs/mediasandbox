@@ -49,6 +49,27 @@ describe('失败归类', () => {
     assert.equal(c.retryable, false);
   });
 
+  /**
+   * 回归：`DecisionError` 曾经继承 `SandboxError`，且 code 被写死成 `'UNSUPPORTED'`。
+   *
+   * 那样只有靠 `classifyFailure` 里两条 `instanceof` 的**书写顺序**才不出错——
+   * 谁把 `SandboxError` 那条挪到前面，决策层不可用就会被误判成工具错误
+   * （不可重试的 `BAD_REQUEST` 会被反复重试，或反之）。
+   *
+   * 现在 `DecisionError` 独立继承 `Error`，两条判断互不干扰。这个用例把该性质钉住：
+   * 它**不依赖任何顺序假设**，直接断言类型关系本身。
+   */
+  it('DecisionError 不属于沙盒错误体系（避免靠 instanceof 顺序兜底）', () => {
+    const error = new DecisionError('连不上', 'UNREACHABLE');
+    assert.equal(
+      error instanceof SandboxError,
+      false,
+      'DecisionError 不该是 SandboxError——否则归类正确性会依赖 instanceof 的书写顺序',
+    );
+    // 就算按"沙盒优先"的顺序判断，也必须仍然归成决策层问题。
+    assert.equal(classifyFailure(error).kind, 'decision_unavailable');
+  });
+
   it('未归类异常按瞬时故障处理且可重试', () => {
     const c = classifyFailure(new Error('谁知道呢'));
     assert.equal(c.kind, 'unknown');

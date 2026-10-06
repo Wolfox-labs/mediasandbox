@@ -6,10 +6,12 @@ import { LocalSandbox } from '@mediasandbox/sandbox';
 import { ToolRegistry } from '../tools/registry.js';
 import { BUILTIN_TOOLS } from '../tools/builtin.js';
 import type { ToolExecutor, ToolSpec } from '../tools/types.js';
+import { ToolError } from '../tools/types.js';
 import { MockLlmClient } from '../testing/mock-llm.js';
 import { PlanExecutor } from './executor.js';
 import type { ExecutionEvent } from './executor.js';
 import type { ExecutionPlan, PlanNode } from './types.js';
+import { PlanError } from './types.js';
 
 const rootDir = path.join(os.tmpdir(), `mediasandbox-exec-test-${process.pid}`);
 const sandbox = new LocalSandbox({ rootDir });
@@ -164,6 +166,42 @@ describe('PlanExecutor', () => {
     assert.equal(result.states['a']?.status, 'failed');
     assert.equal(result.states['b']?.status, 'skipped');
     assert.match(result.states['a']?.error ?? '', /故意失败/);
+  });
+
+  /**
+   * 回归：归类**不该靠正则猜错误消息**。
+   *
+   * 旧实现按前缀匹配（`/命令退出码/`、`/生成层调用失败/`…）。谁改一句措辞，
+   * 分类就静默退化成 unknown，重试策略跟着错——而且结果里看不出来。
+   *
+   * 现在执行器把错误的**类型与错误码**结构化带出去，与本用例里那句
+   * "毫无提示性的错误消息"无关。
+   */
+  it('失败结果带结构化 errorInfo，归类不依赖错误消息措辞', async () => {
+    const registry = reg(new ToolRegistry(), 'boom', async () => {
+      // 刻意用一句完全不含任何已知关键词的消息。
+      throw new ToolError('zzz 无关键词 zzz', 'EXECUTION_FAILED', 'boom');
+    });
+
+    const handle = await makeHandle();
+    const plan = planOf([node('a', 'boom')]);
+    const result = await new PlanExecutor().execute({ plan, registry, sandbox, handle });
+
+    const outcome = result.outcomes.find((o) => o.nodeId === 'a');
+    assert.equal(outcome?.status, 'failed');
+    assert.equal(outcome?.errorInfo?.kind, 'tool', '应按异常类型归类，而不是匹配消息');
+    assert.equal(outcome?.errorInfo?.code, 'EXECUTION_FAILED');
+    assert.equal(outcome?.errorInfo?.toolId, 'boom');
+  });
+
+  it('未注册工具的失败也带结构化 errorInfo（kind=plan）', async () => {
+    const registry = new ToolRegistry();
+    const handle = await makeHandle();
+    const plan = planOf([node('a', 'ghost')]);
+    const result = await new PlanExecutor().execute({ plan, registry, sandbox, handle });
+
+    const outcome = result.outcomes.find((o) => o.nodeId === 'a');
+    assert.equal(outcome?.errorInfo?.code, 'UNKNOWN_TOOL');
   });
 
   it('retryable 节点按 maxRetries 重试，成功即停', async () => {
@@ -344,12 +382,12 @@ describe('PlanExecutor', () => {
     );
   });
 
-  it('引用不存在的产出端口时报错', async () => {
-    const registry = reg(new ToolRegistry(), 'src', async () => ({
-      outputs: { out: 'x' },
-      artifacts: [],
-      summary: 's',
-    }));
+  it('引用不存在的产出端口时，在执行前就被拒绝', async () => {
+    let executed = false;
+    const registry = reg(new ToolRegistry(), 'src', async () => {
+      executed = true;
+      return { outputs: { out: 'x' }, artifacts: [], summary: 's' };
+    });
     reg(registry, 'sink', async () => ({ outputs: { out: 'y' }, artifacts: [], summary: 'k' }), {
       inputs: [{ name: 'in', type: 'text', required: true, description: '上游' }],
     });
@@ -364,9 +402,16 @@ describe('PlanExecutor', () => {
       }),
     ]);
 
-    const result = await new PlanExecutor().execute({ plan, registry, sandbox, handle });
-    assert.equal(result.status, 'failed');
-    assert.match(result.states['b']?.error ?? '', /nonexistent/);
+    // 这是**结构错误**，不是运行时意外：必须在任何节点跑起来之前拦下，
+    // 否则前面节点已经写完文件、花完生成层的钱才发现引用错了。
+    await assert.rejects(
+      () => new PlanExecutor().execute({ plan, registry, sandbox, handle }),
+      (error: unknown) =>
+        error instanceof PlanError &&
+        error.code === 'BAD_PORT_REF' &&
+        /nonexistent/.test(error.message),
+    );
+    assert.equal(executed, false, '端口校验失败时不应执行任何节点');
   });
 
   it('用真实内置工具跑通文案链路，产物落到 artifacts/', async () => {

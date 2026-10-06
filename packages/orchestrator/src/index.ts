@@ -28,6 +28,7 @@ export {
   PlanExecutor,
   type NodeState,
   type NodeStatus,
+  type NodeErrorInfo,
   type ExecutionEvent,
   type ExecutionListener,
   type ExecuteOptions,
