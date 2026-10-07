@@ -2,6 +2,7 @@
 export * from './decision/types.js';
 export { RizzoFlowClient, type RizzoFlowClientOptions } from './decision/rizzo-client.js';
 export { StubDecisionClient } from './decision/stub-client.js';
+export { DemoDecisionClient, type DemoDecisionOptions } from './decision/demo-client.js';
 
 // ── 生成层 ────────────────────────────────────────────────────────────────
 export * from './llm/types.js';
