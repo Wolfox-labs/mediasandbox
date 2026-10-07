@@ -20,10 +20,29 @@ const TABS: readonly { id: Tab; label: string; hint: string }[] = [
   { id: 'tools', label: '工具链', hint: '决策层的候选集来自这里' },
 ];
 
+/** 从 URL hash 读初始标签。无效或缺失时回落工作台。 */
+function readTabFromHash(): Tab {
+  const raw = window.location.hash.replace(/^#\/?/, '');
+  return TABS.some((t) => t.id === raw) ? (raw as Tab) : 'workbench';
+}
+
 export function App(): ReactNode {
-  const [tab, setTab] = useState<Tab>('workbench');
+  const [tab, setTab] = useState<Tab>(readTabFromHash);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+
+  // 标签与 URL hash 双向同步：这样每个页面都可被直接链接
+  // （也用得上浏览器前进/后退，以及无头截图时按 URL 直达）。
+  useEffect(() => {
+    const onHashChange = (): void => setTab(readTabFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  const selectTab = (next: Tab): void => {
+    setTab(next);
+    window.location.hash = next;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -63,7 +82,7 @@ export function App(): ReactNode {
             <button
               key={t.id}
               type="button"
-              onClick={() => setTab(t.id)}
+              onClick={() => selectTab(t.id)}
               title={t.hint}
               className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
                 tab === t.id
