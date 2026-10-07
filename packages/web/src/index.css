@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-900 text-slate-200 antialiased;
+    font-family:
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      'Microsoft YaHei',
+      sans-serif;
+  }
+
+  /* 细滚动条，符合控制台类界面的密度 */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded bg-ink-500;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-600;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-lg border border-ink-600 bg-ink-800;
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between border-b border-ink-600 px-4 py-2.5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5
+           text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-blue-500;
+  }
+
+  .btn-ghost {
+    @apply btn border border-ink-500 text-slate-300 hover:bg-ink-700;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium;
+  }
+
+  .field {
+    @apply w-full rounded-md border border-ink-500 bg-ink-900 px-2.5 py-1.5 text-sm
+           text-slate-200 outline-none placeholder:text-slate-500
+           focus:border-accent focus:ring-1 focus:ring-accent/40;
+  }
+}
