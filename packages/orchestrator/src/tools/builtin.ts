@@ -287,25 +287,42 @@ const renderImage: ToolRegistration = {
     if (runtime.llm === undefined) {
       throw new ToolError('渲染图像需要生成层', 'EXECUTION_FAILED', 'render-image');
     }
-    // 图像生成走生成层的多模态能力：这里以 data URL / 二进制形式落盘。
+    // 图像生成走生成层的多模态能力：这里以 data URL 形式落盘。
     // 具体供应商差异由 LlmClient 实现吸收；编排层只认"拿到一份可落盘的图"。
     runtime.log('请求图像生成', { promptChars: prompt.length });
     const response = await runtime.llm.complete({
       messages: [{ role: 'user', content: `生成图像：${prompt}` }],
       signal: runtime.signal,
     });
+
     const file = artifactPath('image.png');
-    // 生成层以 base64 data URL 返回图像数据时解出真实字节，否则落盘占位文本。
-    const dataUrl = /^data:image\/\w+;base64,(.+)$/s.exec(response.text.trim());
-    if (dataUrl !== null && dataUrl[1] !== undefined) {
-      await runtime.sandbox.writeFile(runtime.handle, file, Buffer.from(dataUrl[1], 'base64'));
-    } else {
-      await runtime.sandbox.writeFile(runtime.handle, file, response.text);
+    const dataUrl = /^data:image\/(\w+);base64,(.+)$/s.exec(response.text.trim());
+
+    // 拿不到图像数据就**失败**，不要把模型的文字回复当图片落盘。
+    //
+    // 这里曾经是"否则落盘占位文本"：接一个纯文本模型时，模型会回复
+    // "我无法生成图像，但可以给你提示词…"，那段文字被当成 image.png 写出，
+    // 于是产物清单里出现一个**后缀是 .png 但不是图片**的文件——
+    // 预览打不开、下载下来是乱码，而且没有任何报错提示。
+    // 宁可失败并说清原因，也不要产出伪装成图片的文本。
+    if (dataUrl === null || dataUrl[2] === undefined) {
+      const preview = response.text.trim().slice(0, 120).replace(/\s+/g, ' ');
+      throw new ToolError(
+        `生成层未返回图像数据（当前模型可能不支持图像生成）。` +
+          `返回内容开头：${preview}${response.text.length > 120 ? '…' : ''}`,
+        'EXECUTION_FAILED',
+        'render-image',
+      );
     }
+
+    const format = dataUrl[1] ?? 'png';
+    // 按真实格式命名，避免 .png 后缀装 JPEG 内容。
+    const target = format === 'png' ? file : artifactPath(`image.${format}`);
+    await runtime.sandbox.writeFile(runtime.handle, target, Buffer.from(dataUrl[2], 'base64'));
     return {
-      outputs: { prompt, file },
+      outputs: { prompt, file: target },
       artifacts: await collect(runtime),
-      summary: `渲染图像 ${file}`,
+      summary: `渲染图像 ${target}`,
     };
   },
 };

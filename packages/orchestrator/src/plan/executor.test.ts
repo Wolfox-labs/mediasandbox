@@ -461,6 +461,35 @@ describe('PlanExecutor', () => {
     assert.equal(llm.calls.length, 0, '模板工具不该调用生成层');
   });
 
+  /**
+   * 回归：模型不返回图像数据时，**不能**把它的文字回复当成图片落盘。
+   *
+   * 原实现是"否则落盘占位文本"，于是接一个纯文本模型时，模型回复
+   * "我无法生成图像…"会被写成 `artifacts/image.png`——产物清单里出现一个
+   * 后缀是 .png 但不是图片的文件，预览打不开、下载是乱码，且没有任何报错。
+   */
+  it('生成层未返回图像数据时明确失败，不产出伪装成图片的文本', async () => {
+    const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS);
+    const handle = await makeHandle('image');
+    // 模拟纯文本模型的回复：不含 data URL。
+    const llm = new MockLlmClient({ defaultText: '我无法生成图像，但可以给你一段提示词…' });
+
+    const plan = planOf([
+      node('n1-render-image', 'render-image', {
+        inputs: { prompt: { kind: 'literal', value: '科技感封面' } },
+      }),
+    ]);
+
+    const result = await new PlanExecutor().execute({ plan, registry, sandbox, handle, llm });
+    assert.equal(result.status, 'failed');
+    assert.match(result.states['n1-render-image']?.error ?? '', /未返回图像数据/);
+    assert.equal(
+      await sandbox.exists(handle, 'artifacts/image.png'),
+      false,
+      '失败时不该留下任何 .png 文件',
+    );
+  });
+
   it('生成层完全不可用时，确定性工具仍能完成任务', async () => {
     const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS);
     const handle = await makeHandle('copy');
