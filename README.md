@@ -36,19 +36,34 @@
 
 ```bash
 pnpm install
-pnpm -r typecheck
-pnpm -r test          # 183 项测试
+pnpm -r build
+pnpm -r test          # 194 项测试
 ```
 
 ### 起服务
 
 ```bash
-# 用桩决策层，不需要任何模型就能跑通全链路
-MEDIASANDBOX_STUB_DECISION=1 pnpm --filter @mediasandbox/server start
-
-# 接本地 rizzo-flow（默认 http://127.0.0.1:8017）
-pnpm --filter @mediasandbox/server start
+cp .env.example .env   # 按需填写（生成层 key 等，全部可选）
+pnpm start             # → http://127.0.0.1:8787/
 ```
+
+打开浏览器就是**创作工作台**。前端由后端一并托管，所以只有一个地址，
+不需要另起前端服务。
+
+### 四种运行模式
+
+| 模式 | 配置 | 用途 |
+|---|---|---|
+| **纯离线演示** | `MEDIASANDBOX_DECISION=stub`，不配 LLM | 无任何外部依赖，跑通全链路（产物是占位文本） |
+| **演示模式**（默认） | `MEDIASANDBOX_DECISION=demo` + 配 LLM | 关键词选工具 + 真实内容生成 |
+| **接真实决策模型** | `MEDIASANDBOX_DECISION=rizzo` | 需先部署 [rizzo-flow](https://github.com/Rizzo-AI-Academy/rizzo-flow) |
+| **容器隔离** | `SANDBOX_PROVIDER=docker` | 跑不可信代码时用 |
+
+`demo` 是按目标关键词选工具的**演示替身**，不是决策模型 —— 它存在的意义是让
+演示链路自洽（"做一个网页"确实产出网页，而不是按字母序选中文案工具）。
+真实模型接上后它完全不参与。
+
+### 也可以只用 API
 
 ```bash
 curl -X POST http://127.0.0.1:8787/api/runs \
@@ -57,6 +72,15 @@ curl -X POST http://127.0.0.1:8787/api/runs \
 # → {"runId":"run-...","status":"queued"}
 
 curl http://127.0.0.1:8787/api/runs/<runId>
+```
+
+### 前端开发模式
+
+改前端时用 Vite 热更新（`/api` 与 `/ws` 自动代理到后端）：
+
+```bash
+pnpm start   # 终端 1：后端
+pnpm dev     # 终端 2：前端 → http://127.0.0.1:5173/
 ```
 
 ### Docker 沙盒
@@ -78,6 +102,15 @@ $env:SANDBOX_PROVIDER='docker'
 
 ```
 packages/
+├── web/             前端工作台（React 18 + Vite + Tailwind）
+│   ├── api/                   REST 客户端 + 与后端对齐的类型
+│   ├── hooks/useRunStream     WebSocket 订阅 + 断线重连
+│   ├── state/                 事件流 → 视图模型（纯函数折叠）
+│   ├── features/workbench/    ★ 创作工作台（决策过程 + 分层步骤）
+│   ├── features/preview/      实时预览（网页 / 图片 / 文本）
+│   ├── features/sandbox/      沙盒环境管理
+│   └── features/tools/        工具链（候选集可视化）
+│
 ├── sandbox/         沙盒抽象 + 两个实现
 │   ├── types.ts               ★ SandboxProvider 接口
 │   ├── local/                 LocalSandbox（路径级隔离）
@@ -86,15 +119,28 @@ packages/
 │   └── testing/               provider 一致性套件
 │
 ├── orchestrator/    编排核心
-│   ├── decision/              决策层契约 + rizzo 客户端 + 桩
+│   ├── decision/              决策层契约 + rizzo 客户端 + 桩 + 演示层
 │   ├── tools/                 工具注册表 + 11 个内置工具
 │   ├── plan/                  DAG 组装器 + 执行器
 │   ├── fallback/              兜底状态机
 │   ├── llm/                   OpenAI 兼容客户端
 │   └── orchestrator.ts        ★ 编排入口
 │
-└── server/          HTTP + WebSocket 服务
+└── server/          HTTP + WebSocket 服务（并托管前端产物）
 ```
+
+### 前端：决策过程可见
+
+普通对话式 AI 只给结果，本工作台把**过程**摊开：
+
+| 面板 | 展示什么 |
+|---|---|
+| 决策过程 | 组装依据（选了哪个工具、为什么）、每次尝试、重试与换方案 |
+| 执行步骤 | 按依赖分层，同层标注"并发 N 个"——这解释了"为什么失败时兄弟节点会跑完" |
+| 实时预览 | 网页走 iframe（沙盒化，产物脚本碰不到工作台）、图片、文本双视图 |
+
+事件流用**纯函数从零折叠**（一次运行几十条事件，量很小），换来的是无状态：
+不用管乱序、不用管重连补发重复，同样的输入永远得到同样的视图。
 
 ### 两个核心抽象
 
@@ -164,8 +210,10 @@ pnpm -r test
 | 包 | 项数 | 覆盖 |
 |---|---:|---|
 | sandbox | 49 | provider 一致性 18 项 × 两个实现、容器隔离约束、产物判定 |
-| orchestrator | 119 | 决策契约、注册表、组装器、执行器、兜底、LLM 客户端、端到端 |
-| server | 15 | REST、WebSocket、双 provider 一致性 |
+| orchestrator | 127 | 决策契约、注册表、组装器、执行器、兜底、LLM 客户端、端到端 |
+| server | 18 | REST、WebSocket、双 provider 一致性、沙盒保留策略 |
+
+共 **194 项，0 失败**（1 项按环境如实跳过）。
 
 **几个刻意设计的测试**：
 
@@ -174,6 +222,8 @@ pnpm -r test
   并说明原因，**不假装通过**。
 - **双 provider 产物一致性**：同一目标在 Local 与 Docker 上产出的文件
   **SHA-256 逐字节相同**。这是沙盒抽象成立与否的最终验收。
+- **穷举回归**：`envType × 主产出 × 打磨 × 收尾` 共 54 种组合全部组装并校验，
+  任一组合出现非法端口引用即失败。
 
 ---
 
@@ -181,10 +231,13 @@ pnpm -r test
 
 | 项 | 说明 |
 |---|---|
+| **目标分类未实现** | `envType` 由调用方指定，决策层没参与"这是什么类型的任务"的判断 |
+| `score` / `numeric` | 实现了但从未被使用，是纯储备代码 |
 | Docker exec 流分离 | 按 Docker 多路复用帧格式解帧。若容器分配 TTY，帧格式不同，当前实现不处理 |
 | 宿主 `python` | 本机 `python` 指向 WindowsApps 存根（假壳）。容器内的 python 是真的 |
 | `registry-mirrors` | 对短名拉取不生效，Dockerfile 的 `FROM` 必须写完整前缀 |
 | 单实例 | 服务无持久化，重启后运行记录丢失；沙盒句柄需重新 `adopt()` |
+| 无队列 | 多个请求并发执行，无上限 |
 
 ---
 
@@ -204,4 +257,7 @@ pnpm -r test
 
 ## 相关文档
 
+- [docs/系统说明.md](docs/系统说明.md) —— **面向评审**：它是什么、怎么用、怎么做的、怎么验证的
 - [架构说明.md](架构说明.md) —— 详细的实现说明与踩坑记录
+- [架构与业务逻辑.md](架构与业务逻辑.md) —— 与设计蓝图的逐条对照，含偏差清单
+- [docs/screenshots/](docs/screenshots) —— 界面截图
