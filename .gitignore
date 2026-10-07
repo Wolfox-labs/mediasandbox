@@ -6,8 +6,13 @@ dist/
 .env.*
 !.env.example
 
-# 运行期数据
-projects/
-workspaces/
-artifacts/
-logs/
+# 运行期数据。
+#
+# **前缀 `/` 是关键**：不锚定的话 `projects/` 会匹配任意深度，
+# 把 `packages/web/src/features/projects/` 这样的源码目录也一起忽略掉 ——
+# 而且 `git status` 里不显示任何异常，文件就是静默不进仓库。
+# 这个坑真的踩过一次（项目与产物管理页整目录没被提交）。
+/projects/
+/workspaces/
+/artifacts/
+/logs/
