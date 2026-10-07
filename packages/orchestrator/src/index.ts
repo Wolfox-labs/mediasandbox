@@ -12,6 +12,7 @@ export {
   type OpenAiCompatibleOptions,
   type ProviderProfile,
 } from './llm/openai-client.js';
+export { SplitLlmClient, type SplitLlmOptions } from './llm/split-client.js';
 
 // ── 工具层 ────────────────────────────────────────────────────────────────
 export * from './tools/types.js';

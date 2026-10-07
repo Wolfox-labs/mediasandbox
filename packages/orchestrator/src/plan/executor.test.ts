@@ -517,4 +517,43 @@ describe('PlanExecutor', () => {
     assert.equal(result.status, 'failed');
     assert.match(result.states['n1-draft-copy']?.error ?? '', /未提供 LlmClient/);
   });
+
+  it('生成层有图像端点时走端点，产出真实字节', async () => {
+    const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS);
+    const handle = await makeHandle('image');
+    // withImage 让替身挂上 generateImage —— 等价于"供应商有图像端点"。
+    const llm = new MockLlmClient({ withImage: true });
+
+    const plan = planOf([
+      node('n1-render-image', 'render-image', {
+        inputs: { prompt: { kind: 'literal', value: '科技感封面' } },
+      }),
+    ]);
+
+    const result = await new PlanExecutor().execute({ plan, registry, sandbox, handle, llm });
+    assert.equal(result.status, 'succeeded', JSON.stringify(result.states, null, 2));
+    assert.equal(llm.imageCalls.length, 1, '应调用图像端点');
+    assert.equal(llm.calls.length, 0, '走图像端点时不该再调文本补全');
+
+    // 断言落盘的是**真图片字节**，不是被写进去的文字。
+    const bytes = await sandbox.readFile(handle, 'artifacts/image.png');
+    assert.equal(bytes[0], 0x89, 'PNG 魔数首字节');
+    assert.equal(bytes[1], 0x50, 'PNG 魔数次字节');
+  });
+
+  it('图像端点失败时如实失败，且不静默重试（会重复计费）', async () => {
+    const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS);
+    const handle = await makeHandle('image');
+    const llm = new MockLlmClient({ withImage: true, imageFail: '上游 502' });
+
+    const plan = planOf([
+      node('n1-render-image', 'render-image', {
+        inputs: { prompt: { kind: 'literal', value: '封面' } },
+      }),
+    ]);
+
+    const result = await new PlanExecutor().execute({ plan, registry, sandbox, handle, llm });
+    assert.equal(result.status, 'failed');
+    assert.equal(llm.imageCalls.length, 1, '图像生成按张计费，失败不该自动重试');
+  });
 });

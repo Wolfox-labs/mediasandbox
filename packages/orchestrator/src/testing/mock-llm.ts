@@ -6,6 +6,9 @@
  */
 import {
   LlmError,
+  type GeneratedImage,
+  type ImageRequest,
+  type ImageResponse,
   type LlmClient,
   type LlmRequest,
   type LlmResponse,
@@ -27,15 +30,41 @@ export interface MockLlmOptions {
   readonly defaultText?: string;
   readonly rules?: readonly MockRule[];
   readonly model?: string;
+  /**
+   * 是否实现 `generateImage`。
+   *
+   * 默认 **false** —— 这样默认替身模拟"没有图像端点"的供应商，
+   * 走文本补全回落路径。要测图像端点就显式打开。
+   */
+  readonly withImage?: boolean | undefined;
+  /** 图像端点返回的图。不传则给一张 1×1 的合法 PNG。 */
+  readonly imageBytes?: Uint8Array | undefined;
+  readonly imageMime?: string | undefined;
+  /** 图像端点抛错时填这里，用于测失败路径。 */
+  readonly imageFail?: string | undefined;
 }
+
+/** 1×1 透明 PNG。合法的最小图像，用于让产物判定为真图片。 */
+const ONE_PIXEL_PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+  0x42, 0x60, 0x82,
+]);
 
 export class MockLlmClient implements LlmClient {
   readonly kind = 'mock';
   private readonly defaultText: string;
   private readonly rules: MockRule[];
   private readonly model: string;
+  private readonly imageBytes: Uint8Array | undefined;
+  private readonly imageMime: string;
+  private readonly imageFail: string | undefined;
   /** 调用记录，便于断言"确实调了生成层"或"没调"。 */
   readonly calls: LlmRequest[] = [];
+  /** 图像生成调用记录。 */
+  readonly imageCalls: ImageRequest[] = [];
   private healthy = true;
   private latencyMs = 0;
 
@@ -43,6 +72,39 @@ export class MockLlmClient implements LlmClient {
     this.defaultText = options.defaultText ?? '这是一段由测试替身生成的文本。';
     this.rules = [...(options.rules ?? [])];
     this.model = options.model ?? 'mock-model';
+    this.imageBytes = options.imageBytes;
+    this.imageMime = options.imageMime ?? 'image/png';
+    this.imageFail = options.imageFail;
+    // 只在显式要求时才挂上 generateImage：这样默认替身等价于
+    // "供应商没有图像端点"，与真实情况里纯文本模型的行为一致。
+    if (options.withImage === true) {
+      this.generateImage = this.generateImageImpl.bind(this);
+    }
+  }
+
+  /** 真正的实现。挂在实例上与否由构造参数决定。 */
+  declare generateImage?: (request: ImageRequest) => Promise<ImageResponse>;
+
+  private async generateImageImpl(request: ImageRequest): Promise<ImageResponse> {
+    this.imageCalls.push(request);
+    const startedAt = Date.now();
+    if (this.latencyMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.latencyMs));
+    }
+    if (this.imageFail !== undefined) {
+      throw new LlmError(this.imageFail, 'BAD_STATUS');
+    }
+    const image: GeneratedImage = {
+      bytes: this.imageBytes ?? ONE_PIXEL_PNG,
+      mimeType: this.imageMime,
+      source: 'b64',
+    };
+    return {
+      images: [image],
+      model: 'mock-image-model',
+      latencyMs: Date.now() - startedAt,
+      raw: { mock: true },
+    };
   }
 
   setHealthy(ok: boolean): this {

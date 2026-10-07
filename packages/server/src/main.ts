@@ -18,6 +18,7 @@ import {
   DEFAULT_POLICY,
   DemoDecisionClient,
   RizzoFlowClient,
+  SplitLlmClient,
   StubDecisionClient,
   ToolRegistry,
   OpenAiCompatibleClient,
@@ -80,9 +81,14 @@ function buildDecision(): DecisionClient {
 /**
  * 生成层：未配置 API key 时返回 undefined，编排层会走确定性工具。
  *
- * 两种接法：
+ * 三种接法：
  *   - 预置厂商：`LLM_PROVIDER=deepseek`（见 PROVIDERS 表）
  *   - 任意 OpenAI 兼容端点：`LLM_BASE_URL=https://.../v1`（优先于 provider）
+ *   - **文本与图像分开**：再配 `LLM_IMAGE_BASE_URL` + `LLM_IMAGE_API_KEY`
+ *
+ * 第三种是实际部署里常见的情况 —— 文本模型与图像模型来自不同服务商，
+ * 域名与密钥都不同。这时用 `SplitLlmClient` 组合两个客户端，
+ * 而不是把两套凭据硬塞进一个客户端里。
  */
 function buildLlm(): LlmClient | undefined {
   const apiKey = process.env['LLM_API_KEY'];
@@ -92,19 +98,54 @@ function buildLlm(): LlmClient | undefined {
   }
   const baseUrl = process.env['LLM_BASE_URL'];
   const model = process.env['LLM_MODEL'];
-  // 显式给了 baseUrl 就按自定义端点接；否则用预置 profile。
-  const target =
+
+  // 文本客户端。
+  const textTarget =
     baseUrl !== undefined && baseUrl !== ''
       ? `自定义端点 ${baseUrl}`
       : `provider=${process.env['LLM_PROVIDER'] ?? 'deepseek'}`;
-  log(`生成层：OpenAiCompatibleClient（${target}${model !== undefined ? `，模型 ${model}` : ''}）`);
-  return new OpenAiCompatibleClient({
+  log(`生成层[文本]：${textTarget}${model !== undefined ? `，模型 ${model}` : ''}`);
+  const text = new OpenAiCompatibleClient({
     ...(baseUrl !== undefined && baseUrl !== ''
       ? { baseUrl }
       : { provider: process.env['LLM_PROVIDER'] ?? 'deepseek' }),
     apiKey,
     ...(model !== undefined ? { defaultModel: model } : {}),
   });
+
+  // 图像客户端：独立端点 + 独立密钥（都可选）。
+  const imageBaseUrl = process.env['LLM_IMAGE_BASE_URL'];
+  const imageApiKey = process.env['LLM_IMAGE_API_KEY'] ?? apiKey;
+  const imageModel = process.env['LLM_IMAGE_MODEL'];
+
+  if (imageModel === undefined || imageModel === '') {
+    log('生成层[图像]：未配 LLM_IMAGE_MODEL，render-image 将回落到文本补全');
+    return text;
+  }
+
+  // 图像端点没单独给就复用文本端点（同一服务商同时提供两种模型的情况）。
+  const imageTarget =
+    imageBaseUrl !== undefined && imageBaseUrl !== '' ? imageBaseUrl : (baseUrl ?? '(同文本端点)');
+  log(`生成层[图像]：${imageTarget}，模型 ${imageModel}`);
+
+  const image = new OpenAiCompatibleClient({
+    ...(imageBaseUrl !== undefined && imageBaseUrl !== ''
+      ? { baseUrl: imageBaseUrl }
+      : baseUrl !== undefined && baseUrl !== ''
+        ? { baseUrl }
+        : { provider: process.env['LLM_PROVIDER'] ?? 'deepseek' }),
+    apiKey: imageApiKey,
+    ...(model !== undefined ? { defaultModel: model } : {}),
+    imageModel,
+  });
+
+  // 端点与密钥都相同就不必套路由器 —— 直接用一个客户端更省一层。
+  const sameEndpoint =
+    (imageBaseUrl === undefined || imageBaseUrl === '' || imageBaseUrl === baseUrl) &&
+    imageApiKey === apiKey;
+  if (sameEndpoint) return image;
+
+  return new SplitLlmClient({ text, image });
 }
 
 async function buildProviders(): Promise<{

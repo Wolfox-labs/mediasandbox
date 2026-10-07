@@ -49,6 +49,47 @@ export interface LlmStreamChunk {
 }
 
 /**
+ * 图像生成请求。
+ *
+ * 与 `LlmRequest` 分开而不是复用：图像生成走的是 `/images/generations`
+ * 端点，参数语义完全不同（prompt / size / n），硬塞进 chat 请求会让
+ * 实现层到处写条件分支。
+ */
+export interface ImageRequest {
+  /** 图像描述。区别于 chat 的 messages —— 这里就是一段提示词。 */
+  readonly prompt: string;
+  /** 覆盖默认图像模型。 */
+  readonly model?: string | undefined;
+  /** 尺寸，如 `1024x1024`。 */
+  readonly size?: string | undefined;
+  /** 生成几张。默认 1。 */
+  readonly n?: number | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
+/** 生成出来的一张图。 */
+export interface GeneratedImage {
+  /** 图像字节。**已在客户端解码**，调用方不必关心供应商返回的是 b64 还是 URL。 */
+  readonly bytes: Uint8Array;
+  /** MIME 类型，如 `image/png`。用于决定落盘后缀。 */
+  readonly mimeType: string;
+  /**
+   * 供应商原始返回形式。
+   * 用于排查：gpt-image 系返回 b64_json，而部分网关返回 URL 需要再抓一次。
+   */
+  readonly source: 'b64' | 'url';
+  /** 原始 URL（source 为 url 时）。 */
+  readonly url?: string | undefined;
+}
+
+export interface ImageResponse {
+  readonly images: readonly GeneratedImage[];
+  readonly model: string;
+  readonly latencyMs: number;
+  readonly raw: unknown;
+}
+
+/**
  * 生成层客户端。实现可以是 OpenAI 兼容端点、多供应商路由、或测试用桩。
  */
 export interface LlmClient {
@@ -59,6 +100,12 @@ export interface LlmClient {
 
   /** 流式生成。实现可选，不支持时编排层回落到 complete。 */
   stream?(request: LlmRequest): AsyncIterable<LlmStreamChunk>;
+
+  /**
+   * 图像生成。**可选能力**：不支持的实现不实现它，
+   * 调用方（`render-image`）据此判断该走图像端点还是退回文本生成。
+   */
+  generateImage?(request: ImageRequest): Promise<ImageResponse>;
 
   /** 探活。 */
   health(): Promise<{ readonly ok: boolean; readonly detail: string }>;

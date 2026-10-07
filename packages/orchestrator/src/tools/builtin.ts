@@ -20,6 +20,35 @@ function artifactPath(name: string): string {
   return cleaned.startsWith('artifacts/') ? cleaned : `artifacts/${cleaned}`;
 }
 
+/**
+ * MIME → 文件后缀。
+ *
+ * 存在的意义：产物后缀要与**真实内容格式**一致。曾经把供应商返回的任意图片
+ * 一律写成 `image.png`，结果 `.png` 里装着 JPEG —— 预览能显示（浏览器会嗅探），
+ * 但下载下来用别的工具打开就报格式错。
+ */
+function extensionForMime(mimeType: string): string {
+  const mime = mimeType.toLowerCase().split(';')[0]?.trim() ?? '';
+  switch (mime) {
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpg';
+    case 'image/webp':
+      return 'webp';
+    case 'image/gif':
+      return 'gif';
+    case 'image/avif':
+      return 'avif';
+    case 'image/svg+xml':
+      return 'svg';
+    case 'image/png':
+      return 'png';
+    default:
+      // 认不出来就用 png —— 图像生成端点绝大多数默认返回 png。
+      return 'png';
+  }
+}
+
 function requireString(inputs: Readonly<Record<string, unknown>>, key: string, toolId: string): string {
   const value = inputs[key];
   if (typeof value !== 'string' || value.trim() === '') {
@@ -287,15 +316,43 @@ const renderImage: ToolRegistration = {
     if (runtime.llm === undefined) {
       throw new ToolError('渲染图像需要生成层', 'EXECUTION_FAILED', 'render-image');
     }
-    // 图像生成走生成层的多模态能力：这里以 data URL 形式落盘。
-    // 具体供应商差异由 LlmClient 实现吸收；编排层只认"拿到一份可落盘的图"。
-    runtime.log('请求图像生成', { promptChars: prompt.length });
+
+    const file = artifactPath('image.png');
+
+    // ── 首选：真正的图像生成端点 ──────────────────────────────────────
+    // `generateImage` 在 LlmClient 上是**可选能力**，不支持的实现不实现它。
+    // 供应商差异（返回 b64 还是外链）由客户端吸收，这里只认字节。
+    if (runtime.llm.generateImage !== undefined) {
+      runtime.log('调用图像生成端点', { promptChars: prompt.length });
+      const size = typeof runtime.inputs['size'] === 'string' ? runtime.inputs['size'] : undefined;
+      const response = await runtime.llm.generateImage({
+        prompt,
+        ...(size !== undefined ? { size } : {}),
+        ...(runtime.signal !== undefined ? { signal: runtime.signal } : {}),
+      });
+      const first = response.images[0];
+      if (first === undefined) {
+        throw new ToolError('图像生成端点没有返回任何图像', 'EXECUTION_FAILED', 'render-image');
+      }
+      // 按供应商给的 MIME 决定后缀，避免 .png 装 JPEG 内容。
+      const ext = extensionForMime(first.mimeType);
+      const target = ext === 'png' ? file : artifactPath(`image.${ext}`);
+      await runtime.sandbox.writeFile(runtime.handle, target, first.bytes);
+      return {
+        outputs: { prompt, file: target },
+        artifacts: await collect(runtime),
+        summary: `渲染图像 ${target}（${first.bytes.byteLength} 字节，${first.mimeType}）`,
+      };
+    }
+
+    // ── 回落：文本补全 + 期待 data URL ────────────────────────────────
+    // 只有部分供应商在 chat 响应里直接给 data URL 时才可行。
+    runtime.log('生成层无图像端点，回落到文本补全', { promptChars: prompt.length });
     const response = await runtime.llm.complete({
       messages: [{ role: 'user', content: `生成图像：${prompt}` }],
       signal: runtime.signal,
     });
 
-    const file = artifactPath('image.png');
     const dataUrl = /^data:image\/(\w+);base64,(.+)$/s.exec(response.text.trim());
 
     // 拿不到图像数据就**失败**，不要把模型的文字回复当图片落盘。
@@ -316,7 +373,6 @@ const renderImage: ToolRegistration = {
     }
 
     const format = dataUrl[1] ?? 'png';
-    // 按真实格式命名，避免 .png 后缀装 JPEG 内容。
     const target = format === 'png' ? file : artifactPath(`image.${format}`);
     await runtime.sandbox.writeFile(runtime.handle, target, Buffer.from(dataUrl[2], 'base64'));
     return {

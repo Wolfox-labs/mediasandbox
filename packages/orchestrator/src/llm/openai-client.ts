@@ -9,6 +9,9 @@
  */
 import {
   LlmError,
+  type GeneratedImage,
+  type ImageRequest,
+  type ImageResponse,
   type LlmClient,
   type LlmRequest,
   type LlmResponse,
@@ -66,6 +69,12 @@ export interface OpenAiCompatibleOptions {
   readonly baseUrl?: string | undefined;
   readonly apiKey?: string | undefined;
   readonly defaultModel?: string | undefined;
+  /**
+   * 图像生成端点用的模型。与 `defaultModel` 分开：
+   * 文本模型和图像模型几乎不会同名，共用一个字段会导致必然配错一个。
+   * 不设则 `generateImage()` 直接报"未配置图像模型"。
+   */
+  readonly imageModel?: string | undefined;
   readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
   /** 单次请求超时毫秒。默认 120_000。 */
   readonly timeoutMs?: number | undefined;
@@ -125,6 +134,7 @@ export class OpenAiCompatibleClient implements LlmClient {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly defaultModel: string;
+  private readonly imageModel: string | undefined;
   private readonly authHeader: string;
   private readonly authPrefix: string;
   private readonly headers: Record<string, string>;
@@ -148,6 +158,7 @@ export class OpenAiCompatibleClient implements LlmClient {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
     this.defaultModel = options.defaultModel ?? profile?.defaultModel ?? 'gpt-4o-mini';
+    this.imageModel = options.imageModel;
     this.authHeader = profile?.authHeader ?? 'Authorization';
     this.authPrefix = profile?.authPrefix ?? 'Bearer ';
     this.headers = { ...(profile?.extraHeaders ?? {}), ...(options.extraHeaders ?? {}) };
@@ -362,6 +373,121 @@ export class OpenAiCompatibleClient implements LlmClient {
   private async backoff(attempt: number): Promise<void> {
     const delay = Math.min(300 * 2 ** attempt, 3_000);
     await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+
+  /**
+   * 图像生成，走 `/images/generations`。
+   *
+   * 供应商差异在**本方法内吸收**，调用方只认"拿到图像字节"：
+   *   - 有的返回 `b64_json`（OpenAI 官方 gpt-image 系）
+   *   - 有的返回 `url`（部分网关）。这种情况下由本方法**再抓一次**把字节取回来，
+   *     否则调用方得自己处理"产物是个会过期的外链"这件事
+   *
+   * 不做重试：图像生成按张计费，静默重试会在调用方不知情的情况下重复扣费。
+   */
+  async generateImage(request: ImageRequest): Promise<ImageResponse> {
+    const startedAt = Date.now();
+    const model = request.model ?? this.imageModel;
+    if (model === undefined || model === '') {
+      throw new LlmError(
+        '未配置图像模型（设 LLM_IMAGE_MODEL 或调用时指定 model）',
+        'BAD_REQUEST',
+      );
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const onExternalAbort = (): void => controller.abort();
+    request.signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    try {
+      const body: Record<string, unknown> = {
+        model,
+        prompt: request.prompt,
+        n: request.n ?? 1,
+      };
+      if (request.size !== undefined) body['size'] = request.size;
+
+      const response = await this.fetchImpl(`${this.baseUrl}/images/generations`, {
+        method: 'POST',
+        headers: this.buildHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new LlmError(
+          `图像生成失败 HTTP ${response.status}: ${text.slice(0, 300)}`,
+          reasonForStatus(response.status),
+        );
+      }
+
+      let raw: unknown;
+      try {
+        raw = await response.json();
+      } catch (error) {
+        throw new LlmError('图像生成响应不是合法 JSON', 'BAD_RESPONSE', { cause: error });
+      }
+
+      const data =
+        raw !== null && typeof raw === 'object' && Array.isArray((raw as { data?: unknown }).data)
+          ? ((raw as { data: unknown[] }).data as unknown[])
+          : [];
+
+      const images: GeneratedImage[] = [];
+      for (const entry of data) {
+        if (entry === null || typeof entry !== 'object') continue;
+        const record = entry as Record<string, unknown>;
+        const b64 = record['b64_json'];
+        if (typeof b64 === 'string' && b64 !== '') {
+          images.push({
+            bytes: Buffer.from(b64, 'base64'),
+            mimeType: 'image/png',
+            source: 'b64',
+          });
+          continue;
+        }
+        const url = record['url'];
+        if (typeof url === 'string' && url !== '') {
+          // 网关返回外链：这里就抓回来，避免把会过期的 URL 当产物。
+          const fetched = await this.fetchImpl(url, { signal: controller.signal });
+          if (!fetched.ok) {
+            throw new LlmError(
+              `图像链接下载失败 HTTP ${fetched.status}`,
+              reasonForStatus(fetched.status),
+            );
+          }
+          const mimeType = fetched.headers.get('content-type') ?? 'image/png';
+          images.push({
+            bytes: new Uint8Array(await fetched.arrayBuffer()),
+            mimeType: mimeType.split(';')[0]?.trim() ?? 'image/png',
+            source: 'url',
+            url,
+          });
+        }
+      }
+
+      if (images.length === 0) {
+        throw new LlmError(
+          '图像生成响应里既没有 b64_json 也没有 url',
+          'BAD_RESPONSE',
+        );
+      }
+
+      return { images, model, latencyMs: Date.now() - startedAt, raw };
+    } catch (error) {
+      if (error instanceof LlmError) throw error;
+      const timedOut = controller.signal.aborted;
+      throw new LlmError(
+        timedOut ? `图像生成超时（${this.timeoutMs}ms）` : '图像生成请求失败',
+        timedOut ? 'TIMEOUT' : 'UNREACHABLE',
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timer);
+      request.signal?.removeEventListener('abort', onExternalAbort);
+    }
   }
 
   async health(): Promise<{ readonly ok: boolean; readonly detail: string }> {
