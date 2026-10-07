@@ -8,6 +8,7 @@ import type {
   Artifact,
   EnvType,
   HealthResponse,
+  ProjectDto,
   RunListItem,
   RunRecord,
   ToolSpecDto,
@@ -95,6 +96,21 @@ export const api = {
 
   listRuns(): Promise<{ runs: RunListItem[] }> {
     return request<{ runs: RunListItem[] }>('/api/runs');
+  },
+
+  /** 项目维度视图：运行按 `projectId` 分组。 */
+  listProjects(): Promise<{ projects: ProjectDto[] }> {
+    return request<{ projects: ProjectDto[] }>('/api/projects');
+  },
+
+  /**
+   * 项目导出 ZIP 的地址。
+   *
+   * 返回地址而不是直接下载：导出是 GET，交给浏览器原生下载即可，
+   * 不必先取到内存再构造 Blob 触发下载。
+   */
+  exportProjectUrl(projectId: string): string {
+    return `/api/projects/${encodeURIComponent(projectId)}/export`;
   },
 
   getRun(runId: string): Promise<RunRecord> {

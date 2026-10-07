@@ -23,6 +23,7 @@ import {
   type ToolRegistry,
 } from '@mediasandbox/orchestrator';
 import { RunStore, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
+import { createZip, type ZipEntry } from './zip.js';
 
 export interface ServerDeps {
   readonly registry: ToolRegistry;
@@ -349,6 +350,122 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
     res.json(serializeRun(record));
+  });
+
+  /**
+   * 项目视图：把运行按 `projectId` 分组。
+   *
+   * 与 `/api/runs` 的区别是**视角**：那里是"每次运行"的流水，
+   * 这里是"每个项目"的集合 —— 一个项目可能跑过多次（重试、换方案、改目标重来），
+   * 项目页要把这些归到一起看。
+   */
+  app.get('/api/projects', (_req: Request, res: Response) => {
+    const byProject = new Map<string, RunRecord[]>();
+    for (const run of store.list()) {
+      const list = byProject.get(run.projectId) ?? [];
+      list.push(run);
+      byProject.set(run.projectId, list);
+    }
+
+    const projects = [...byProject.entries()].map(([projectId, runs]) => {
+      // 最近一次运行决定项目的展示状态 —— 项目"现在是什么样"看最后一次。
+      const latest = runs[0]!;
+      const artifacts = runs.flatMap((r) =>
+        r.artifacts.map((a) => ({ ...a, runId: r.id })),
+      );
+      return {
+        projectId,
+        goal: latest.goal,
+        envType: latest.envType,
+        provider: latest.provider,
+        status: latest.status,
+        runCount: runs.length,
+        artifactCount: artifacts.length,
+        startedAt: latest.startedAt,
+        updatedAt: Math.max(...runs.map((r) => r.finishedAt ?? r.startedAt)),
+        runs: runs.map((r) => ({
+          id: r.id,
+          goal: r.goal,
+          envType: r.envType,
+          status: r.status,
+          startedAt: r.startedAt,
+          finishedAt: r.finishedAt,
+          artifactCount: r.artifacts.length,
+        })),
+      };
+    });
+
+    projects.sort((a, b) => b.updatedAt - a.updatedAt);
+    res.json({ projects });
+  });
+
+  /**
+   * 导出项目产物为 ZIP。
+   *
+   * 只导出**当前保留期内**的产物：沙盒按额度回收（见 `sandboxRetention`），
+   * 超期的产物读不到，这时如实跳过并在响应头里说明，而不是产出一个
+   * 少文件的包让人以为导出成功了。
+   */
+  app.get('/api/projects/:projectId/export', async (req: Request, res: Response) => {
+    const projectId = paramOf(req, 'projectId');
+    const runs = store.list().filter((r) => r.projectId === projectId);
+    if (runs.length === 0) {
+      errorResponse(res, 404, '项目不存在');
+      return;
+    }
+
+    const entries: ZipEntry[] = [];
+    let skipped = 0;
+
+    for (const run of runs) {
+      const provider = deps.providers[run.provider];
+      const sandboxId = sandboxIdByRun.get(run.id);
+      if (provider === undefined || sandboxId === undefined) {
+        skipped += run.artifacts.length;
+        continue;
+      }
+      const handle = await provider.get(sandboxId);
+      if (handle === undefined) {
+        // 沙盒已被回收，这个 run 的产物读不到了。
+        skipped += run.artifacts.length;
+        continue;
+      }
+      for (const artifact of run.artifacts) {
+        try {
+          const bytes = await provider.readFile(handle, artifact.path);
+          // 包内路径带 run 前缀，避免多次运行的同名产物（都叫 artifacts/copy.md）互相覆盖。
+          const shortRun = run.id.replace(/^run-/, '');
+          entries.push({
+            path: `${projectId}/${shortRun}/${artifact.path.split('/').pop() ?? 'artifact'}`,
+            data: bytes,
+          });
+        } catch {
+          skipped += 1;
+        }
+      }
+    }
+
+    if (entries.length === 0) {
+      errorResponse(
+        res,
+        410,
+        '没有可导出的产物',
+        skipped > 0 ? `${skipped} 个产物所在的沙盒已被回收` : '该项目还没有产物',
+      );
+      return;
+    }
+
+    const zip = createZip(entries);
+    const safeName = projectId.replace(/[^\w.-]+/g, '_');
+    res.setHeader('content-type', 'application/zip');
+    res.setHeader(
+      'content-disposition',
+      `attachment; filename="${safeName}.zip"; filename*=UTF-8''${encodeURIComponent(safeName)}.zip`,
+    );
+    res.setHeader('content-length', String(zip.byteLength));
+    // 让调用方能知道有没有丢东西，而不是只能靠数文件个数。
+    if (skipped > 0) res.setHeader('x-mediasandbox-skipped', String(skipped));
+    res.send(zip);
   });
 
   app.get('/api/runs/:runId/artifacts', (req: Request, res: Response) => {

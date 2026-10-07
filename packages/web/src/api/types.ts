@@ -94,6 +94,36 @@ export interface RunListItem {
   readonly artifactCount: number;
 }
 
+/** 项目内的单次运行（`GET /api/projects` 里嵌的裁剪版）。 */
+export interface ProjectRunDto {
+  readonly id: string;
+  readonly goal: string;
+  readonly envType: string;
+  readonly status: RunStatus;
+  readonly startedAt: number;
+  readonly finishedAt?: number | undefined;
+  readonly artifactCount: number;
+}
+
+/**
+ * 项目（`GET /api/projects`）。
+ *
+ * 与 `RunListItem` 的区别是**视角**：那里是"每次运行"的流水，
+ * 这里是"每个项目"的集合 —— 一个项目可能跑过多次。
+ */
+export interface ProjectDto {
+  readonly projectId: string;
+  readonly goal: string;
+  readonly envType: string;
+  readonly provider: string;
+  readonly status: RunStatus;
+  readonly runCount: number;
+  readonly artifactCount: number;
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly runs: readonly ProjectRunDto[];
+}
+
 /** 工具规格（`GET /api/tools`）。 */
 export interface ToolSpecDto {
   readonly id: string;

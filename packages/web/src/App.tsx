@@ -10,12 +10,14 @@ import type { HealthResponse } from './api/types.js';
 import { Workbench } from './features/workbench/Workbench.js';
 import { SandboxConsole } from './features/sandbox/SandboxConsole.js';
 import { ToolCatalog } from './features/tools/ToolCatalog.js';
+import { ProjectManager } from './features/projects/ProjectManager.js';
 import { Spinner } from './ui/components.js';
 
-type Tab = 'workbench' | 'sandbox' | 'tools';
+type Tab = 'workbench' | 'projects' | 'sandbox' | 'tools';
 
 const TABS: readonly { id: Tab; label: string; hint: string }[] = [
   { id: 'workbench', label: '创作工作台', hint: '输入目标，看排布与产出' },
+  { id: 'projects', label: '项目与产物', hint: '文件树、成果导出、内置模板' },
   { id: 'sandbox', label: '沙盒环境', hint: '隔离环境与资源约束' },
   { id: 'tools', label: '工具链', hint: '决策层的候选集来自这里' },
 ];
@@ -139,6 +141,7 @@ export function App(): ReactNode {
 
       <main className="min-h-0 flex-1">
         {tab === 'workbench' && <Workbench />}
+        {tab === 'projects' && <ProjectManager />}
         {tab === 'sandbox' && <SandboxConsole health={health} />}
         {tab === 'tools' && <ToolCatalog />}
       </main>
