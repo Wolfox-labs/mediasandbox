@@ -1,15 +1,18 @@
 packages:
   - 'packages/*'
 
-# dockerode 的原生构建脚本处理。
+# 原生构建脚本白名单。
 #
-# 三者都是可选依赖，我们这条链路用不到：
+# 三个可选依赖我们这条链路用不到，明确设为 false：
 #   cpu-features  只在 ssh2 传输时用于加速，我们走本地 unix socket / named pipe
 #   ssh2          仅 Docker over SSH 时需要，本项目不涉及
 #   protobufjs    其 postinstall 只生成可选的类型定义，运行不需要
+# 留空会让 pnpm 每次 install 都报错中断，所以必须显式写 false。
 #
-# 明确设为 false 而不是留空：留空会让 pnpm 每次 install 都报错中断。
+# esbuild 相反，**必须允许**：它的 postinstall 负责放置平台原生二进制，
+# 不跑就没有可执行的 esbuild，Vite 起不来。
 allowBuilds:
   cpu-features: false
+  esbuild: true
   protobufjs: false
   ssh2: false

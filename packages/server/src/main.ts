@@ -11,10 +11,12 @@
  */
 import http from 'node:http';
 import path from 'node:path';
+import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_TOOLS,
   DEFAULT_POLICY,
+  DemoDecisionClient,
   RizzoFlowClient,
   StubDecisionClient,
   ToolRegistry,
@@ -32,6 +34,8 @@ import { createServer } from './app.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = path.resolve(HERE, '../../..', 'workspaces');
+/** 前端构建产物目录。构建过就由本服务托管，使访问地址只有一个。 */
+const WEB_DIST = path.resolve(HERE, '../../web/dist');
 
 function log(message: string): void {
   process.stdout.write(`[mediasandbox] ${message}\n`);
@@ -48,30 +52,56 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
   return value;
 }
 
-/** 决策层：默认连本地 rizzo-flow；显式设 STUB=1 时用桩（无模型也能跑通链路）。 */
+/**
+ * 决策层三选一：
+ *   - `MEDIASANDBOX_DECISION=demo`（默认）演示决策层：按目标关键词选工具，
+ *     让演示链路自洽（"做一个网页"确实产出网页）
+ *   - `MEDIASANDBOX_DECISION=stub` 固定回答的桩：与输入无关，用于测试
+ *   - `MEDIASANDBOX_DECISION=rizzo` 真实 rizzo-flow（需先部署）
+ */
 function buildDecision(): DecisionClient {
-  if (process.env['MEDIASANDBOX_STUB_DECISION'] === '1') {
-    log('决策层：使用桩实现（MEDIASANDBOX_STUB_DECISION=1）');
+  const mode = process.env['MEDIASANDBOX_DECISION'] ?? (process.env['MEDIASANDBOX_STUB_DECISION'] === '1' ? 'stub' : 'demo');
+
+  if (mode === 'stub') {
+    log('决策层：固定回答的桩（MEDIASANDBOX_DECISION=stub）');
     return new StubDecisionClient();
   }
-  const baseUrl = process.env['RIZZO_BASE_URL'] ?? 'http://127.0.0.1:8017';
-  const model = process.env['RIZZO_MODEL'] ?? 'rizzo-latest';
-  log(`决策层：RizzoFlowClient → ${baseUrl}（模型 ${model}）`);
-  return new RizzoFlowClient({ baseUrl, model });
+  if (mode === 'rizzo') {
+    const baseUrl = process.env['RIZZO_BASE_URL'] ?? 'http://127.0.0.1:8017';
+    const model = process.env['RIZZO_MODEL'] ?? 'rizzo-latest';
+    log(`决策层：RizzoFlowClient → ${baseUrl}（模型 ${model}）`);
+    return new RizzoFlowClient({ baseUrl, model });
+  }
+
+  log('决策层：演示模式（关键词判断，非真实模型；MEDIASANDBOX_DECISION=rizzo 可切真实模型）');
+  return new DemoDecisionClient();
 }
 
-/** 生成层：未配置 API key 时返回 undefined，编排层会走确定性工具。 */
+/**
+ * 生成层：未配置 API key 时返回 undefined，编排层会走确定性工具。
+ *
+ * 两种接法：
+ *   - 预置厂商：`LLM_PROVIDER=deepseek`（见 PROVIDERS 表）
+ *   - 任意 OpenAI 兼容端点：`LLM_BASE_URL=https://.../v1`（优先于 provider）
+ */
 function buildLlm(): LlmClient | undefined {
   const apiKey = process.env['LLM_API_KEY'];
   if (apiKey === undefined || apiKey === '') {
     log('生成层：未配置 LLM_API_KEY，生成式工具将不可用（确定性工具仍可工作）');
     return undefined;
   }
-  const provider = process.env['LLM_PROVIDER'] ?? 'deepseek';
+  const baseUrl = process.env['LLM_BASE_URL'];
   const model = process.env['LLM_MODEL'];
-  log(`生成层：OpenAiCompatibleClient（provider=${provider}）`);
+  // 显式给了 baseUrl 就按自定义端点接；否则用预置 profile。
+  const target =
+    baseUrl !== undefined && baseUrl !== ''
+      ? `自定义端点 ${baseUrl}`
+      : `provider=${process.env['LLM_PROVIDER'] ?? 'deepseek'}`;
+  log(`生成层：OpenAiCompatibleClient（${target}${model !== undefined ? `，模型 ${model}` : ''}）`);
   return new OpenAiCompatibleClient({
-    provider,
+    ...(baseUrl !== undefined && baseUrl !== ''
+      ? { baseUrl }
+      : { provider: process.env['LLM_PROVIDER'] ?? 'deepseek' }),
     apiKey,
     ...(model !== undefined ? { defaultModel: model } : {}),
   });
@@ -113,6 +143,11 @@ async function main(): Promise<void> {
   // 但必须设上限，否则每跑一次就永久多一个工作区（Local 目录 / Docker 容器）。
   const sandboxRetention = parseNonNegativeInt(process.env['SANDBOX_RETENTION'], 20);
 
+  // 前端构建产物存在就一并托管，让"可运行版本"是一个地址。
+  const webDistExists = await stat(WEB_DIST)
+    .then((s) => s.isDirectory())
+    .catch(() => false);
+
   const instance = createServer({
     registry,
     decision,
@@ -121,6 +156,7 @@ async function main(): Promise<void> {
     defaultProvider,
     policy: DEFAULT_POLICY,
     sandboxRetention: { maxRuns: sandboxRetention },
+    ...(webDistExists ? { staticDir: WEB_DIST } : {}),
   });
 
   const server = http.createServer(instance.app);
@@ -140,6 +176,9 @@ async function main(): Promise<void> {
   log(`  沙盒      ${defaultProvider}（可用: ${Object.keys(providers).join(', ')}）`);
   log(`  工作区    ${WORKSPACE_ROOT}`);
   log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
+  if (!webDistExists) {
+    log('  前端      未构建（跑 pnpm --filter @mediasandbox/web build 后即可经本服务访问）');
+  }
 
   const shutdown = (signal: string): void => {
     log(`收到 ${signal}，正在关闭`);

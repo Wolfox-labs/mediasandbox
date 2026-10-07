@@ -11,6 +11,7 @@
  */
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
+import path from 'node:path';
 import type { Server } from 'node:http';
 import type { EnvType, SandboxProvider } from '@mediasandbox/sandbox';
 import {
@@ -51,6 +52,11 @@ export interface ServerDeps {
         readonly maxRuns?: number | undefined;
       }
     | undefined;
+  /**
+   * 前端构建产物目录。给了就由本服务直接托管静态文件，
+   * 使"可运行版本"是单一地址（不需要另起前端服务器，也没有 CORS）。
+   */
+  readonly staticDir?: string | undefined;
 }
 
 export interface CreateServerResult {
@@ -227,6 +233,13 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+
+  // 静态前端（构建产物）。放在 API 路由之前，但只接管非 /api、非 /ws 的路径。
+  // 这样"可访问版本"是一个地址，不需要另起一个前端服务器，也没有 CORS。
+  const webRoot = deps.staticDir;
+  if (webRoot !== undefined) {
+    app.use(express.static(webRoot, { index: 'index.html' }));
+  }
 
   // ── 健康检查 ────────────────────────────────────────────────────────
   app.get('/api/health', async (_req: Request, res: Response) => {
@@ -405,9 +418,23 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         role: s.role,
         category: s.category,
         envTypes: s.envTypes,
+        // 端口声明也一并给出：前端要展示"这个工具需要什么、产出什么"，
+        // 而组装器连依赖正是靠它们（端口引用缺陷就出在这里）。
+        inputs: s.inputs,
+        outputs: s.outputs,
+        ...(s.costHint !== undefined ? { costHint: s.costHint } : {}),
+        ...(s.requiresCommands !== undefined ? { requiresCommands: s.requiresCommands } : {}),
       })),
     });
   });
+
+  // SPA 回退：非 /api、非 /ws 的 GET 一律交还 index.html。
+  // 必须注册在所有 API 路由**之后**，否则会把 /api/* 也吞掉。
+  if (webRoot !== undefined) {
+    app.get(/^\/(?!api\/|ws$).*/, (_req: Request, res: Response) => {
+      res.sendFile(path.join(webRoot, 'index.html'));
+    });
+  }
 
   return {
     app,

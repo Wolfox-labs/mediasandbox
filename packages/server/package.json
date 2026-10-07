@@ -15,7 +15,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.json && node --test \"dist/**/*.test.js\"",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "start:env": "node --env-file-if-exists=../../.env dist/main.js"
   },
   "dependencies": {
     "@mediasandbox/orchestrator": "workspace:*",

@@ -10,6 +10,9 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
+    "dev": "pnpm --filter @mediasandbox/web dev",
+    "start": "node --env-file-if-exists=.env packages/server/dist/main.js",
+    "dev:all": "node scripts/dev-all.mjs",
     "clean": "pnpm -r exec node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "devDependencies": {
