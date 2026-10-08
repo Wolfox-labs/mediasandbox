@@ -42,6 +42,7 @@ import type { PageSpec } from './page-spec.js';
 import { extractTemplate, type TemplateSpec } from './template-spec.js';
 import { Orchestrator, type RunResult } from '../orchestrator.js';
 import { DemoDecisionClient } from '../decision/demo-client.js';
+import { MockLlmClient } from '../testing/mock-llm.js';
 import type { DecisionBatchResult, DecisionClient } from '../decision/types.js';
 import { planLayers } from '../plan/types.js';
 
@@ -703,6 +704,95 @@ describe('结构化链路：带指定结构重跑', () => {
       result.plan?.rationale.some((line) => line.includes('结构由调用方给定')),
       `计划依据里没说明结构来源：${(result.plan?.rationale ?? []).join(' | ')}`,
     );
+    await sandbox.destroy(result.handle);
+  });
+});
+
+/**
+ * 「定点重做」：只重填点名的块，其余块**一字不改**。
+ *
+ * 这里刻意开着生成层跑：如果其余块也被重填，它们的文案会被生成层覆盖成
+ * `MockLlmClient` 的固定文本——而下面断言的是**原来那句还在**。
+ * 关掉生成层来验这件事是没有意义的：确定性填充本来就"看起来没变"。
+ */
+describe('结构化链路：定点重做', () => {
+  it('只有点名的块被重填，其余块原样保留', async () => {
+    const pool = createBlockRegistry();
+    const llm = new MockLlmClient({ defaultText: '生成的内容' });
+    const pageSpec: PageSpec = {
+      projectId: 'e2e-redo',
+      goal: '做一个产品介绍落地页',
+      templateId: null,
+      candidateBlockIds: ['hero', 'cta'],
+      blocks: [
+        {
+          id: 'b1',
+          type: 'hero',
+          slots: { title: { kind: 'text', text: '原样保留的标题' }, subtitle: { kind: 'text', text: '原样保留的副标题' } },
+          status: 'pending',
+          sources: {},
+        },
+        { id: 'b2', type: 'cta', slots: {}, status: 'pending', sources: {} },
+      ],
+      qualityScore: null,
+      createdAt: 0,
+    };
+
+    const result = await new Orchestrator().run(
+      {
+        projectId: 'e2e-redo',
+        goal: '做一个产品介绍落地页',
+        envType: 'webpage',
+        blocks: pool,
+        pageSpec,
+        // 只重做 b2；b1 该被透传。
+        redoBlockIds: ['b2'],
+        useGenerative: true,
+      },
+      { registry: registry(pool), decision: decision(), sandbox, llm },
+    );
+
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+
+    // ── 计划形状：一个填充节点 + 一个透传节点 ──────────────────────────
+    const fillNodes = (result.plan?.nodes ?? []).filter((n) => n.toolId === 'fill-block');
+    const passthrough = (result.plan?.nodes ?? []).filter((n) => n.toolId === 'passthrough-block');
+    // 只数**数量**，不认节点序号：透传节点也占序号，写死 n1 会把序号当成语义。
+    assert.equal(fillNodes.length, 1, `重做只该有一个填充节点：${fillNodes.map((n) => n.id).join(',')}`);
+    assert.match(fillNodes[0]?.note ?? '', /b2/, '被填充的不是点名的那个块');
+    assert.equal(passthrough.length, 1, 'b1 应当是透传节点');
+    assert.match(passthrough[0]?.note ?? '', /b1/, '被透传的不是其余那个块');
+    assert.ok(
+      (result.plan?.rationale ?? []).some((line) => line.includes('定点重做')),
+      '计划依据里没说明这是定点重做',
+    );
+
+    // ── 产物：b1 的原句还在，b2 是生成出来的 ────────────────────────────
+    const html = await readIndexHtml(result);
+    assert.ok(html.includes('原样保留的标题'), 'b1 的内容被改掉了——它本该原样保留');
+    assert.ok(html.includes('生成的内容'), 'b2 没有被重填（生成层没被调用）');
+    // 别把"没重填"误读成"生成层挂了"：它确实被调过，只是只调在 b2 上。
+    assert.ok(llm.calls.length > 0, '生成层一次都没被调用');
+
+    await sandbox.destroy(result.handle);
+  });
+
+  it('没给 redoBlockIds 时行为不变：每块都填', async () => {
+    const pool = createBlockRegistry();
+    const result = await new Orchestrator().run(
+      {
+        projectId: 'e2e-redo-none',
+        goal: '做一个产品介绍落地页',
+        envType: 'webpage',
+        blocks: pool,
+        candidateBlockIds: ['hero', 'cta'],
+        maxBlocks: 2,
+      },
+      { registry: registry(pool), decision: decision(), sandbox },
+    );
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    const passthrough = (result.plan?.nodes ?? []).filter((n) => n.toolId === 'passthrough-block');
+    assert.equal(passthrough.length, 0, '没要求重做却出现了透传节点');
     await sandbox.destroy(result.handle);
   });
 });

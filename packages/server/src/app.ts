@@ -25,6 +25,7 @@ import {
   builtinBlockIds,
   extractTemplate,
   type BlockGroup,
+  type BlockInstance,
   type BlockRegistry,
   type BlockSpec,
   type DecisionClient,
@@ -42,7 +43,9 @@ import { BlockInputError, parseBlockSpec } from './block-input.js';
 import {
   StructureInputError,
   applyStructureOps,
+  buildRedoStructureInput,
   parsePageSpecInput,
+  parseRedoBlockIds,
   parseStructureOps,
   validateStructureInput,
 } from './structure-input.js';
@@ -351,6 +354,52 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
   }
 
+  /**
+   * 读回某次运行留下的分块内容（`src/blocks/<id>.json`，`fill-block` 的落点）。
+   *
+   * 读不到就**如实说清是哪一环断了**（沙盒被回收 / 句柄找不回 / 没有分块文件），
+   * 而不是拿一份空内容去跑——那会把"重做一块"悄悄变成"整页重来"。
+   */
+  async function readSavedBlocks(
+    record: RunRecord,
+  ): Promise<{ blocks: Map<string, BlockInstance> } | { error: string; detail: string }> {
+    const provider = deps.providers[record.provider];
+    if (provider === undefined) {
+      return { error: `这次运行用的 provider 不在本进程里: ${record.provider}`, detail: '读不回块内容' };
+    }
+    if (record.sandboxId === undefined) {
+      return { error: '这次运行没有记下沙盒 id', detail: '读不回块内容' };
+    }
+    const handle = await provider.get(record.sandboxId);
+    if (handle === undefined) {
+      return {
+        error: '沙盒已不在了，读不到块的现成内容',
+        detail:
+          `沙盒 ${record.sandboxId} 可能已按保留额度回收；` +
+          '被中断的运行会在启动时自动接管，其余的要等它下次重跑',
+      };
+    }
+
+    let files: Awaited<ReturnType<SandboxProvider['listFiles']>>;
+    try {
+      files = await provider.listFiles(handle, 'src/blocks/*.json');
+    } catch (error) {
+      return { error: '读取分块内容失败', detail: String(error) };
+    }
+
+    const blocks = new Map<string, BlockInstance>();
+    for (const file of files) {
+      try {
+        const raw = await provider.readFile(handle, file.path);
+        const parsed = JSON.parse(new TextDecoder().decode(raw)) as BlockInstance;
+        if (typeof parsed.id === 'string') blocks.set(parsed.id, parsed);
+      } catch {
+        // 单个坏文件不该让整次重做失败：那一块会被当成"没有内容"重新填。
+      }
+    }
+    return { blocks };
+  }
+
   function broadcast(runId: string, event: OrchestrationEvent): void {
     const payload = JSON.stringify(toWireEvent(runId, event));
     for (const [socket, filter] of subscribers) {
@@ -520,7 +569,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   });
 
   // ── 提交运行 ────────────────────────────────────────────────────────
-  app.post('/api/runs', (req: Request, res: Response) => {
+  app.post('/api/runs', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const goal = typeof body['goal'] === 'string' ? body['goal'].trim() : '';
     if (goal === '') {
@@ -536,6 +585,58 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
 
+    // 两种"结构不由模型决定"的输入方式，最后都落到 `structureInput` 上：
+    //   - `redoFrom` + `blockIds`：只重做某次运行里的几块
+    //   - `pageSpec`：照一份完整的结构跑
+    let structureInput: ReturnType<typeof parsePageSpecInput> | undefined;
+
+    // ── 定点重做：从某次运行读回块的现成内容，只重填点名的块 ──────────────
+    //
+    // 与 `pageSpec` 并列的另一种输入：调用方只说"把哪一次运行的哪几块重做"，
+    // 内容由服务端从**沙盒里那一份**读回来——比"发下去再发上来"少一圈，
+    // 也不会出现"传回来的内容和沙盒里的不一样"。
+    let redoBlockIds: readonly string[] | undefined;
+    if (body['redoFrom'] !== undefined) {
+      if (envType !== 'webpage') {
+        errorResponse(res, 400, 'redoFrom 只对 webpage 环境有意义', `envType 是 ${envType}`);
+        return;
+      }
+      if (typeof body['redoFrom'] !== 'string') {
+        errorResponse(res, 400, 'redoFrom 必须是运行 id 字符串');
+        return;
+      }
+      const source = store.get(body['redoFrom']);
+      if (source === undefined) {
+        errorResponse(res, 404, `找不到要重做的运行: ${body['redoFrom']}`);
+        return;
+      }
+      if (source.structure === undefined) {
+        errorResponse(res, 409, '那次运行没有结构化留痕', '只有 webpage 环境的结构化链路才有块可重做');
+        return;
+      }
+
+      try {
+        redoBlockIds = parseRedoBlockIds(body['blockIds'], source.structure.page);
+      } catch (error) {
+        if (error instanceof StructureInputError) {
+          errorResponse(res, 400, error.message);
+          return;
+        }
+        throw error;
+      }
+
+      const saved = await readSavedBlocks(source);
+      if ('error' in saved) {
+        errorResponse(res, 409, saved.error, saved.detail);
+        return;
+      }
+      structureInput = buildRedoStructureInput({
+        structure: source.structure,
+        blocks: saved.blocks,
+        targetIds: redoBlockIds,
+      });
+    }
+
     // ── 既定结构：「带指定 PageSpec 重跑」的入口 ─────────────────────────
     //
     // **必须显式传 webpage**：给个 auto 再让结构被另一条链路静默忽略，正是
@@ -543,7 +644,6 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     //
     // 解析放在这里、组装放到后面：先把外部输入验完再 `store.create`，
     // 否则一个 400 会留下一条永远 queued 的运行记录。
-    let structureInput: ReturnType<typeof parsePageSpecInput> | undefined;
     if (body['pageSpec'] !== undefined) {
       if (envType !== 'webpage') {
         errorResponse(
@@ -665,6 +765,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
         // 截图默认关：要求了才挂节点（与 useGenerative 同一条纪律）。
         ...(typeof body['screenshot'] === 'boolean' ? { screenshot: body['screenshot'] } : {}),
+        // 定点重做：只有这些块挂填充节点，其余块原样透传。
+        ...(redoBlockIds !== undefined ? { redoBlockIds } : {}),
         // 既定结构：带上它，结构**不再由决策模型决定**（templateId / candidateBlockIds /
         // maxBlocks 也就一并被盖过）。projectId 与 goal 取本次运行的：
         // 结构是上一次的产出，而这次要按这次的目标填、写进这次的沙盒。
@@ -702,9 +804,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     res.status(202).json({
       runId,
       status: 'queued',
-      ...(ignored.length > 0
-        ? { note: `已按 pageSpec 跑，以下入参被忽略：${ignored.join('、')}` }
-        : {}),
+      ...(redoBlockIds !== undefined
+        ? { note: `定点重做：只重填 ${redoBlockIds.join('、')}，其余区块原样保留` }
+        : ignored.length > 0
+          ? { note: `已按 pageSpec 跑，以下入参被忽略：${ignored.join('、')}` }
+          : {}),
     });
   });
 

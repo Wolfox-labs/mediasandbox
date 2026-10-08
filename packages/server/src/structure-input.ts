@@ -287,6 +287,90 @@ export function validateStructureInput(
   );
 }
 
+// ── 入口 3：定点重做 ────────────────────────────────────────────────────
+
+/**
+ * 拼出「定点重做」要用的结构：**目标块清空，其余块带上现成内容**。
+ *
+ * ## 为什么要在这里拼，而不是让前端传整份结构
+ *
+ * 块的现成内容躺在沙盒的 `src/blocks/<id>.json` 里（那是 `fill-block` 的落点），
+ * 而前端手里只有压缩视图（块只有 id/type/status）。让前端把内容传回来，
+ * 就得先把内容发下去再发上来——多一圈，还多一个"传回来的和沙盒里的不一样"的坑。
+ *
+ * ## 为什么要给其余块标上 `deterministic`
+ *
+ * 填充器的生成式那一遍**不看内容是否已经存在**（见 `applyGenerated`），
+ * 只要这一趟带生成层、slot 没说"确定性"，它就会重写一遍。
+ * 于是"重做一块"会变成"整页重新生成一遍"——既花钱，又把没点名的块改坏。
+ * 标成 `deterministic` 就是把这个意图写进数据：**这几块这趟不花钱**。
+ */
+export function buildRedoStructureInput(args: {
+  readonly structure: { readonly page: PageSpec };
+  readonly blocks: ReadonlyMap<string, BlockInstance>;
+  readonly targetIds: readonly string[];
+}): StructureInput {
+  const targets = new Set(args.targetIds);
+  const blocks = args.structure.page.blocks.map((block) => {
+    if (targets.has(block.id)) {
+      // 内容与状态一起清掉：这一趟就是要重新填它。
+      return { id: block.id, type: block.type, slots: {}, status: 'pending' as const, sources: {} };
+    }
+
+    const saved = args.blocks.get(block.id);
+    if (saved === undefined) {
+      // 内容没落盘（上次填充失败、或被跳过）：它本来就没东西可留，
+      // 顺手在这一趟补上，而不是把"空"当成"要保留的内容"。
+      return { ...block, slots: {}, status: 'pending' as const, sources: {} };
+    }
+
+    const slotNames = Object.keys(saved.slots);
+    const plans: Record<string, SlotFillPlan> = {};
+    for (const name of slotNames) plans[name] = 'deterministic';
+
+    return {
+      ...block,
+      slots: saved.slots,
+      status: 'filled' as const,
+      sources: saved.sources,
+      ...(slotNames.length > 0 ? { slotPlans: plans } : {}),
+    };
+  });
+
+  return {
+    blocks,
+    templateId: args.structure.page.templateId,
+    qualityScore: args.structure.page.qualityScore,
+  };
+}
+
+/**
+ * 校验"要重做哪些块"。
+ *
+ * 空列表直接拒：**"重做零块"没有意义**，而静默跑一次全量填充是更坏的结果
+ * （用户以为只重做一块，实际整页重来）。
+ */
+export function parseRedoBlockIds(raw: unknown, page: PageSpec): readonly string[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    fail('blockIds 必须是非空数组：不指定要重做哪一块，"定点重做"就没有意义');
+  }
+  const known = new Set(page.blocks.map((b) => b.id));
+  const ids: string[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (typeof item !== 'string' || item.trim() === '') {
+      fail(`blockIds[${index}] 必须是非空字符串`);
+    }
+    if (!known.has(item)) {
+      fail(
+        `blockIds[${index}] 指向的区块不存在: ${item}` +
+          `（这次运行的区块：${[...known].join('、')}）`,
+      );
+    }
+    ids.push(item);
+  }
+  return ids;
+}
+
 // ── 入口 2：增量编辑 ────────────────────────────────────────────────────
 
 export type StructureOp =

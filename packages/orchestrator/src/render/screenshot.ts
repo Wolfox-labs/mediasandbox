@@ -18,12 +18,25 @@
  * 同时它逐字节确定：同样的尺寸永远是同一张图，可复现、可缓存、测试不用放宽比较。
  */
 import { deflateSync } from 'node:zlib';
+import type { SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
 
 export interface ScreenshotRequest {
   /** 要截的页面 HTML。占位实现不看内容，真实实现要拿它去渲染。 */
   readonly html: string;
   readonly width: number;
   readonly height: number;
+  /**
+   * 页面在沙盒里的路径。真实驱动**直接渲染沙盒里的那一份文件**，
+   * 而不是把 `html` 再写一遍——两份真相早晚会不一致。
+   */
+  readonly pagePath?: string | undefined;
+  /**
+   * 沙盒。占位驱动不需要它；真浏览器驱动**必须要**——浏览器要跑在沙盒那一侧，
+   * 否则"截图"就成了把用户页面拿到宿主机上渲染，边界白划了。
+   */
+  readonly sandbox?:
+    | { readonly provider: SandboxProvider; readonly handle: SandboxHandle }
+    | undefined;
 }
 
 export interface Screenshot {

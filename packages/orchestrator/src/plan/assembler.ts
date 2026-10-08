@@ -66,6 +66,13 @@ export interface AssembleRequest {
    */
   readonly screenshot?: boolean | undefined;
   /**
+   * **定点重做**：只重填这些块，其余块原样透传（见 `assembleStructured`）。
+   *
+   * 只在给了 `pageSpec`（结构里有其它块的现成内容）时才有意义：
+   * 没有内容可透传的话，"其余块"本来就得填。
+   */
+  readonly redoBlockIds?: readonly string[] | undefined;
+  /**
    * **既定结构**：给了它就照它跑，结构不再由决策模型决定。
    *
    * 这是"带指定 PageSpec 重跑"的入口（用户改完结构再执行、或换目标补跑一次）。

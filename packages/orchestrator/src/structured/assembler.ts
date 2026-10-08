@@ -29,6 +29,7 @@ import type { AssembleRequest, AssembleResult } from '../plan/assembler.js';
 const T = {
   fillBlock: 'fill-block',
   assemblePage: 'assemble-page',
+  passthrough: 'passthrough-block',
   verify: 'verify-artifact',
   screenshot: 'screenshot-page',
 } as const;
@@ -106,32 +107,61 @@ export async function assembleStructured(args: {
   );
 
   // ── 2. 每块一个节点，无依赖 → 同层并发 ───────────────────────────────
+  //
+  // **定点重做**：给了 `redoBlockIds` 时，只有被点名的块挂填充节点，
+  // 其余块挂**透传**节点——它们的内容已经在结构里了，再填一遍既花钱又可能把
+  // 好内容改坏。透传节点同样是"零依赖"，所以扇入顺序不变。
+  const redo = request.redoBlockIds === undefined ? undefined : new Set(request.redoBlockIds);
+  if (redo !== undefined && !registry.has(T.passthrough)) {
+    throw new PlanError(
+      `定点重做需要工具 ${T.passthrough}，但它未注册。结构化链路必须注册 STRUCTURED_TOOLS`,
+      'UNKNOWN_TOOL',
+    );
+  }
+
   const nodes: PlanNode[] = [];
   let cursor = 0;
   const fillNodeIds: string[] = [];
   const skeleton = serializeSkeleton(page);
 
   for (const [index, block] of page.blocks.entries()) {
-    const id = nodeId(cursor, T.fillBlock);
+    // 没给 `redoBlockIds` 时全部照常填充；给了就只填被点名的。
+    const mustFill = redo === undefined || redo.has(block.id);
+    const toolId = mustFill ? T.fillBlock : T.passthrough;
+    const blockJson = JSON.stringify(block);
+    const id = nodeId(cursor, toolId);
     fillNodeIds.push(id);
     nodes.push({
       id,
-      toolId: T.fillBlock,
-      inputs: {
-        // 该块的 JSON 由 planner 产出后**冻结**成字面量。它是一条决策记录：
-        // 结构是什么、决策层问了几个、都留在这里，便于复现与排查。
-        blockJson: { kind: 'literal', value: JSON.stringify(block) },
-        goal: { kind: 'literal', value: request.goal },
-        brand: { kind: 'literal', value: request.brand ?? '' },
-        index: { kind: 'literal', value: index },
-        useGenerative: { kind: 'literal', value: request.useGenerative === true },
-      },
+      toolId,
+      inputs: mustFill
+        ? {
+            // 该块的 JSON 由 planner 产出后**冻结**成字面量。它是一条决策记录：
+            // 结构是什么、决策层问了几个、都留在这里，便于复现与排查。
+            blockJson: { kind: 'literal', value: blockJson },
+            goal: { kind: 'literal', value: request.goal },
+            brand: { kind: 'literal', value: request.brand ?? '' },
+            index: { kind: 'literal', value: index },
+            useGenerative: { kind: 'literal', value: request.useGenerative === true },
+          }
+        : { blockJson: { kind: 'literal', value: blockJson } },
       // **空依赖**：块之间没有数据依赖，让执行器并发跑。
       dependsOn: [],
-      retryable: true,
-      note: `填充区块 ${block.id}（${block.type}）`,
+      // 透传不会失败，不该占重试额度。
+      retryable: mustFill,
+      note: mustFill
+        ? `填充区块 ${block.id}（${block.type}）`
+        : `保留区块 ${block.id}（${block.type}）`,
     });
     cursor += 1;
+  }
+
+  if (redo !== undefined) {
+    const kept = page.blocks.filter((b) => !redo.has(b.id)).length;
+    rationale.push(
+      `定点重做：只重填 ${page.blocks.length - kept} 块（${[...redo].join('、')}），` +
+        `其余 ${kept} 块原样透传`,
+    );
   }
 
   // ── 3. 扇入组装 ──────────────────────────────────────────────────────

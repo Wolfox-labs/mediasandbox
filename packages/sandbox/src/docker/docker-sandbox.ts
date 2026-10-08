@@ -55,6 +55,14 @@ const CONTAINER_WORKDIR = '/workspace';
 
 const TRUNCATION_MARKER = '\n...[输出被截断]...\n';
 
+/**
+ * 浏览器镜像：**不属于任何环境**，只被截图驱动旁挂起来跑一次。
+ *
+ * 与 `IMAGE_BY_ENV` 分开是有意的：项目容器的镜像不该背上几百 MB 的 chromium，
+ * 而浏览器也不该成为"跑网页"的前提。
+ */
+export const BROWSER_IMAGE = 'mediasandbox/browser:latest';
+
 /** 各环境对应的镜像名。由构建脚本产出。 */
 export const IMAGE_BY_ENV: Readonly<Record<EnvType, string>> = {
   frontend: 'mediasandbox/frontend:latest',

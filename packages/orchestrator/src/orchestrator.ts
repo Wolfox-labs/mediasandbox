@@ -85,6 +85,12 @@ export interface RunRequest {
    */
   readonly screenshot?: boolean | undefined;
   /**
+   * **定点重做**：只重填这些块，其余块原样保留。
+   *
+   * 与 `pageSpec` 搭配使用——结构里带着其余块的现成内容，才谈得上"原样保留"。
+   */
+  readonly redoBlockIds?: readonly string[] | undefined;
+  /**
    * **既定结构**：照它跑，结构不再由决策模型决定。
    *
    * "带指定 PageSpec 重跑"的入口——用户改完结构再执行时，模型不该把结构
@@ -402,6 +408,7 @@ export class Orchestrator {
             ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
             ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
             ...(request.screenshot !== undefined ? { screenshot: request.screenshot } : {}),
+            ...(request.redoBlockIds !== undefined ? { redoBlockIds: request.redoBlockIds } : {}),
             ...(request.pageSpec !== undefined ? { pageSpec: request.pageSpec } : {}),
             ...(request.template !== undefined ? { template: request.template } : {}),
             ...(request.blocks !== undefined ? { blocks: request.blocks } : {}),

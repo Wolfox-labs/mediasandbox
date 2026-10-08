@@ -1463,6 +1463,153 @@ describe('结构：带指定 PageSpec 重跑与定点编辑', () => {
 });
 
 /**
+ * 定点重做：**只重填点名的块**。
+ *
+ * 这里开着生成层跑：如果其余块也被重填，它们的文案会被 MockLlmClient 的固定文本
+ * 覆盖——而断言的是"原来那句还在"。关掉生成层验这件事没有意义：
+ * 确定性填充本来就"看起来没变"。
+ */
+describe('定点重做：只重填点名的块', () => {
+  it('redoFrom + blockIds：被点名的块重填，其余块一字不改', async () => {
+    const llm = new MockLlmClient({ defaultText: '生成的内容' });
+    const ctx = await startServer({ structured: true, llm });
+    try {
+      const created = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做一个产品介绍落地页',
+          envType: 'webpage',
+          // 用内置模板起手：桩决策层对"还要再来一块"默认答否，不套模板就只有一块，
+          // 而"定点"至少要两块才验得出来。
+          templateId: 'product-launch',
+          maxBlocks: 3,
+        }),
+      });
+      assert.equal(created.status, 202);
+      const { runId } = (await created.json()) as { runId: string };
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      const detail = (await (await fetch(`${ctx.origin}/api/runs/${runId}`)).json()) as {
+        goal: string;
+        status: string;
+        structure: { page: { blocks: { id: string; type: string }[] } } | null;
+      };
+      assert.equal(detail.status, 'succeeded', JSON.stringify(detail).slice(0, 300));
+      const ids = detail.structure?.page.blocks.map((b) => b.id) ?? [];
+      assert.ok(ids.length >= 2, `结构里的块太少，验不出"定点"：${ids.join(',')}`);
+      const target = ids[1]!;
+      const firstHtml = await (
+        await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/index.html`)
+      ).text();
+      const heroTitle = /<h1 class="ms-hero__title">([^<]*)<\/h1>/.exec(firstHtml)?.[1];
+
+      const redo = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: detail.goal,
+          envType: 'webpage',
+          redoFrom: runId,
+          blockIds: [target],
+          useGenerative: true,
+        }),
+      });
+      assert.equal(redo.status, 202);
+      const redoBody = (await redo.json()) as { runId: string; note?: string };
+      assert.match(redoBody.note ?? '', /定点重做/, '响应没说明这是一次定点重做');
+      assert.match(redoBody.note ?? '', new RegExp(target));
+      await waitForStatus(ctx.origin, redoBody.runId, ['succeeded', 'failed', 'escalated']);
+
+      const redoDetail = (await (
+        await fetch(`${ctx.origin}/api/runs/${redoBody.runId}`)
+      ).json()) as {
+        status: string;
+        planSummary?: { nodeId: string; toolId: string }[];
+      };
+      assert.equal(redoDetail.status, 'succeeded', JSON.stringify(redoDetail).slice(0, 300));
+
+      // 计划形状：恰好一个填充节点，其余全是透传。
+      const summary = redoDetail.planSummary ?? [];
+      assert.equal(
+        summary.filter((n) => n.toolId === 'fill-block').length,
+        1,
+        `重做只该有一个填充节点：${summary.map((n) => n.toolId).join(',')}`,
+      );
+      assert.equal(
+        summary.filter((n) => n.toolId === 'passthrough-block').length,
+        ids.length - 1,
+        '其余块应当逐个透传',
+      );
+
+      const redoHtml = await (
+        await fetch(`${ctx.origin}/api/runs/${redoBody.runId}/artifacts/index.html`)
+      ).text();
+      assert.ok(redoHtml.includes('生成的内容'), '被点名的块没有被重填（生成层没生效）');
+      if (heroTitle !== undefined && heroTitle !== '' && target !== ids[0]) {
+        assert.ok(
+          redoHtml.includes(heroTitle),
+          `非目标块的文案被改掉了（它本该原样保留）：${heroTitle}`,
+        );
+      }
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('blockIds 为空或指向不存在的块时 400，且不留运行记录', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const created = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做一个产品介绍落地页',
+          envType: 'webpage',
+          candidateBlockIds: ['hero', 'cta'],
+          maxBlocks: 2,
+        }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      for (const [blockIds, expected] of [
+        [[], /非空数组/],
+        [['no-such-block'], /不存在/],
+      ] as [unknown, RegExp][]) {
+        const response = await fetch(`${ctx.origin}/api/runs`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            goal: '做一个产品介绍落地页',
+            envType: 'webpage',
+            redoFrom: runId,
+            blockIds,
+          }),
+        });
+        assert.equal(response.status, 400, JSON.stringify(blockIds));
+        assert.match(String(((await response.json()) as { error?: string }).error ?? ''), expected);
+      }
+
+      // 未知的运行：404 而不是"悄悄全量跑一遍"。
+      const ghost = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: 'g',
+          envType: 'webpage',
+          redoFrom: 'run-does-not-exist',
+          blockIds: ['b1'],
+        }),
+      });
+      assert.equal(ghost.status, 404);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+/**
  * 截图：**要求了才做**。
  *
  * 默认关闭与"默认不调生成层"是同一条纪律。这里两头都验——只验"要求了有"的话，

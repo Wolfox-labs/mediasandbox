@@ -15,19 +15,23 @@ import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_TOOLS,
+  ChromiumScreenshotDriver,
   createStructuredTools,
   createTemplateRegistry,
   DEFAULT_POLICY,
+  defaultScreenshotDriver,
   DemoDecisionClient,
   RizzoFlowClient,
   SplitLlmClient,
   StubDecisionClient,
   ToolRegistry,
   OpenAiCompatibleClient,
+  type BrowserDocker,
   type DecisionClient,
   type LlmClient,
 } from '@mediasandbox/orchestrator';
 import {
+  BROWSER_IMAGE,
   DockerSandbox,
   LocalSandbox,
   type DockerApi,
@@ -170,9 +174,12 @@ function buildLlm(): LlmClient | undefined {
 async function buildProviders(): Promise<{
   providers: Record<string, SandboxProvider>;
   defaultProvider: string;
+  /** Docker 可用时把它交出来，供截图驱动旁挂浏览器容器用。 */
+  docker: BrowserDocker | undefined;
 }> {
   const local = new LocalSandbox({ rootDir: path.join(WORKSPACE_ROOT, 'local') });
   const providers: Record<string, SandboxProvider> = { local };
+  let docker: BrowserDocker | undefined;
 
   // Docker 是可选能力：装不上也要能起来（只有 local 可用）。
   try {
@@ -183,6 +190,7 @@ async function buildProviders(): Promise<{
       rootDir: path.join(WORKSPACE_ROOT, 'docker'),
       autoPull: false,
     });
+    docker = api as unknown as BrowserDocker;
     log('已启用 docker provider');
   } catch (error) {
     log(`docker provider 不可用，仅用 local：${String(error)}`);
@@ -190,7 +198,7 @@ async function buildProviders(): Promise<{
 
   const requested = process.env['SANDBOX_PROVIDER'] ?? 'local';
   const defaultProvider = providers[requested] !== undefined ? requested : 'local';
-  return { providers, defaultProvider };
+  return { providers, defaultProvider, docker };
 }
 
 /**
@@ -221,18 +229,27 @@ async function main(): Promise<void> {
   // 装晚了就只剩"跳过校验"这一条路，而没校验过的 block 进池子正是要防的事。
   const { blocks, externalBlocks, userTemplates } = await loadPools(persist);
 
-  // 工具注册表：通用工具 + 结构化制作工具。结构化那两条只在 webpage 环境可见
+  const { providers, defaultProvider, docker } = await buildProviders();
+
+  // 截图驱动：有 Docker 就用**真浏览器**（旁挂 chromium 容器渲染沙盒里的页面），
+  // 没有就退回确定性占位驱动。这不是"看运气"，而是按部署能力选实现——
+  // 能不能截图取决于这台机器有没有 Docker，而这件事在启动时就知道。
+  const screenshotDriver =
+    docker === undefined
+      ? defaultScreenshotDriver()
+      : new ChromiumScreenshotDriver({ docker });
+
+  // 工具注册表：通用工具 + 结构化制作工具。结构化那几条只在 webpage 环境可见
   // （它们声明了 `envTypes: ['webpage']`），所以放进同一个注册表不会污染其它链路。
   //
   // 工具必须装在这一个池子上，否则自定义 block 会重现
   // "规划器选得到、执行期说未注册"的断链。
   const registry = new ToolRegistry()
     .registerAll(BUILTIN_TOOLS)
-    .registerAll(createStructuredTools(blocks));
+    .registerAll(createStructuredTools(blocks, screenshotDriver));
   const templates = createTemplateRegistry(blocks, [...userTemplates]);
   const decision = buildDecision();
   const llm = buildLlm();
-  const { providers, defaultProvider } = await buildProviders();
 
   // 产物是从沙盒工作区实时读的，所以结束后要留一段时间才能下载。
   // 但必须设上限，否则每跑一次就永久多一个工作区（Local 目录 / Docker 容器）。
@@ -281,6 +298,13 @@ async function main(): Promise<void> {
   log(`  工作区    ${WORKSPACE_ROOT}`);
   log(`  交付物    ${PROJECTS_ROOT}（运行结束后落定一份，不随沙盒回收消失）`);
   log(`  block 池  ${blocks.size} 类，分 ${blocks.groups().length} 组（结构化制作链路，webpage 环境）`);
+  log(
+    `  截图      ${
+      screenshotDriver.placeholder
+        ? `占位驱动（未检测到 Docker，真浏览器截图不可用）`
+        : `chromium（旁挂容器渲染沙盒里的页面，镜像 ${BROWSER_IMAGE}）`
+    }`,
+  );
   log(`  模板池    ${templates.size} 套（${templates.specs().map((t) => t.id).join(', ')}）`);
   log(
     `  持久化    ${dataDir}（装载 ${restoredRuns} 条运行记录` +

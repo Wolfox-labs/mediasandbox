@@ -380,7 +380,15 @@ export function createScreenshotPageTool(driver: ScreenshotDriver): ToolRegistra
           ? runtime.inputs['height']
           : DEFAULT_VIEWPORT.height;
 
-      const shot = await driver.capture({ html, width, height });
+      const shot = await driver.capture({
+        html,
+        width,
+        height,
+        // 把沙盒一并交给驱动：真浏览器要**在沙盒那一侧**渲染，
+        // 而不是把用户页面拿到宿主机上跑一遍。
+        sandbox: { provider: runtime.sandbox, handle: runtime.handle },
+        pagePath: source,
+      });
       const file = 'artifacts/screenshot.png';
       await runtime.sandbox.writeFile(runtime.handle, file, shot.bytes);
 
@@ -393,6 +401,49 @@ export function createScreenshotPageTool(driver: ScreenshotDriver): ToolRegistra
           `截图 ${file}（${shot.width}×${shot.height}，${shot.bytes.byteLength} 字节，` +
           (shot.placeholder ? `占位驱动 ${shot.driver}：未接入真实浏览器` : `驱动 ${shot.driver}`) +
           `）`,
+      };
+    },
+  };
+}
+
+/**
+ * 透传一块：把已有的块 JSON 原样交出去。
+ *
+ * "定点重做"里，**没有**被点名的块不该再被填一遍（那既花钱又可能把好内容改坏），
+ * 但它们仍要进组装节点的扇入口——而扇入口只认节点产出。于是需要一个什么都不做、
+ * 只把既有内容递下去的节点。
+ *
+ * 它刻意不做任何加工：内容从哪来、对不对，都是调用方（重做入口）的事。
+ */
+export function createPassthroughBlockTool(): ToolRegistration {
+  return {
+    spec: {
+      id: 'passthrough-block',
+      label: '透传已有区块',
+      description: '把已有的区块内容原样交给组装节点，用于定点重做时保留其余区块',
+      envTypes: ['webpage'],
+      role: 'transform',
+      category: 'structured',
+      inputs: [
+        { name: 'blockJson', type: 'text', required: true, description: '既有的区块 JSON' },
+      ],
+      outputs: [{ name: 'block', type: 'json', required: true, description: '原样的区块' }],
+      costHint: 'fast',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      const blockJson = requireString(runtime.inputs, 'blockJson', 'passthrough-block');
+      const block = parseJson<BlockInstance>(blockJson, 'passthrough-block', '区块');
+      if (typeof block.id !== 'string' || typeof block.type !== 'string') {
+        throw new ToolError(
+          '工具 passthrough-block 的 blockJson 缺少 id 或 type',
+          'EXECUTION_FAILED',
+          'passthrough-block',
+        );
+      }
+      return {
+        outputs: { block: blockJson },
+        artifacts: [],
+        summary: `透传区块 ${block.id}（${block.type}）`,
       };
     },
   };
@@ -413,6 +464,7 @@ export function createStructuredTools(
   return [
     createFillBlockTool(blocks),
     createAssemblePageTool(blocks),
+    createPassthroughBlockTool(),
     createScreenshotPageTool(screenshotDriver),
   ].sort((a, b) => (a.spec.id < b.spec.id ? -1 : 1));
 }

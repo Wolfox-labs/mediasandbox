@@ -105,6 +105,13 @@ export {
   type ScreenshotRequest,
 } from './render/screenshot.js';
 export {
+  ChromiumScreenshotDriver,
+  chromiumDriverFor,
+  type BrowserContainer,
+  type BrowserDocker,
+  type ChromiumDriverOptions,
+} from './render/chromium.js';
+export {
   applyTemplate,
   builtinTemplates,
   createTemplateRegistry,
@@ -120,6 +127,7 @@ export {
 export {
   createAssemblePageTool,
   createFillBlockTool,
+  createPassthroughBlockTool,
   createScreenshotPageTool,
   createStructuredTools,
   STRUCTURED_TOOLS,

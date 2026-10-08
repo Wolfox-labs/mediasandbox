@@ -22,6 +22,7 @@ export { assertValidProjectId, resolveInside, toPosixRelative } from './util/pat
 // 调用方自己 `import Docker from 'dockerode'` 并传进 DockerSandboxOptions.docker。
 export {
   DockerSandbox,
+  BROWSER_IMAGE,
   IMAGE_BY_ENV,
   parseMemory,
   type DockerSandboxOptions,
