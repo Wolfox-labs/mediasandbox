@@ -382,6 +382,76 @@ describe('填充器：填出来的内容是完整的', () => {
     if (items?.kind === 'list') assert.deepEqual(items.items, ['一', '二']);
   });
 
+  it('决策层指定"确定性"的 slot 不调生成层——`slot_source` 那一问要有下文', async () => {
+    let calls = 0;
+    const generate = async (): Promise<{ text: string }> => {
+      calls += 1;
+      return { text: '生成层写的内容' };
+    };
+    const block: BlockInstance = {
+      ...pending('quote', {}),
+      slotPlans: { text: 'deterministic', attribution: 'generative' },
+    };
+    const filled = await fillBlock({
+      spec: specOf('quote'),
+      block,
+      goal: 'g',
+      brand: 'b',
+      options: { generate },
+      index: 0,
+      counts: {},
+    });
+    // 只有标了 generative 的 attribution 走了生成层。
+    assert.equal(calls, 1);
+    assert.equal(filled.sources['attribution'], 'generative');
+    assert.equal(filled.sources['text'], 'deterministic');
+  });
+
+  it('没问过 slotPlans 时保持原行为（零成本默认路径不受影响）', async () => {
+    let calls = 0;
+    const generate = async (): Promise<{ text: string }> => {
+      calls += 1;
+      return { text: '生成层写的内容' };
+    };
+    const filled = await fillBlock({
+      spec: specOf('quote'),
+      block: pending('quote', {}),
+      goal: 'g',
+      brand: 'b',
+      options: { generate },
+      index: 0,
+      counts: {},
+    });
+    // quote 的 text 与 attribution 都是文本类 → 两个都过生成层。
+    assert.equal(calls, 2);
+    assert.equal(filled.sources['text'], 'generative');
+  });
+
+  it('slotPlans 全标确定性时一次生成层都不调', async () => {
+    let calls = 0;
+    const generate = async (): Promise<{ text: string }> => {
+      calls += 1;
+      return { text: '不该被调用' };
+    };
+    const block: BlockInstance = {
+      ...pending('quote', {}),
+      slotPlans: { text: 'deterministic', attribution: 'deterministic' },
+    };
+    const filled = await fillBlock({
+      spec: specOf('quote'),
+      block,
+      goal: 'g',
+      brand: 'b',
+      options: { generate },
+      index: 0,
+      counts: {},
+    });
+    assert.equal(calls, 0);
+    assert.equal(filled.generativeCalls, 0);
+    // 页面依然是完整的：不生成不等于留空。
+    assert.ok(filled.block.slots['text'] !== undefined);
+  });
+
   it('标签页的标签与面板一一对应', async () => {
     const filled = await fillBlock({
       spec: specOf('tabs'),

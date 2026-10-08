@@ -80,6 +80,9 @@ export async function assembleStructured(args: {
     goal: request.goal,
     candidateBlockIds: candidates,
     ...(request.maxBlocks !== undefined ? { maxBlocks: request.maxBlocks } : {}),
+    // 让规划器知道"这次有没有生成层可用"：有才会去问 `slot_source`。
+    // 没生成层的时候问"要不要生成式"是个空问题，白花一次决策往返。
+    ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
     ...(request.template !== undefined ? { template: request.template } : {}),
     ...(request.context.constraints !== undefined
       ? { constraints: request.context.constraints }

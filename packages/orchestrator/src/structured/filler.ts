@@ -400,6 +400,14 @@ export async function fillBlock(args: {
   if (options.generate !== undefined) {
     const context: Record<string, string> = { goal, brand };
     for (const slot of spec.slots) {
+      // 决策层对"这个 slot 由谁实现"做过选择时，**以它为准**：
+      // 只有它明确说 `generative` 才调生成层。
+      //
+      // 这就是 `slot_source` 那一问存在的意义——"由谁实现"从"按 slot 类型硬编码"
+      // 变成一次真正的决策。没问过时（零成本默认路径）保持原行为：text/title/code
+      // 归生成层，link/literal 由下面的生成器自己拒掉。
+      if (block.slotPlans !== undefined && block.slotPlans[slot.name] !== 'generative') continue;
+
       const count = counts[slot.name] ?? countOf(slots[slot.name]);
       let result: GenerateSlotResult | null = null;
       try {

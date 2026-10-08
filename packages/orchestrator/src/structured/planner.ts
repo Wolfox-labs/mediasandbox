@@ -52,6 +52,7 @@ import {
   type BlockInstance,
   type BlockStatus,
   type PageSpec,
+  type SlotFillPlan,
   type SlotValue,
   type StructureFix,
 } from './page-spec.js';
@@ -61,8 +62,17 @@ export const STRUCTURE_QUESTIONS = {
   nextBlock: 'next_block',
   continueStruct: 'continue_structuring',
   slotCount: 'slot_count',
+  slotSource: 'slot_source',
   structureQuality: 'structure_quality',
 } as const;
+
+/**
+ * 可能走生成层的 slot 类型。
+ *
+ * 图像类**不在里面**：生图逐张计费，必须由显式开关控制，
+ * 不能因为"这个 slot 是图"就自动扣钱（与 `tools.ts` 的 slot 生成器同一条理由）。
+ */
+const GENERATIVE_ELIGIBLE: readonly SlotSpec['type'][] = ['text', 'title', 'code', 'list-text'];
 
 /**
  * `noul` 判定阈值。**刻意避开 0.5**。
@@ -79,6 +89,15 @@ const CLOSING_BLOCKS: readonly string[] = ['cta', 'footer'];
 
 /** 默认页面上限。防止模型在"要不要继续"上永远答"是"。 */
 export const DEFAULT_MAX_BLOCKS = 8;
+
+/**
+ * 结构评分低于它，就再给一轮补救机会。
+ *
+ * 0.4 与 `askQuality` 里"偏弱"的那一档对齐：那里把 `[0.4, 0.7)` 叫"一般"、
+ * `< 0.4` 叫"偏弱"。取 0.4 而不是 0.7，是因为**"一般"是正常结果**——
+ * 大多数页面结构就是"一般"，每次都补救会让这一问变成噪声。
+ */
+export const LOW_QUALITY_THRESHOLD = 0.4;
 
 /** 数量问题的确定性回落值。决策层弃权时用它。 */
 const FALLBACK_COUNT = 3;
@@ -149,6 +168,14 @@ export interface PlanStructureRequest {
   readonly decisionTimeoutMs?: number | undefined;
   /** 每轮结束回调。纯观察，抛错不影响规划。 */
   readonly onStep?: ((step: StructureStep) => void) | undefined;
+  /**
+   * 文案是否走生成层。
+   *
+   * **只影响一个问题**：值为 `true` 时才会向决策模型提 `slot_source`
+   * （"这个 slot 由生成层写还是确定性拼"）。为 `false`（默认，零成本路径）时
+   * 这一问根本不发——没有生成层可选的时候问"要不要生成式"是空问题。
+   */
+  readonly useGenerative?: boolean | undefined;
 }
 
 export interface PlanStructureResult {
@@ -424,43 +451,59 @@ export class StructurePlanner {
       lastSpec = picked;
       lastBlockId = blockId;
 
-      // ── "要几个" ──────────────────────────────────────────────────
+      // ── "要几个" 与 "由谁实现" ────────────────────────────────────
+      //
+      // 两者都以"选中了哪块"为前提，彼此没有依赖，所以**同批**问出去。
       const listSlots = picked.slots.filter((s) => s.countRange !== undefined);
-      if (listSlots.length > 0) {
-        const countResult = await this.askCounts({
+      const sourceSlots =
+        request.useGenerative === true
+          ? picked.slots.filter((s) => GENERATIVE_ELIGIBLE.includes(s.type))
+          : [];
+      if (listSlots.length > 0 || sourceSlots.length > 0) {
+        const blockResult = await this.askBlockQuestions({
           request,
           page,
           spec: picked,
           blockId,
           listSlots,
+          sourceSlots,
         });
         decisionCalls += 1;
-        decisionLatencyMs += countResult.latencyMs;
-        usage.inputTokens += countResult.usage.inputTokens;
-        usage.outputTokens += countResult.usage.outputTokens;
+        decisionLatencyMs += blockResult.latencyMs;
+        usage.inputTokens += blockResult.usage.inputTokens;
+        usage.outputTokens += blockResult.usage.outputTokens;
 
         page = {
           ...page,
           blocks: page.blocks.map((b) =>
             b.id === blockId
-              ? { ...b, slots: buildCountSlots(listSlots, countResult.counts) }
+              ? {
+                  ...b,
+                  slots: buildCountSlots(listSlots, blockResult.counts),
+                  // 没问过就不写这个字段——"问过且都答确定性"与"没问过"
+                  // 在填充器里是两种行为，不能混成一种。
+                  ...(sourceSlots.length > 0 ? { slotPlans: blockResult.plans } : {}),
+                }
               : b,
           ),
         };
         emit({
           round,
           kind: 'count_only',
-          questionIds: listSlots.map((s) => `${STRUCTURE_QUESTIONS.slotCount}:${s.name}`),
-          answers: countResult.answers,
+          questionIds: [
+            ...listSlots.map((s) => `${STRUCTURE_QUESTIONS.slotCount}:${s.name}`),
+            ...sourceSlots.map((s) => `${STRUCTURE_QUESTIONS.slotSource}:${s.name}`),
+          ],
+          answers: blockResult.answers,
           pickedBlockId: picked.id,
           continueProbability: null,
           continued: null,
-          counts: countResult.counts,
+          counts: blockResult.counts,
           score: null,
-          latencyMs: countResult.latencyMs,
-          rationale: countResult.rationale,
+          latencyMs: blockResult.latencyMs,
+          rationale: blockResult.rationale,
         });
-        rationale.push(`　└ ${countResult.rationale}`);
+        rationale.push(`　└ ${blockResult.rationale}`);
       }
 
       // ── 末尾块之后不再排 ──────────────────────────────────────────
@@ -491,12 +534,17 @@ export class StructurePlanner {
     // 它报得比这里准。
     const normalized = normalizePageSpec(page, this.blocks);
     page = normalized.page;
-    for (const fix of normalized.fixes) {
+    // 补救轮还会再规范化一次，两轮的修正合并成一个列表带出去。
+    const fixes: StructureFix[] = [...normalized.fixes];
+    for (const fix of fixes) {
       rationale.push(`版式规范化：${fix.detail}`);
     }
 
     // ── 结构定稿后评一次分（`score` 原语的落点） ──────────────────────
-    const quality = await this.askQuality(request, page);
+    //
+    // 评分不是"留个念"：它低到一定程度会**触发一次补救轮**（见下）。
+    // 否则这一问就是断头路——决策模型指出结构不好，然后什么也没发生。
+    let quality = await this.askQuality(request, page);
     decisionCalls += 1;
     decisionLatencyMs += quality.latencyMs;
     usage.inputTokens += quality.usage.inputTokens;
@@ -517,6 +565,74 @@ export class StructurePlanner {
     });
     rationale.push(quality.rationale);
 
+    // ── 低分补救：最多一轮 ──────────────────────────────────────────
+    //
+    // 触发条件是"模型自己给的判断"：它先说结构够了（`noul` 答停），
+    // 又给这个结构打了低分。两个答案互相矛盾，**以分数为准再给一轮机会**。
+    //
+    // 边界刻意收紧，避免变成"追求高分"的循环：
+    //   - 分数为 null（弃权）不触发——没有判断依据就不该动
+    //   - 已经因末尾块收尾 / 候选用尽 / 到 maxBlocks 而不触发
+    //   - **只做一轮**，补完重评一次就结束，不管新分是多少
+    const canRemediate =
+      quality.score !== null &&
+      quality.score < LOW_QUALITY_THRESHOLD &&
+      !structurallyClosed &&
+      page.blocks.length < maxBlocks;
+
+    if (canRemediate) {
+      rationale.push(
+        `结构评分 ${quality.score!.toFixed(3)} 低于 ${LOW_QUALITY_THRESHOLD}，触发一轮补救`,
+      );
+      const added = await this.remediate({
+        request,
+        page,
+        usedTypes,
+        candidateIds,
+        score: quality.score!,
+        emit,
+      });
+      if (added === null) {
+        rationale.push('补救轮：候选集里没有可补的块，放弃');
+      } else {
+        decisionCalls += added.calls;
+        decisionLatencyMs += added.latencyMs;
+        usage.inputTokens += added.usage.inputTokens;
+        usage.outputTokens += added.usage.outputTokens;
+        page = added.page;
+        usedTypes.push(...added.addedTypes);
+
+        // 补进来的块同样要过一遍规范化（它可能是 nav / footer），
+        // 也要重新评一次分——分数必须反映**最终**结构，不是补救前的那个。
+        const renorm = normalizePageSpec(page, this.blocks);
+        page = renorm.page;
+        for (const fix of renorm.fixes) {
+          fixes.push(fix);
+          rationale.push(`版式规范化：${fix.detail}`);
+        }
+
+        quality = await this.askQuality(request, page);
+        decisionCalls += 1;
+        decisionLatencyMs += quality.latencyMs;
+        usage.inputTokens += quality.usage.inputTokens;
+        usage.outputTokens += quality.usage.outputTokens;
+        emit({
+          round: page.blocks.length,
+          kind: 'quality',
+          questionIds: [STRUCTURE_QUESTIONS.structureQuality],
+          answers: { [STRUCTURE_QUESTIONS.structureQuality]: quality.raw },
+          pickedBlockId: added.addedTypes.at(-1) ?? null,
+          continueProbability: null,
+          continued: null,
+          counts: {},
+          score: quality.score,
+          latencyMs: quality.latencyMs,
+          rationale: quality.rationale,
+        });
+        rationale.push(quality.rationale);
+      }
+    }
+
     page = { ...page, qualityScore: quality.score };
 
     // 结构在交给填充之前先自校验一次。放到渲染后查，错误会埋进 HTML 里。
@@ -533,12 +649,189 @@ export class StructurePlanner {
       decisionLatencyMs,
       decisionCalls,
       usage,
-      fixes: normalized.fixes,
+      fixes,
     };
   }
 
-  /** 候选集里当前还能用的 block（排除已用过且不可重复的）。 */
-  private availableSpecs(candidateIds: readonly string[], usedTypes: readonly string[]): BlockSpec[] {
+  /**
+   * 低分补救：再问一轮"补一块什么"，把页面补完整。
+   *
+   * ## 为什么值得做
+   *
+   * `structure_quality` 此前是**断头路**：决策模型指出结构不好，然后什么也没发生。
+   * 一个只被记录、从不影响行为的判断，等于没问。
+   *
+   * ## 为什么是"再问一次"而不是"自动补一块"
+   *
+   * 自动补意味着**由代码决定结构**——那正是这个项目要消灭的病根（设计稿 §2.1）。
+   * 所以补救仍然走 `choice`：选什么由决策模型回答，只是把"你刚打了低分"这个
+   * 信息如实告诉它。红线不动。
+   *
+   * ## 失败即放弃，不抛错
+   *
+   * 补救是**锦上添花**：原结构本身是合法的、可交付的。这一轮出任何问题
+   * （候选空、模型不答）都应该退回原结构，而不是让整次运行失败。
+   */
+  private async remediate(args: {
+    readonly request: PlanStructureRequest;
+    readonly page: PageSpec;
+    readonly usedTypes: readonly string[];
+    readonly candidateIds: readonly string[];
+    readonly score: number;
+    readonly emit: (step: StructureStep) => void;
+  }): Promise<{
+    readonly page: PageSpec;
+    readonly addedTypes: readonly string[];
+    readonly calls: number;
+    readonly latencyMs: number;
+    readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
+  } | null> {
+    const available = this.availableSpecs(args.candidateIds, args.usedTypes);
+    if (available.length === 0) return null;
+
+    const pool = available;
+    const questions: Record<string, Question> = {};
+
+    const singlePick = pool.length === 1 ? pool[0]! : null;
+    if (singlePick === null) {
+      questions[STRUCTURE_QUESTIONS.nextBlock] = {
+        type: 'choice',
+        instructions:
+          `这个页面的结构评分只有 ${args.score.toFixed(3)}（偏低）。` +
+          `当前页面有 ${args.page.blocks.length} 块（${describePageSpec(args.page)}）。` +
+          '补上哪一块能让页面更完整？缺少收尾就补收尾，内容单薄就补内容块。',
+        criteria: Object.fromEntries(
+          pool.map((spec) => [
+            spec.id,
+            `[${BLOCK_GROUP_LABELS[spec.group]}] ${spec.label}：${spec.description}`,
+          ]),
+        ),
+      };
+    }
+
+    const asked = Object.keys(questions).length > 0;
+    let decided: DecisionBatchResult;
+    let calls = 0;
+    let latencyMs = 0;
+    const usage = { inputTokens: 0, outputTokens: 0 };
+    if (asked) {
+      try {
+        decided = await this.decision.decide(
+          this.buildContext(args.request, args.page),
+          questions,
+          args.request.decisionTimeoutMs !== undefined
+            ? { timeoutMs: args.request.decisionTimeoutMs }
+            : {},
+        );
+      } catch {
+        return null; // 补救失败即放弃
+      }
+      calls += 1;
+      latencyMs += decided.meta.latencyMs;
+      usage.inputTokens += decided.usage.inputTokens;
+      usage.outputTokens += decided.usage.outputTokens;
+    } else {
+      decided = noQuestionsAsked();
+    }
+
+    let picked: BlockSpec;
+    let pickRationale: string;
+    if (singlePick !== null) {
+      picked = singlePick;
+      pickRationale = `补救轮：唯一可用候选 ${picked.id}`;
+    } else {
+      const answer = decided.answers[STRUCTURE_QUESTIONS.nextBlock];
+      if (answer === undefined || answer.type !== 'choice') return null;
+      try {
+        picked = this.pickBlock(answer.value, answer.probabilities, pool);
+      } catch {
+        return null; // 模型选了候选外的块：补救轮不值得为此让整次运行失败
+      }
+      pickRationale = `补救轮：补上 ${picked.id}（${picked.label}）`;
+    }
+
+    const blockId = nextBlockId(args.page);
+    let page = appendBlock(args.page, {
+      id: blockId,
+      type: picked.id,
+      slots: {},
+      status: 'pending',
+      sources: {},
+    });
+
+    args.emit({
+      round: args.page.blocks.length,
+      kind: 'select',
+      questionIds: Object.keys(questions),
+      answers: asked
+        ? Object.fromEntries(Object.keys(questions).map((k) => [k, decided.answers[k]]))
+        : {},
+      pickedBlockId: picked.id,
+      continueProbability: null,
+      continued: null,
+      counts: {},
+      score: null,
+      latencyMs: decided.meta.latencyMs,
+      rationale: pickRationale,
+    });
+
+    // 补进来的块同样要问数量与"由谁实现"，否则它的列表型 slot 会缺项数。
+    const listSlots = picked.slots.filter((s) => s.countRange !== undefined);
+    const sourceSlots =
+      args.request.useGenerative === true
+        ? picked.slots.filter((s) => GENERATIVE_ELIGIBLE.includes(s.type))
+        : [];
+    if (listSlots.length > 0 || sourceSlots.length > 0) {
+      try {
+        const blockResult = await this.askBlockQuestions({
+          request: args.request,
+          page,
+          spec: picked,
+          blockId,
+          listSlots,
+          sourceSlots,
+        });
+        calls += 1;
+        latencyMs += blockResult.latencyMs;
+        usage.inputTokens += blockResult.usage.inputTokens;
+        usage.outputTokens += blockResult.usage.outputTokens;
+        page = {
+          ...page,
+          blocks: page.blocks.map((b) =>
+            b.id === blockId
+              ? {
+                  ...b,
+                  slots: buildCountSlots(listSlots, blockResult.counts),
+                  ...(sourceSlots.length > 0 ? { slotPlans: blockResult.plans } : {}),
+                }
+              : b,
+          ),
+        };
+        args.emit({
+          round: args.page.blocks.length,
+          kind: 'count_only',
+          questionIds: [
+            ...listSlots.map((s) => `${STRUCTURE_QUESTIONS.slotCount}:${s.name}`),
+            ...sourceSlots.map((s) => `${STRUCTURE_QUESTIONS.slotSource}:${s.name}`),
+          ],
+          answers: blockResult.answers,
+          pickedBlockId: picked.id,
+          continueProbability: null,
+          continued: null,
+          counts: blockResult.counts,
+          score: null,
+          latencyMs: blockResult.latencyMs,
+          rationale: blockResult.rationale,
+        });
+      } catch {
+        return null;
+      }
+    }
+
+    return { page, addedTypes: [picked.id], calls, latencyMs, usage };
+  }
+
+  /** 候选集里当前还能用的 block（排除已用过且不可重复的）。 */  private availableSpecs(candidateIds: readonly string[], usedTypes: readonly string[]): BlockSpec[] {
     const used = new Set(usedTypes);
     return this.blocks
       .filter({})
@@ -622,15 +915,22 @@ export class StructurePlanner {
     return hit;
   }
 
-  /** 问"各列表型 slot 要几项"。一次请求问全，共享 prefill。 */
-  private async askCounts(args: {
+  /**
+   * 问"各列表型 slot 要几项"与"各 slot 由谁实现"。一次请求问全，共享 prefill。
+   *
+   * 两个问题**同批**：它们都以"选中了哪块"为前提，彼此没有依赖。
+   * 分成两批只会白白多一次往返。
+   */
+  private async askBlockQuestions(args: {
     readonly request: PlanStructureRequest;
     readonly page: PageSpec;
     readonly spec: BlockSpec;
     readonly blockId: string;
     readonly listSlots: readonly SlotSpec[];
+    readonly sourceSlots: readonly SlotSpec[];
   }): Promise<{
     readonly counts: Record<string, number>;
+    readonly plans: Record<string, SlotFillPlan>;
     readonly answers: Record<string, unknown>;
     readonly latencyMs: number;
     readonly rationale: string;
@@ -647,6 +947,19 @@ export class StructurePlanner {
         range,
       };
     }
+    for (const slot of args.sourceSlots) {
+      questions[`${STRUCTURE_QUESTIONS.slotSource}:${slot.name}`] = {
+        type: 'choice',
+        instructions:
+          `页面上 ${args.spec.label}（${args.spec.id}）的「${slot.description}」` +
+          `该由谁来写？「生成层」写得具体但要花生成额度；「确定性」零成本、` +
+          `内容朴素但一定完整。需要贴合目标的表达就选生成层，套话够用就选确定性。`,
+        criteria: {
+          generative: '生成层写（调用模型，花生成额度，内容更贴合目标）',
+          deterministic: '确定性拼（零成本，内容朴素但完整、可复现）',
+        },
+      };
+    }
 
     // ── 发请求。`numeric` 不被支持时降级成 `choice` ───────────────────
     //
@@ -654,6 +967,8 @@ export class StructurePlanner {
     // 那种情况下**不能让整条链路失败**——"要几个"这个问题本身是合理的，
     // 只是问法要换。离散档位的候选集给出的信息量与数值问句几乎等价：
     // "3 项" 与 "中等（3 项左右）" 对结构决策是一回事。
+    //
+    // 降级时**保留 `slot_source` 问句**（它本来就是 choice），只把数量换成档位。
     const context = this.buildContext(args.request, args.page);
     const timeout =
       args.request.decisionTimeoutMs !== undefined
@@ -667,10 +982,15 @@ export class StructurePlanner {
     } catch (error) {
       if (!isUnsupportedPrimitive(error)) throw error;
       degraded = true;
-      decided = await this.decision.decide(context, choiceQuestionsFor(args.listSlots), timeout);
+      decided = await this.decision.decide(
+        context,
+        { ...choiceQuestionsFor(args.listSlots), ...sourceQuestionsOf(questions) },
+        timeout,
+      );
     }
 
     const counts: Record<string, number> = {};
+    const plans: Record<string, SlotFillPlan> = {};
     const answers: Record<string, unknown> = {};
     const notes: string[] = [];
     for (const slot of args.listSlots) {
@@ -710,13 +1030,28 @@ export class StructurePlanner {
       }
     }
 
+    for (const slot of args.sourceSlots) {
+      const key = `${STRUCTURE_QUESTIONS.slotSource}:${slot.name}`;
+      const answer = decided.answers[key];
+      answers[key] = answer;
+      if (answer === undefined || answer.type !== 'choice') {
+        throw new StructureError(`决策层未返回 ${key} 的答案`, 'INVALID_PAGE');
+      }
+      // 弃权时取概率最高的那个；再没有就回落到确定性——**零成本是默认值**。
+      const picked = answer.value ?? argmaxDeterministic(Object.keys(answer.probabilities), answer.probabilities);
+      const plan: SlotFillPlan = picked === 'generative' ? 'generative' : 'deterministic';
+      plans[slot.name] = plan;
+      notes.push(`${slot.name}→${plan === 'generative' ? '生成层' : '确定性'}`);
+    }
+
     return {
       counts,
+      plans,
       answers,
       latencyMs: decided.meta.latencyMs,
       rationale:
-        `问数量：${notes.join('，')}` +
-        (degraded ? '（本次决策层不支持 numeric，已降级为离散档位）' : ''),
+        `问该块：${notes.join('，')}` +
+        (degraded ? '（本次决策层不支持 numeric，数量已降级为离散档位）' : ''),
       usage: decided.usage,
     };
   }
@@ -843,6 +1178,17 @@ function choiceQuestionsFor(listSlots: readonly SlotSpec[]): Record<string, Ques
         `内容单薄就选少的，内容丰富就选多的。`,
       criteria,
     };
+  }
+  return out;
+}
+
+/** 从一批问题里挑出 `slot_source` 那些。降级重发时用——它们本来就是 choice。 */
+function sourceQuestionsOf(
+  questions: Readonly<Record<string, Question>>,
+): Record<string, Question> {
+  const out: Record<string, Question> = {};
+  for (const [id, question] of Object.entries(questions)) {
+    if (id.startsWith(`${STRUCTURE_QUESTIONS.slotSource}:`)) out[id] = question;
   }
   return out;
 }

@@ -61,6 +61,7 @@ export {
   type PageSpec,
   type PageSpecErrorCode,
   type SlotSource,
+  type SlotFillPlan,
   type SlotValue,
   type StructureFix,
 } from './structured/page-spec.js';

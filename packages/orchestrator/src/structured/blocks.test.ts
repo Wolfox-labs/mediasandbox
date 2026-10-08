@@ -379,6 +379,59 @@ describe('结构化中间表示：操作', () => {
     assert.equal(describePageSpec(page([])), '（空页面）');
   });
 
+  it('describePageSpec 的列表型 slot 带项数——"要几个"那一问要能回喂进 state', () => {
+    const p = page([
+      {
+        id: 'b1',
+        type: 'features',
+        slots: { items: { kind: 'list', items: ['', '', ''] } },
+        status: 'pending',
+        sources: {},
+      },
+    ]);
+    assert.match(describePageSpec(p), /items:3/);
+  });
+
+  it('describePageSpec 对已填内容给一小段预览，并截断', () => {
+    const p = page([
+      {
+        id: 'b1',
+        type: 'hero',
+        slots: { title: { kind: 'text', text: '这是一个特别特别长的标题需要被截断掉' } },
+        status: 'filled',
+        sources: {},
+      },
+    ]);
+    const text = describePageSpec(p);
+    assert.match(text, /title="/);
+    assert.match(text, /…/);
+    // 不截断的话，这一句每轮都进 state、进 rationale、进前端。
+    assert.ok(!text.includes('需要被截断掉'), `预览没截断: ${text}`);
+  });
+
+  it('describePageSpec 对图集说"几张图"，而不是把 data URI 倒出来', () => {
+    const p = page([
+      {
+        id: 'b1',
+        type: 'gallery',
+        slots: {
+          images: {
+            kind: 'list-image',
+            refs: [
+              { ref: 'data:image/svg+xml;base64,AAAA', alt: '图一' },
+              { ref: 'data:image/svg+xml;base64,BBBB', alt: '图二' },
+            ],
+          },
+        },
+        status: 'filled',
+        sources: {},
+      },
+    ]);
+    const text = describePageSpec(p);
+    assert.match(text, /images:2/);
+    assert.ok(!text.includes('base64'), `不该把图片内容倒进 state: ${text}`);
+  });
+
   it('blockTypesOf 按首次出现顺序去重', () => {
     const p = page([block('b1', 'text'), block('b2', 'hero'), block('b3', 'text')]);
     assert.deepEqual(blockTypesOf(p), ['text', 'hero']);

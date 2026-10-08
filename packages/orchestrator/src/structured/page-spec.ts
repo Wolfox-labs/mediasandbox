@@ -50,6 +50,11 @@ export interface BlockInstance {
   readonly status: BlockStatus;
   /** 该 block 的每个 slot 由谁填充，供前端展示"这块是模型写的还是确定性拼的"。 */
   readonly sources: Readonly<Record<string, SlotSource>>;
+  /**
+   * 决策层对"每个 slot 由谁实现"的选择。省略表示**没有问过**（零成本默认路径），
+   * 此时填充器按 slot 类型自动判。
+   */
+  readonly slotPlans?: Readonly<Record<string, SlotFillPlan>> | undefined;
   /** 填充失败的原因。`status === 'failed'` 时存在。 */
   readonly error?: string | undefined;
 }
@@ -62,6 +67,16 @@ export type SlotSource =
   | 'deterministic'
   /** 用户直接指定。 */
   | 'user';
+
+/**
+ * **决策层对某个 slot "由谁来实现"的选择**。
+ *
+ * 与 `SlotSource` 的区别就是"计划"与"结果"的区别：
+ * `SlotFillPlan` 是**决定**（这一问题由决策模型回答，`choice` 原语），
+ * `SlotSource` 是**实际发生了**（填充器回填的事实）。两者不该合并——
+ * 合了就没法回答"模型说要生成式，但生成层挂了，最后是谁填的"。
+ */
+export type SlotFillPlan = 'generative' | 'deterministic';
 
 /** 整页的结构化表示。 */
 export interface PageSpec {
@@ -201,6 +216,24 @@ export function validatePageSpec(spec: PageSpec, registry?: BlockRegistry): void
 
       for (const [slotName, value] of Object.entries(block.slots)) {
         validateSlotValue(block, blockSpec, slotName, value);
+      }
+
+      // `slotPlans` 是决策层的选择，同样要校验：键必须是声明过的 slot，
+      // 值必须是那两个之一。放过去的话，填充器会拿到一个它看不懂的值，
+      // 然后**静默按默认行为填**——"计划与结果不一致"却看不出来。
+      for (const [slotName, plan] of Object.entries(block.slotPlans ?? {})) {
+        if (!blockSpec.slots.some((s) => s.name === slotName)) {
+          throw new PageSpecError(
+            `block ${block.id}(${block.type}) 的 slotPlans 出现了未声明的 slot: ${slotName}`,
+            'UNKNOWN_SLOT',
+          );
+        }
+        if (plan !== 'generative' && plan !== 'deterministic') {
+          throw new PageSpecError(
+            `block ${block.id} 的 slotPlans[${slotName}] 取值非法: ${String(plan)}`,
+            'SLOT_TYPE_MISMATCH',
+          );
+        }
       }
 
       // 必需 slot 只在 block 声明为 filled 时才要求齐全：
@@ -415,13 +448,67 @@ export function normalizePageSpec(
   return { page, fixes };
 }
 
-/** 结构摘要，用于日志、事件与决策层的 evidence。保持简短。 */
+/**
+ * 结构摘要，用于日志、事件、决策层的 state 与 evidence。
+ *
+ * ## 为什么不能只列 slot 名字
+ *
+ * 决策模型每轮都靠这一句判断"排到哪一步了、下一块该放什么"。只给它
+ * `{heading,items}` 的话，它知道有这两个 slot，但**不知道 features 里会放几条**——
+ * 而"这一块是三条还是六条"恰恰影响"后面还要不要补一块"。
+ *
+ * 所以列表型 slot 带上**项数**（`items:3`）：项数是决策层自己刚回答过的
+ * "要几个"，把它回喂进 state 才算闭环。
+ *
+ * 已填内容（模板预置、上一轮填过的）带一小段**预览**，同样是为了让模型看得见
+ * "这块已经写了什么"，而不是盲选。
+ *
+ * 长度必须压住：它每轮都进 state，也进 rationale 与前端。所以预览截断到
+ * `PREVIEW_MAX` 个字符。
+ */
+const PREVIEW_MAX = 14;
+
+/** 取一个 slot 值的短预览。没有可展示的内容时返回 null。 */
+function slotPreview(value: SlotValue): string | null {
+  switch (value.kind) {
+    case 'text': {
+      const text = value.text.trim();
+      return text === '' ? null : text;
+    }
+    case 'list': {
+      const items = value.items.map((i) => i.trim()).filter((i) => i !== '');
+      return items.length === 0 ? null : items.join('、');
+    }
+    case 'list-image': {
+      const filled = value.refs.filter((r) => r.ref.trim() !== '').length;
+      return filled === 0 ? null : `${filled} 张图`;
+    }
+    case 'image':
+      return value.alt.trim() === '' ? '图' : value.alt;
+    default:
+      return null;
+  }
+}
+
+/** 截断到预览长度，超出加省略号。 */
+function clip(text: string): string {
+  return text.length <= PREVIEW_MAX ? text : `${text.slice(0, PREVIEW_MAX)}…`;
+}
+
 export function describePageSpec(spec: PageSpec): string {
   if (spec.blocks.length === 0) return '（空页面）';
   return spec.blocks
     .map((b, i) => {
-      const slotNames = Object.keys(b.slots).join(',');
-      return `${i + 1}. ${b.type}#${b.id}[${b.status}]${slotNames === '' ? '' : `{${slotNames}}`}`;
+      const slots = Object.entries(b.slots)
+        .map(([name, value]) => {
+          // 列表型带项数：这是"要几个"那一问的回执。
+          const count = value.kind === 'list' ? value.items.length : value.kind === 'list-image' ? value.refs.length : 0;
+          if (count > 0) return `${name}:${count}`;
+          const preview = slotPreview(value);
+          return preview === null ? name : `${name}="${clip(preview)}"`;
+        })
+        .join(',');
+      return `${i + 1}. ${b.type}#${b.id}[${b.status}]${slots === '' ? '' : `{${slots}}`}`;
     })
     .join(' → ');
 }

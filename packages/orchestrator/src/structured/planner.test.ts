@@ -772,6 +772,231 @@ describe('结构规划器：模板', () => {
   });
 });
 
+/**
+ * 低分补救用的假决策层：先给一个低分，补救后再给一个高分。
+ *
+ * `scores` 按"第几次评分"取；用完了就重复最后一个。
+ *
+ * 注意补救轮的 `next_block` 要**单独给**（`remediationPick`）：主循环最后一轮的
+ * `next_block` 也会被打包进请求，而那一轮的答案会被丢弃（同一批里 `noul` 已经
+ * 决定停了）。它照样会被这个桩回答一次，于是会消耗掉主选的游标——
+ * 用 instructions 里的"结构评分"把它们区分开。
+ */
+function scored(args: {
+  readonly picks: readonly string[];
+  readonly rounds: number;
+  readonly scores: readonly (number | null)[];
+  readonly remediationPick?: string | undefined;
+}): ScriptedDecision {
+  let cursor = 0;
+  let qualityCalls = 0;
+  return new ScriptedDecision((id, question) => {
+    if (id === STRUCTURE_QUESTIONS.nextBlock && question.type === 'choice') {
+      const available = Object.keys(question.criteria);
+      if (question.instructions.includes('结构评分只有')) {
+        const target =
+          args.remediationPick !== undefined && available.includes(args.remediationPick)
+            ? args.remediationPick
+            : available[0]!;
+        return { type: 'choice', value: target, probabilities: spread(available, target) };
+      }
+      while (cursor < args.picks.length && !available.includes(args.picks[cursor]!)) cursor += 1;
+      const next = args.picks[cursor] ?? available[0]!;
+      cursor += 1;
+      return { type: 'choice', value: next, probabilities: spread(available, next) };
+    }
+    if (id === STRUCTURE_QUESTIONS.continueStruct) {
+      const go = cursor < args.rounds;
+      return { type: 'noul', value: go, yesProbability: go ? 0.9 : 0.05 };
+    }
+    if (id.startsWith(`${STRUCTURE_QUESTIONS.slotCount}:`) && question.type === 'numeric') {
+      return { type: 'numeric', value: question.range?.min ?? 2 };
+    }
+    if (id === STRUCTURE_QUESTIONS.structureQuality && question.type === 'score') {
+      // **不能用 `??`**：`null` 是合法返回（"决策层弃权"），用 `??` 会把它当成
+      // 缺失值吞掉，于是弃权路径永远测不到。同一个坑这个文件里已经有过一次。
+      const value =
+        qualityCalls < args.scores.length
+          ? args.scores[qualityCalls]!
+          : (args.scores[args.scores.length - 1] ?? 0.5);
+      qualityCalls += 1;
+      return { type: 'score', value };
+    }
+    return { type: 'noul', value: false, yesProbability: 0.1 };
+  });
+}
+
+describe('结构规划器：低分补救（`score` 不是断头路）', () => {
+  const CANDS = ['hero', 'features', 'cta', 'text'] as const;
+
+  it('评分偏低时补一块——决策模型指出结构不好，就该有下文', async () => {
+    const decision = scored({
+      picks: ['hero'],
+      rounds: 1,
+      scores: [0.2, 0.8],
+      remediationPick: 'features',
+    });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDS });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero', 'features']);
+    assert.ok(
+      result.rationale.some((r) => r.includes('触发一轮补救')),
+      '补救要留痕，否则"为什么多了一块"无从解释',
+    );
+    // 评了两次：补救前一次、补救后一次。
+    const qualitySteps = result.steps.filter((s) => s.kind === 'quality');
+    assert.equal(qualitySteps.length, 2);
+    assert.equal(result.page.qualityScore, 0.8, '最终分数要反映补救后的结构');
+  });
+
+  it('评分正常时不补救——"一般"是常态，每次都补救会让这一问变成噪声', async () => {
+    const decision = scored({ picks: ['hero'], rounds: 1, scores: [0.75] });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDS });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero']);
+    assert.equal(result.steps.filter((s) => s.kind === 'quality').length, 1);
+    assert.ok(!result.rationale.some((r) => r.includes('补救')));
+  });
+
+  it('评分弃权时不补救——没有判断依据就不该动结构', async () => {
+    const decision = scored({ picks: ['hero'], rounds: 1, scores: [null] });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDS });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero']);
+    assert.equal(result.page.qualityScore, null);
+    assert.ok(!result.rationale.some((r) => r.includes('触发一轮补救')));
+  });
+
+  it('已经到 maxBlocks 时不补救——补救不能突破硬上限', async () => {
+    const decision = scored({ picks: ['hero'], rounds: 1, scores: [0.1, 0.9] });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDS, maxBlocks: 1 });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero']);
+    assert.ok(!result.rationale.some((r) => r.includes('触发一轮补救')));
+  });
+
+  it('候选用尽时补救放弃，且不报错——补救是锦上添花，原结构本身合法', async () => {
+    const decision = scored({ picks: ['hero'], rounds: 99, scores: [0.1, 0.9] });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    // 只有 hero 一个候选：放下它之后候选就用尽了。
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: ['hero'] });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero']);
+    assert.ok(result.rationale.some((r) => r.includes('补救轮：候选集里没有可补的块')));
+  });
+
+  it('补救里模型选了候选外的块时放弃，不让整次运行失败', async () => {
+    let nextBlockCalls = 0;
+    const decision = new ScriptedDecision((id, question) => {
+      if (id === STRUCTURE_QUESTIONS.nextBlock && question.type === 'choice') {
+        nextBlockCalls += 1;
+        const available = Object.keys(question.criteria);
+        // 第一次正常选 hero；补救那一次故意给一个候选外的值。
+        const value = nextBlockCalls === 1 ? 'hero' : 'no-such-block';
+        return { type: 'choice', value, probabilities: spread(available, available[0]!) };
+      }
+      if (id === STRUCTURE_QUESTIONS.continueStruct) {
+        return { type: 'noul', value: false, yesProbability: 0.05 };
+      }
+      if (id === STRUCTURE_QUESTIONS.structureQuality && question.type === 'score') {
+        return { type: 'score', value: 0.1 };
+      }
+      return { type: 'noul', value: false, yesProbability: 0.1 };
+    });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDS });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero'], '应当退回原结构');
+    assert.ok(result.rationale.some((r) => r.includes('补救轮：候选集里没有可补的块') === false));
+  });
+});
+
+describe('结构规划器：slot_source（每个 slot 由谁实现）', () => {
+  const CANDS = ['hero', 'features', 'cta'] as const;
+
+  it('没开生成层时不问——没有生成层可选，问"要不要生成式"是空问题', async () => {
+    const decision = picker(['hero']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDS });
+
+    assert.ok(
+      decision.batches.every((ids) => !ids.some((i) => i.startsWith('slot_source:'))),
+      '零成本路径不该多发这一问',
+    );
+    for (const block of result.page.blocks) {
+      assert.equal(block.slotPlans, undefined, '没问过就不该写这个字段');
+    }
+  });
+
+  it('开了生成层就问，答案写进块的 slotPlans', async () => {
+    const decision = new ScriptedDecision((id, question) => {
+      if (id === STRUCTURE_QUESTIONS.nextBlock && question.type === 'choice') {
+        const available = Object.keys(question.criteria);
+        return { type: 'choice', value: 'hero', probabilities: spread(available, 'hero') };
+      }
+      if (id === STRUCTURE_QUESTIONS.continueStruct) {
+        return { type: 'noul', value: false, yesProbability: 0.05 };
+      }
+      if (id.startsWith(`${STRUCTURE_QUESTIONS.slotSource}:`) && question.type === 'choice') {
+        const slot = id.split(':')[1]!;
+        const value = slot === 'title' ? 'generative' : 'deterministic';
+        return { type: 'choice', value, probabilities: spread(Object.keys(question.criteria), value) };
+      }
+      if (id === STRUCTURE_QUESTIONS.structureQuality && question.type === 'score') {
+        return { type: 'score', value: 0.75 };
+      }
+      return { type: 'noul', value: false, yesProbability: 0.1 };
+    });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: CANDS,
+      useGenerative: true,
+    });
+
+    const plans = result.page.blocks[0]?.slotPlans;
+    assert.ok(plans !== undefined, '问过之后要落到块上');
+    assert.equal(plans['title'], 'generative');
+    assert.equal(plans['actionText'], 'deterministic');
+    // 图像类 slot 不问：生图逐张计费，不能因为"这个 slot 是图"就自动扣钱。
+    assert.equal(plans['media'], undefined);
+  });
+
+  it('弃权时回落到确定性——零成本是默认值', async () => {
+    const decision = new ScriptedDecision((id, question) => {
+      if (id === STRUCTURE_QUESTIONS.nextBlock && question.type === 'choice') {
+        const available = Object.keys(question.criteria);
+        return { type: 'choice', value: 'hero', probabilities: spread(available, 'hero') };
+      }
+      if (id === STRUCTURE_QUESTIONS.continueStruct) {
+        return { type: 'noul', value: false, yesProbability: 0.05 };
+      }
+      if (id.startsWith(`${STRUCTURE_QUESTIONS.slotSource}:`) && question.type === 'choice') {
+        return {
+          type: 'choice',
+          value: null,
+          probabilities: spread(Object.keys(question.criteria), 'deterministic'),
+        };
+      }
+      if (id === STRUCTURE_QUESTIONS.structureQuality && question.type === 'score') {
+        return { type: 'score', value: 0.75 };
+      }
+      return { type: 'noul', value: false, yesProbability: 0.1 };
+    });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: CANDS,
+      useGenerative: true,
+    });
+    assert.equal(result.page.blocks[0]?.slotPlans?.['title'], 'deterministic');
+  });
+});
+
 describe('结构规划器：决策层弃权与异常', () => {
   it('选块弃权时按概率回落，且记录依据', async () => {
     const decision = new ScriptedDecision((id, question) => {
