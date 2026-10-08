@@ -182,6 +182,17 @@ export class TemplateRegistry {
     return this.templates.has(id);
   }
 
+  /**
+   * 移除一个模板。返回是否真的删掉了。
+   *
+   * **不拦内置模板**：注册表只负责"池子里有什么"，"哪些允许删"是产品决定，
+   * 由服务层判（它会回 409）。把策略塞进数据结构里，会让另一个调用方
+   * （比如"清空沉淀"的脚本）也跟着被限制住。
+   */
+  remove(id: string): boolean {
+    return this.templates.delete(id);
+  }
+
   get(id: string): TemplateSpec {
     const spec = this.templates.get(id);
     if (spec === undefined) {

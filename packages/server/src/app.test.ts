@@ -13,9 +13,13 @@ import {
   DEFAULT_POLICY,
   StubDecisionClient,
   ToolRegistry,
+  type BlockRegistry,
+  type TemplateRegistry,
 } from '@mediasandbox/orchestrator';
 import { MockLlmClient } from '@mediasandbox/orchestrator';
 import { createServer } from './app.js';
+import { JsonPersist } from './persist.js';
+import { loadPersistedPools, type LoadedPools } from './boot.js';
 import type { Server } from 'node:http';
 
 /**
@@ -46,11 +50,18 @@ async function startServer(overrides: {
   maxRuns?: number;
   /** 装配结构化链路：block 池 + 模板池 + 两个结构化工具。 */
   structured?: boolean;
+  /** 落盘目录。给了就启用持久化，并从这里读回历史运行记录。 */
+  dataDir?: string;
+  /** 预先装好的池子（模拟重启时的装载结果）。省略则用内置池。 */
+  pools?: LoadedPools;
 } = {}): Promise<{
   origin: string;
   close: () => Promise<void>;
   store: ReturnType<typeof createServer>['store'];
+  blocks: BlockRegistry;
+  templates: TemplateRegistry;
   waitForIdle: () => Promise<void>;
+  flushPersist: () => Promise<void>;
   wsUrl: string;
 }> {
   const registry = new ToolRegistry();
@@ -59,15 +70,25 @@ async function startServer(overrides: {
   }
 
   // block 池与工具必须成对出现：工具装在哪个池子上，规划器就得用哪个池子。
-  const blocks = overrides.structured === true ? createBlockRegistry() : undefined;
+  const blocks =
+    overrides.pools?.blocks ??
+    (overrides.structured === true ? createBlockRegistry() : undefined);
   if (blocks !== undefined) {
     registry.registerAll(createStructuredTools(blocks));
   }
+  const templates =
+    blocks !== undefined
+      ? createTemplateRegistry(blocks, [...(overrides.pools?.userTemplates ?? [])])
+      : undefined;
+
+  const persist =
+    overrides.dataDir !== undefined ? new JsonPersist({ rootDir: overrides.dataDir }) : undefined;
 
   const instance = createServer({
     registry,
     ...(blocks !== undefined ? { blocks } : {}),
-    ...(blocks !== undefined ? { templates: createTemplateRegistry(blocks) } : {}),
+    ...(templates !== undefined ? { templates } : {}),
+    ...(persist !== undefined ? { persist } : {}),
     decision: overrides.decision ?? makeDecision(),
     ...(overrides.llm !== undefined ? { llm: overrides.llm } : {}),
     providers: { local: localSandbox },
@@ -81,6 +102,9 @@ async function startServer(overrides: {
   const server: Server = http.createServer(instance.app);
   instance.attachWebSocket(server);
 
+  // 与 main.ts 一样：**listen 之前**把历史运行记录装回来。
+  await instance.loadPersisted();
+
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const address = server.address();
   if (address === null || typeof address === 'string') {
@@ -91,9 +115,13 @@ async function startServer(overrides: {
     origin: `http://127.0.0.1:${address.port}`,
     wsUrl: `ws://127.0.0.1:${address.port}/ws`,
     store: instance.store,
+    blocks: blocks ?? createBlockRegistry(),
+    templates: templates ?? createTemplateRegistry(createBlockRegistry()),
     waitForIdle: () => instance.waitForIdle(),
+    flushPersist: () => instance.flushPersist(),
     close: async () => {
       await instance.waitForIdle();
+      await instance.flushPersist();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
@@ -582,6 +610,281 @@ describe('模板目录与 templateId 参数', () => {
       assert.equal(footer?.placement, 'last');
       assert.equal(nav?.placement, 'first');
       assert.equal(hero?.placement, 'any');
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+describe('block 池与模板池的增删', () => {
+  const PROMO = {
+    id: 'promo-banner',
+    label: '促销横幅',
+    description: '一条限时促销提示',
+    group: 'skeleton',
+    slots: [{ name: 'text', type: 'title', description: '促销语' }],
+    canLead: false,
+    repeatable: false,
+    costHint: 'fast',
+  };
+
+  it('POST /api/blocks 把自定义 block 注册进池子，并明确告知渲染限制', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const response = await fetch(`${ctx.origin}/api/blocks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(PROMO),
+      });
+      assert.equal(response.status, 201);
+      const body = (await response.json()) as { note?: string };
+      assert.match(body.note ?? '', /占位块/, '已知限制要主动说，而不是让用户自己撞上');
+      assert.ok(ctx.blocks.has('promo-banner'));
+
+      const list = (await (await fetch(`${ctx.origin}/api/blocks`)).json()) as {
+        blocks: { id: string }[];
+      };
+      assert.ok(list.blocks.some((b) => b.id === 'promo-banner'));
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('POST /api/blocks 拒绝形态不对的声明，并说清是哪个字段', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const response = await fetch(`${ctx.origin}/api/blocks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...PROMO, group: 'nope' }),
+      });
+      assert.equal(response.status, 400);
+      const body = (await response.json()) as { error?: string };
+      assert.match(body.error ?? '', /group/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('POST /api/blocks 拒绝与内置重名的 id', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const response = await fetch(`${ctx.origin}/api/blocks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...PROMO, id: 'hero' }),
+      });
+      assert.equal(response.status, 400);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('内置模板不能删（删了下次启动还在，徒增困惑）', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const response = await fetch(`${ctx.origin}/api/templates/product-launch`, {
+        method: 'DELETE',
+      });
+      assert.equal(response.status, 409);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+describe('持久化：重启之后东西还在', () => {
+  let dataRoot = '';
+
+  before(async () => {
+    const os = await import('node:os');
+    const fsp = await import('node:fs/promises');
+    const path = await import('node:path');
+    dataRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-restart-'));
+  });
+
+  after(async () => {
+    const fsp = await import('node:fs/promises');
+    if (dataRoot !== '') await fsp.rm(dataRoot, { recursive: true, force: true });
+  });
+
+  /** 模拟一次完整的重启：关服务 → 按 boot.ts 装池子 → 起新服务。 */
+  async function restart(dataDir: string): Promise<Awaited<ReturnType<typeof startServer>>> {
+    const persist = new JsonPersist({ rootDir: dataDir });
+    const pools = await loadPersistedPools(persist);
+    return await startServer({ structured: true, dataDir, pools });
+  }
+
+  it('运行记录、产物清单与结构留痕，重启后全部还在', async () => {
+    const dir = `${dataRoot}/runs`;
+    const first = await startServer({ structured: true, dataDir: dir });
+    let runId = '';
+    try {
+      const created = await fetch(`${first.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做一个产品介绍落地页',
+          envType: 'webpage',
+          projectId: 'proj-persist',
+          candidateBlockIds: ['hero', 'features'],
+          maxBlocks: 2,
+        }),
+      });
+      assert.equal(created.status, 202);
+      ({ runId } = (await created.json()) as { runId: string });
+      await waitForStatus(first.origin, runId, ['succeeded', 'failed', 'escalated']);
+    } finally {
+      await first.close();
+    }
+
+    const second = await restart(dir);
+    try {
+      // 重启前那次运行必须还在，而且状态是**终态**——不能永远显示"运行中"。
+      const detail = (await (await fetch(`${second.origin}/api/runs/${runId}`)).json()) as {
+        status: string;
+        goal: string;
+        artifacts: unknown[];
+        structure: { page: { blocks: { type: string }[] } } | null;
+      };
+      assert.equal(detail.status, 'succeeded');
+      assert.equal(detail.goal, '做一个产品介绍落地页');
+      assert.ok(detail.artifacts.length > 0, '产物清单也该在');
+      // 结构是**产出**：刷新页面/重启服务之后仍然拿得到，
+      // 只靠 WebSocket 推一次的话，错过那一刻就永远没了。
+      assert.ok(detail.structure !== null, '结构留痕丢了');
+      // 桩决策层对"还要再来一块"默认答否，所以结构就是起手的第一块。
+      // 这里断言的是"结构原样回来了"，不绑定具体块数。
+      assert.ok(detail.structure.page.blocks.length >= 1);
+      assert.equal(detail.structure.page.blocks[0]?.type, 'hero');
+
+      const list = (await (await fetch(`${second.origin}/api/runs`)).json()) as {
+        runs: { id: string }[];
+      };
+      assert.ok(list.runs.some((r) => r.id === runId), '运行列表里也该有它');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('自定义 block 与沉淀出来的模板，重启后还在', async () => {
+    const dir = `${dataRoot}/pools`;
+    const first = await startServer({ structured: true, dataDir: dir });
+    let runId = '';
+    try {
+      const blockResponse = await fetch(`${first.origin}/api/blocks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: 'promo-banner',
+          label: '促销横幅',
+          description: '一条限时促销提示',
+          group: 'skeleton',
+          slots: [{ name: 'text', type: 'title', description: '促销语' }],
+          canLead: false,
+          repeatable: false,
+          costHint: 'fast',
+        }),
+      });
+      assert.equal(blockResponse.status, 201);
+
+      // 跑一次 webpage，好有一个结构可以沉淀。
+      const created = await fetch(`${first.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做一个产品介绍落地页',
+          envType: 'webpage',
+          candidateBlockIds: ['hero', 'promo-banner'],
+          maxBlocks: 2,
+        }),
+      });
+      ({ runId } = (await created.json()) as { runId: string });
+      await waitForStatus(first.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      const tpl = await fetch(`${first.origin}/api/templates`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fromRunId: runId, id: 'my-recycled', label: '我的沉淀' }),
+      });
+      assert.equal(tpl.status, 201, await tpl.text());
+    } finally {
+      await first.close();
+    }
+
+    const second = await restart(dir);
+    try {
+      // block 装回来了，而且**工具装的是同一个池子**——否则会重现
+      // "选得到、填不了"的断链。
+      assert.ok(second.blocks.has('promo-banner'), '自定义 block 没装回来');
+      assert.ok(second.templates.has('my-recycled'), '沉淀的模板没装回来');
+      const list = (await (await fetch(`${second.origin}/api/templates`)).json()) as {
+        templates: { id: string; builtin: boolean; blocks: { type: string }[] }[];
+      };
+      const recycled = list.templates.find((t) => t.id === 'my-recycled');
+      assert.ok(recycled !== undefined);
+      assert.equal(recycled.builtin, false, '沉淀出来的不该被当成内置');
+      assert.ok(recycled.blocks.length > 0, '起手结构要带回来');
+
+      // 拿它起手跑一次，闭环。
+      const created = await fetch(`${second.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做另一个产品的落地页',
+          envType: 'webpage',
+          templateId: 'my-recycled',
+        }),
+      });
+      assert.equal(created.status, 202);
+      const { runId: secondRun } = (await created.json()) as { runId: string };
+      await waitForStatus(second.origin, secondRun, ['succeeded', 'failed', 'escalated']);
+      const detail = (await (await fetch(`${second.origin}/api/runs/${secondRun}`)).json()) as {
+        status: string;
+        structure: { page: { templateId: string | null } } | null;
+      };
+      assert.equal(detail.status, 'succeeded');
+      assert.equal(detail.structure?.page.templateId, 'my-recycled');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('删掉沉淀的模板后会落盘，重启不再出现', async () => {
+    const dir = `${dataRoot}/delete`;
+    const first = await startServer({ structured: true, dataDir: dir });
+    try {
+      const created = await fetch(`${first.origin}/api/templates`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: 'temp-tpl',
+          label: '临时',
+          description: '待删',
+          blocks: [{ type: 'hero' }],
+        }),
+      });
+      assert.equal(created.status, 201);
+      const removed = await fetch(`${first.origin}/api/templates/temp-tpl`, { method: 'DELETE' });
+      assert.equal(removed.status, 200);
+      assert.ok(!first.templates.has('temp-tpl'));
+    } finally {
+      await first.close();
+    }
+
+    const second = await restart(dir);
+    try {
+      assert.ok(!second.templates.has('temp-tpl'), '删掉的模板重启后不该复活');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('不配 dataDir 时一切照旧（既有部署不该被迫提供存储）', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const list = (await (await fetch(`${ctx.origin}/api/runs`)).json()) as { runs: unknown[] };
+      assert.deepEqual(list.runs, []);
     } finally {
       await ctx.close();
     }

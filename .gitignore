@@ -16,3 +16,5 @@ dist/
 /workspaces/
 /artifacts/
 /logs/
+# 持久化数据目录（运行记录、用户新增的 block 与模板）。同上，前缀 `/` 不能省。
+/data/

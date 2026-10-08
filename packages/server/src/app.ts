@@ -17,9 +17,14 @@ import type { EnvType, SandboxProvider } from '@mediasandbox/sandbox';
 import { ENV_TYPES } from '@mediasandbox/sandbox';
 import {
   BLOCK_GROUP_LABELS,
+  BlockError,
   Orchestrator,
+  TemplateError,
+  builtinBlockIds,
+  extractTemplate,
   type BlockGroup,
   type BlockRegistry,
+  type BlockSpec,
   type DecisionClient,
   type FallbackPolicy,
   type LlmClient,
@@ -29,6 +34,8 @@ import {
   type ToolRegistry,
 } from '@mediasandbox/orchestrator';
 import { RunStore, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
+import { JsonPersist } from './persist.js';
+import { BlockInputError, parseBlockSpec } from './block-input.js';
 import { createZip, type ZipEntry } from './zip.js';
 
 export interface ServerDeps {
@@ -48,6 +55,13 @@ export interface ServerDeps {
    * 与 `blocks` 一样是可选注入：既有测试与部署不必被迫提供它。
    */
   readonly templates?: TemplateRegistry | undefined;
+  /**
+   * 落盘存储。省略即纯内存（重启即丢）——既有测试与临时部署不必被迫提供它。
+   *
+   * 这里要的是**具体类**而不是 `RunPersist` 窄接口：启动重建要读回运行记录，
+   * 而"读回"不在 `RunStore` 需要的那个写穿接口里。
+   */
+  readonly persist?: JsonPersist | undefined;
   /** 按 provider 名取实现：'local' 或 'docker'。 */
   readonly providers: Readonly<Record<string, SandboxProvider>>;
   readonly defaultProvider: string;
@@ -86,6 +100,16 @@ export interface CreateServerResult {
   attachWebSocket(server: Server): WebSocketServer;
   /** 等待所有在途运行结束。测试与优雅关闭用。 */
   waitForIdle(): Promise<void>;
+  /**
+   * 从盘上读回历史运行记录。返回装载了几条。
+   *
+   * **刻意不放在构造里**：`createServer` 是同步的，而读盘是异步的。
+   * 硬塞进去只会让调用方拿到一个"还没装好"的 store。
+   * 调用方在 `listen()` 之前 await 它即可。
+   */
+  loadPersisted(): Promise<number>;
+  /** 等所有在途落盘写完。测试与优雅关闭用。 */
+  flushPersist(): Promise<void>;
 }
 
 /**
@@ -127,7 +151,7 @@ function errorResponse(res: Response, status: number, message: string, detail?: 
 }
 
 export function createServer(deps: ServerDeps): CreateServerResult {
-  const store = new RunStore();
+  const store = new RunStore(deps.persist);
 
   /** runId → 沙盒 id。产物下载时用来找回句柄。 */
   const sandboxIdByRun = new Map<string, string>();
@@ -698,6 +722,183 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     });
   });
 
+  /**
+   * 注册一个 block（用户手打 / 导入 / 模型提议）。
+   *
+   * 设计稿 §2.2 说 block 池有四类来源，此前**只有内置那一类真的能进池子**：
+   * 另外三类没有入口。这条接口补上入口，并走与内置完全相同的校验——
+   * 提议不等于决定，而"能被选中"的前提是它先是个合法的声明。
+   */
+  app.post('/api/blocks', (req: Request, res: Response) => {
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+    let spec: BlockSpec;
+    try {
+      spec = parseBlockSpec(req.body);
+    } catch (error) {
+      if (error instanceof BlockInputError) {
+        errorResponse(res, 400, error.message);
+        return;
+      }
+      throw error;
+    }
+    try {
+      registry.register(spec);
+    } catch (error) {
+      if (error instanceof BlockError) {
+        errorResponse(res, 400, error.message, `code=${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    // 落盘只存**外部来源**的：内置的由代码提供，存一份只会造成两个真相来源。
+    void saveExternalBlocks();
+
+    res.status(201).json({
+      block: { id: spec.id, label: spec.label, group: spec.group },
+      // 说清一件已知限制，而不是让用户自己发现：
+      // 自定义 block 目前没有专属渲染器，页面上会落成一个带类型名的占位块。
+      note: '已入池。自定义 block 暂无专属渲染器，页面上会渲染为占位块；填充与结构决策已完全可用。',
+    });
+  });
+
+  /**
+   * 沉淀一个模板。
+   *
+   * 两种来源：
+   *   - `fromRunId` —— 从某次运行的**定稿结构**提取（"越用越好用"的正路）
+   *   - 直接给 `blocks` —— 手工定义一个起手结构
+   *
+   * 从历史提取时**只取结构、不取内容**：把上个项目的文案抄进新项目会串味。
+   */
+  app.post('/api/templates', (req: Request, res: Response) => {
+    const templates = deps.templates;
+    if (templates === undefined) {
+      errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    const fromRunId = typeof body['fromRunId'] === 'string' ? body['fromRunId'] : undefined;
+    let spec: TemplateSpec;
+
+    try {
+      if (fromRunId !== undefined) {
+        const record = store.get(fromRunId);
+        if (record === undefined) {
+          errorResponse(res, 404, `找不到运行记录: ${fromRunId}`);
+          return;
+        }
+        if (record.structure === undefined) {
+          errorResponse(
+            res,
+            400,
+            '这次运行没有结构留痕，无法沉淀',
+            '只有 webpage 环境的结构化链路会产出结构',
+          );
+          return;
+        }
+        const id = typeof body['id'] === 'string' ? body['id'] : `from-${fromRunId.toLowerCase()}`;
+        spec = extractTemplate(record.structure.page, {
+          id,
+          ...(typeof body['label'] === 'string' ? { label: body['label'] } : {}),
+          ...(typeof body['description'] === 'string' ? { description: body['description'] } : {}),
+        });
+      } else {
+        if (!Array.isArray(body['blocks']) || body['blocks'].length === 0) {
+          errorResponse(res, 400, '必须给 fromRunId（从历史沉淀）或 blocks（手工定义起手结构）');
+          return;
+        }
+        spec = {
+          id: typeof body['id'] === 'string' ? body['id'] : '',
+          label: typeof body['label'] === 'string' ? body['label'] : '',
+          description: typeof body['description'] === 'string' ? body['description'] : '',
+          blocks: (body['blocks'] as unknown[]).map((entry) => {
+            const item = (entry ?? {}) as Record<string, unknown>;
+            if (typeof item['type'] !== 'string') {
+              throw new BlockInputError('blocks 的每一项都要有 type');
+            }
+            return { type: item['type'] };
+          }),
+          ...(Array.isArray(body['allowedBlockIds'])
+            ? {
+                allowedBlockIds: body['allowedBlockIds'].filter(
+                  (v): v is string => typeof v === 'string',
+                ),
+              }
+            : {}),
+          builtin: false,
+        };
+      }
+
+      templates.register(spec);
+    } catch (error) {
+      if (error instanceof TemplateError || error instanceof BlockInputError) {
+        errorResponse(res, 400, error.message, `code=${error.name}`);
+        return;
+      }
+      throw error;
+    }
+
+    void saveUserTemplates();
+    res.status(201).json({
+      template: {
+        id: spec.id,
+        label: spec.label,
+        blocks: spec.blocks.map((b) => ({ type: b.type })),
+      },
+    });
+  });
+
+  /** 删掉一个**非内置**模板。内置模板不给删：删了下次启动还在，徒增困惑。 */
+  app.delete('/api/templates/:templateId', (req: Request, res: Response) => {
+    const templates = deps.templates;
+    if (templates === undefined) {
+      errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
+      return;
+    }
+    const rawId = req.params['templateId'];
+    const id = Array.isArray(rawId) ? (rawId[0] ?? '') : (rawId ?? '');
+    if (!templates.has(id)) {
+      errorResponse(res, 404, `未知模板: ${id}`);
+      return;
+    }
+    if (templates.get(id).builtin) {
+      errorResponse(res, 409, `${id} 是内置模板，不能删除`);
+      return;
+    }
+    if (!templates.remove(id)) {
+      errorResponse(res, 404, `未知模板: ${id}`);
+      return;
+    }
+    void saveUserTemplates();
+    res.json({ removed: id });
+  });
+
+  /**
+   * 把外部来源的 block 落盘。
+   *
+   * **只存非内置的**：内置的由代码提供，也存一份就会有两个真相来源，
+   * 而它们迟早会不一致（改了代码忘了改数据文件）。
+   */
+  async function saveExternalBlocks(): Promise<void> {
+    if (deps.persist === undefined || deps.blocks === undefined) return;
+    const builtin = new Set(builtinBlockIds());
+    const external = deps.blocks.specs().filter((s) => !builtin.has(s.id));
+    await deps.persist.saveExternalBlocks(external);
+  }
+
+  /** 把用户沉淀的模板落盘。理由同上：只存非内置的。 */
+  async function saveUserTemplates(): Promise<void> {
+    if (deps.persist === undefined || deps.templates === undefined) return;
+    const userTemplates = deps.templates.specs().filter((t) => !t.builtin);
+    await deps.persist.saveTemplates(userTemplates);
+  }
+
   // SPA 回退：非 /api、非 /ws 的 GET 一律交还 index.html。
   // 必须注册在所有 API 路由**之后**，否则会把 /api/* 也吞掉。
   if (webRoot !== undefined) {
@@ -709,6 +910,15 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   return {
     app,
     store,
+    async loadPersisted(): Promise<number> {
+      if (deps.persist === undefined) return 0;
+      const items = await deps.persist.loadRuns();
+      for (const item of items) store.adopt(item.record, item.events);
+      return items.length;
+    },
+    async flushPersist(): Promise<void> {
+      await deps.persist?.flush();
+    },
     async waitForIdle(): Promise<void> {
       // 在途任务可能在等待期间又派生了新的，循环直到清空。
       while (inFlight.size > 0) {

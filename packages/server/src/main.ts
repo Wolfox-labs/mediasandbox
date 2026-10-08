@@ -15,7 +15,6 @@ import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_TOOLS,
-  createBlockRegistry,
   createStructuredTools,
   createTemplateRegistry,
   DEFAULT_POLICY,
@@ -35,11 +34,20 @@ import {
   type SandboxProvider,
 } from '@mediasandbox/sandbox';
 import { createServer } from './app.js';
+import { JsonPersist } from './persist.js';
+import { loadPersistedPools, type LoadedPools } from './boot.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = path.resolve(HERE, '../../..', 'workspaces');
 /** 前端构建产物目录。构建过就由本服务托管，使访问地址只有一个。 */
 const WEB_DIST = path.resolve(HERE, '../../web/dist');
+/**
+ * 落盘数据目录。
+ *
+ * 放在仓库根而不是 `dist/` 旁边：它是**数据**，`pnpm build` 不该动它。
+ * 已在 `.gitignore` 里排除。
+ */
+const DATA_ROOT = path.resolve(HERE, '../../..', 'data');
 
 function log(message: string): void {
   process.stdout.write(`[mediasandbox] ${message}\n`);
@@ -177,18 +185,43 @@ async function buildProviders(): Promise<{
   return { providers, defaultProvider };
 }
 
+/**
+ * 装回用户新增的 block 与模板。
+ *
+ * 逻辑在 `boot.ts`：那里能同时被服务启动与测试复用，
+ * 避免"测试里模拟的装入逻辑和 main.ts 里的不是同一条"。
+ */
+async function loadPools(persist: JsonPersist): Promise<LoadedPools> {
+  return await loadPersistedPools(persist, (message) => log(`  ⚠ ${message}`));
+}
+
 async function main(): Promise<void> {
+  // ── 落盘存储 ────────────────────────────────────────────────────────
+  //
+  // `RunStore` 曾经是内存 Map，重启即丢；block 池与模板池也是进程内构造的。
+  // 于是"越用越好用"（从跑过的项目沉淀模板）没有立足点 —— 沉淀出来的东西
+  // 下次启动就不在了。这里把它落到 JSON：零依赖、纯文本、可直接打开给人看。
+  const dataDir = process.env['MEDIASANDBOX_DATA'] ?? DATA_ROOT;
+  const persist = new JsonPersist({
+    rootDir: dataDir,
+    onError: (message, error) => {
+      log(`  ⚠ ${message}: ${error instanceof Error ? error.message : String(error)}`);
+    },
+  });
+
+  // 外部来源的 block 与模板**先装载、再建池子**：池子在注册期就校验类型，
+  // 装晚了就只剩"跳过校验"这一条路，而没校验过的 block 进池子正是要防的事。
+  const { blocks, externalBlocks, userTemplates } = await loadPools(persist);
+
   // 工具注册表：通用工具 + 结构化制作工具。结构化那两条只在 webpage 环境可见
   // （它们声明了 `envTypes: ['webpage']`），所以放进同一个注册表不会污染其它链路。
-  // block 池先建：结构化工具要**装在同一个池子上**，
-  // 否则自定义 block 会重现"规划器选得到、执行期说未注册"的断链。
-  const blocks = createBlockRegistry();
+  //
+  // 工具必须装在这一个池子上，否则自定义 block 会重现
+  // "规划器选得到、执行期说未注册"的断链。
   const registry = new ToolRegistry()
     .registerAll(BUILTIN_TOOLS)
     .registerAll(createStructuredTools(blocks));
-  // 模板池依赖 block 池：模板里的块类型要在注册期就校验存在性，
-  // 否则一个排错的模板会把这个错误复制到之后每个用它的项目上。
-  const templates = createTemplateRegistry(blocks);
+  const templates = createTemplateRegistry(blocks, [...userTemplates]);
   const decision = buildDecision();
   const llm = buildLlm();
   const { providers, defaultProvider } = await buildProviders();
@@ -206,6 +239,7 @@ async function main(): Promise<void> {
     registry,
     blocks,
     templates,
+    persist,
     decision,
     ...(llm !== undefined ? { llm } : {}),
     providers,
@@ -217,6 +251,10 @@ async function main(): Promise<void> {
 
   const server = http.createServer(instance.app);
   instance.attachWebSocket(server);
+
+  // **在 listen 之前**把历史运行记录装回来：否则第一批请求会看到一个空的运行列表，
+  // 而它几毫秒后就不是空的了 —— 这种"时有时无"最难排查。
+  const restoredRuns = await instance.loadPersisted();
 
   const port = Number(process.env['PORT'] ?? 8787);
   const host = process.env['HOST'] ?? '127.0.0.1';
@@ -233,6 +271,10 @@ async function main(): Promise<void> {
   log(`  工作区    ${WORKSPACE_ROOT}`);
   log(`  block 池  ${blocks.size} 类，分 ${blocks.groups().length} 组（结构化制作链路，webpage 环境）`);
   log(`  模板池    ${templates.size} 套（${templates.specs().map((t) => t.id).join(', ')}）`);
+  log(
+    `  持久化    ${dataDir}（装载 ${restoredRuns} 条运行记录` +
+      `、${externalBlocks.length} 个自定义 block、${userTemplates.length} 套模板）`,
+  );
   log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
   if (!webDistExists) {
     log('  前端      未构建（跑 pnpm --filter @mediasandbox/web build 后即可经本服务访问）');

@@ -14,6 +14,7 @@ import type {
   RunResult,
   StructureStep,
 } from '@mediasandbox/orchestrator';
+import type { RunPersist } from './persist.js';
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'escalated' | 'cancelled';
 
@@ -62,6 +63,14 @@ export class RunStore {
   private readonly runs = new Map<string, RunRecord>();
   private readonly controllers = new Map<string, AbortController>();
 
+  /**
+   * 落盘钩子。省略即纯内存——既有测试与"不配 dataDir"的部署不必被迫提供它。
+   *
+   * 刻意只认这个窄接口而不是文件系统：`RunStore` 的职责是"记住运行状态"，
+   * 存到哪、怎么存是另一个模块的事。这样它可以被单独测，也换得掉。
+   */
+  constructor(private readonly persist?: RunPersist | undefined) {}
+
   create(input: {
     id: string;
     projectId: string;
@@ -82,7 +91,19 @@ export class RunStore {
       attempts: [],
     };
     this.runs.set(input.id, record);
+    this.persist?.saveMeta(record);
     return record;
+  }
+
+  /**
+   * 启动时装载一条已落盘的运行记录。
+   *
+   * 与 `create` 的区别：**不回写**。装载本身就是从盘上读出来的，
+   * 再写一遍只会把刚读到的内容原样覆盖一次。
+   */
+  adopt(record: RunRecord, events: readonly OrchestrationEvent[]): void {
+    record.events.push(...events);
+    this.runs.set(record.id, record);
   }
 
   get(id: string): RunRecord | undefined {
@@ -98,12 +119,14 @@ export class RunStore {
     const record = this.runs.get(runId);
     if (record === undefined) return;
     record.events.push(event);
+    this.persist?.appendEvent(runId, event);
   }
 
   update(runId: string, patch: Partial<RunRecord>): void {
     const record = this.runs.get(runId);
     if (record === undefined) return;
     Object.assign(record, patch);
+    this.persist?.saveMeta(record);
   }
 
   registerController(runId: string, controller: AbortController): void {
