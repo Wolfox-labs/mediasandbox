@@ -351,6 +351,36 @@ describe('结构化链路：端到端（Local 沙盒，零成本）', () => {
     await sandbox.destroy(result.handle);
   });
 
+  it('执行结果回填进结构留痕：status 不再是 pending', async () => {
+    const result = await runStructured({
+      projectId: 'e2e-status-merge',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'features', 'cta'],
+      maxBlocks: 3,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+
+    // 结构是**产出**，所以它必须说最终形态。停在 `pending` 的话，
+    // 界面上会一直显示"三块都未填充"，而页面早就渲染好了——
+    // 数据、产物、日志三处都正常，只有这一处说反了。
+    const page = result.structure?.page;
+    assert.ok(page !== undefined, '结构没带到结果上');
+    for (const block of page.blocks) {
+      assert.equal(block.status, 'filled', `${block.id} 仍是 ${block.status}`);
+      assert.ok(
+        Object.keys(block.sources).length > 0,
+        `${block.id} 没有来源标记——"这块是模型写的还是确定性拼的"就看不出来了`,
+      );
+    }
+    // 回填不该改动结构本身：id 与类型要原样保留，否则"定点重做"就找不到目标了。
+    assert.deepEqual(
+      page.blocks.map((b) => b.id),
+      page.blocks.map((_, i) => `b${i + 1}`),
+      'id 应当是连续的 b1..bN',
+    );
+    await sandbox.destroy(result.handle);
+  });
+
   it('结构留痕被带到调用方——这是前端"先看结构再执行"与沉淀模板的材料', async () => {
     const events: string[] = [];
     let captured: unknown;

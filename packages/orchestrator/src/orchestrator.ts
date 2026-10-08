@@ -20,7 +20,7 @@ import type { LlmClient } from './llm/types.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { ToolError } from './tools/types.js';
 import { PlanAssembler, type AssembleResult } from './plan/assembler.js';
-import type { PageSpec } from './structured/page-spec.js';
+import type { BlockInstance, PageSpec } from './structured/page-spec.js';
 import type { StructureStep } from './structured/planner.js';
 import type { BlockRegistry } from './structured/block-spec.js';
 import type { TemplateSpec } from './structured/template-spec.js';
@@ -159,6 +159,63 @@ export interface AttemptRecord {
 /** 从计划里提取一个稳定的标识，用于"已试过哪些方案"的去重。 */
 function planKeyOf(plan: ExecutionPlan): string {
   return plan.nodes.map((n) => n.toolId).join('>');
+}
+
+/**
+ * 把执行结果回填进结构留痕：**让"结构"说的是最终形态，而不是计划形态**。
+ *
+ * ## 为什么必须做
+ *
+ * `structure` 来自组装阶段，那时每个块的 `status` 都是 `pending`（结构定了、还没填）。
+ * 不回填的话，界面上永远显示"三块都未填充"，而页面其实早就渲染好了——
+ * 数据、产物、日志三处都正常，只有这一处**说反了**。这正是本项目最在意的那类缺陷。
+ *
+ * ## 为什么按键对齐而不是按数组顺序
+ *
+ * `assembleStructured` 给每个块生成一个 `fill-block` 节点，**顺序与 `page.blocks`
+ * 一致**，所以按计划里的节点顺序对齐是准确的。`execution.outcomes` 的数组顺序
+ * 没有这个保证（并发执行，完成顺序不定）。
+ *
+ * ## 为什么只回填 status 与 sources，不复制 slots
+ *
+ * 内容已经在 `src/blocks/<id>.json` 与产物里了。复制进来有两个代价：
+ * 图是 data URI，一份页面的图集能让 `meta.json` 膨胀几十上百 KB；
+ * 而且内容会有两个真相来源，改了产物里的、忘了改记录里的，就对不上了。
+ */
+function mergeBlockStatuses(
+  structure: AssembleResult['structure'],
+  plan: ExecutionPlan | undefined,
+  execution: ExecutionResult | undefined,
+): AssembleResult['structure'] {
+  if (structure === undefined || plan === undefined || execution === undefined) return structure;
+
+  const fillNodeIds = plan.nodes.filter((n) => n.toolId === 'fill-block').map((n) => n.id);
+  const byNode = new Map(execution.outcomes.map((o) => [o.nodeId, o]));
+
+  const blocks = structure.page.blocks.map((block, index) => {
+    const nodeId = fillNodeIds[index];
+    const outcome = nodeId === undefined ? undefined : byNode.get(nodeId);
+    if (outcome === undefined) return block;
+
+    if (outcome.status === 'failed') {
+      return { ...block, status: 'failed' as const, error: outcome.error ?? '填充失败' };
+    }
+    if (outcome.status === 'skipped') {
+      return { ...block, status: 'skipped' as const };
+    }
+
+    const raw = outcome.result?.outputs['block'];
+    if (typeof raw !== 'string') return block;
+    try {
+      const filled = JSON.parse(raw) as BlockInstance;
+      return { ...block, status: filled.status, sources: filled.sources };
+    } catch {
+      // 填块的产出解析不了不该让整次运行失败：留痕回填是**锦上添花**。
+      return block;
+    }
+  });
+
+  return { ...structure, page: { ...structure.page, blocks } };
 }
 
 export class Orchestrator {
@@ -417,11 +474,12 @@ export class Orchestrator {
       durationMs,
       at: Date.now(),
     });
+    const finalStructure = mergeBlockStatuses(structure, plan, execution);
     return {
       status,
       ...(execution !== undefined ? { execution } : {}),
       ...(plan !== undefined ? { plan } : {}),
-      ...(structure !== undefined ? { structure } : {}),
+      ...(finalStructure !== undefined ? { structure: finalStructure } : {}),
       handle,
       attempts,
       durationMs,
