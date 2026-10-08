@@ -209,12 +209,29 @@ describe('落盘：block 与模板', () => {
   it('自定义 block 与模板往返一致', async () => {
     const dir = dataDir();
     const persist = new JsonPersist({ rootDir: dir });
-    await persist.saveExternalBlocks([{ id: 'promo', label: '促销' }]);
-    await persist.saveTemplates([{ id: 'tpl-a', label: 'A', description: 'd', blocks: [], builtin: false }]);
+    persist.saveExternalBlocks([{ id: 'promo', label: '促销' }]);
+    persist.saveTemplates([
+      { id: 'tpl-a', label: 'A', description: 'd', blocks: [], builtin: false },
+    ]);
+    await persist.flush();
 
     const again = new JsonPersist({ rootDir: dir });
     assert.deepEqual(await again.loadExternalBlocks(), [{ id: 'promo', label: '促销' }]);
     assert.equal((await again.loadTemplates()).length, 1);
+  });
+
+  it('连续写同一个文件时按顺序落地（并发整文件写会互相覆盖）', async () => {
+    // 这条是实测踩出来的：连续"创建模板 → 删除模板"，两次整文件写并发，
+    // 创建那次的写入后落地，于是**删掉的模板在盘上复活了**。
+    const dir = dataDir();
+    const persist = new JsonPersist({ rootDir: dir });
+    persist.saveTemplates([{ id: 'first' }]);
+    persist.saveTemplates([{ id: 'second' }]);
+    persist.saveTemplates([]);
+    await persist.flush();
+
+    const loaded = await new JsonPersist({ rootDir: dir }).loadTemplates();
+    assert.deepEqual(loaded, [], '最后一次写入必须胜出');
   });
 
   it('文件不存在时返回空数组', async () => {

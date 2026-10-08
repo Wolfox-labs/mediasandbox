@@ -54,6 +54,8 @@ async function startServer(overrides: {
   dataDir?: string;
   /** 预先装好的池子（模拟重启时的装载结果）。省略则用内置池。 */
   pools?: LoadedPools;
+  /** 交付物落定目录。给了之后产物不随沙盒回收消失。 */
+  projectsDir?: string;
 } = {}): Promise<{
   origin: string;
   close: () => Promise<void>;
@@ -89,6 +91,7 @@ async function startServer(overrides: {
     ...(blocks !== undefined ? { blocks } : {}),
     ...(templates !== undefined ? { templates } : {}),
     ...(persist !== undefined ? { persist } : {}),
+    ...(overrides.projectsDir !== undefined ? { projectsDir: overrides.projectsDir } : {}),
     decision: overrides.decision ?? makeDecision(),
     ...(overrides.llm !== undefined ? { llm: overrides.llm } : {}),
     providers: { local: localSandbox },
@@ -396,8 +399,8 @@ describe('HTTP + WebSocket 服务', () => {
  * 所以结束后不能立刻销毁；但此前**从不销毁**，每跑一次就永久多一个工作区。
  * 实测：连提 3 次运行，`workspaces/local/` 下就留下 3 个目录，永不回收。
  */
-describe('沙盒保留与回收', () => {
-  it('保留额度用满后，最旧的沙盒被销毁；产物随之不可再下载（410）', async () => {
+describe('沙盒保留与回收（未配 projectsDir 的旧行为）', () => {
+  it('保留额度用满后，最旧的沙盒被销毁；没有落定副本时产物不可再下载（410）', async () => {
     const ctx = await startServer({ maxRuns: 2 });
     try {
       const runIds: string[] = [];
@@ -467,7 +470,7 @@ describe('沙盒保留与回收', () => {
     }
   });
 
-  it('额度为 0 时运行结束即销毁沙盒，产物不可再下载', async () => {
+  it('额度为 0 时运行结束即销毁沙盒；没有落定副本时产物不可再下载', async () => {
     const ctx = await startServer({ maxRuns: 0 });
     try {
       const submit = await fetch(`${ctx.origin}/api/runs`, {
@@ -493,8 +496,113 @@ describe('沙盒保留与回收', () => {
   });
 });
 
-/** 轮询直到状态落在期望集合里，或超时。 */
-async function waitForStatus(
+describe('交付物落定：产物不随沙盒回收消失', () => {
+  let projectsRoot = '';
+
+  before(async () => {
+    const os = await import('node:os');
+    const fsp = await import('node:fs/promises');
+    const path = await import('node:path');
+    projectsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-projects-'));
+  });
+
+  after(async () => {
+    const fsp = await import('node:fs/promises');
+    if (projectsRoot !== '') await fsp.rm(projectsRoot, { recursive: true, force: true });
+  });
+
+  async function runOnce(ctx: Awaited<ReturnType<typeof startServer>>, goal: string): Promise<string> {
+    const submit = await fetch(`${ctx.origin}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ goal, envType: 'copy', projectId: 'proj-settle' }),
+    });
+    assert.equal(submit.status, 202);
+    const { runId } = (await submit.json()) as { runId: string };
+    await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+    return runId;
+  }
+
+  it('沙盒额度 0（运行一结束就销毁）时，产物**仍然下得下来**', async () => {
+    const ctx = await startServer({
+      maxRuns: 0,
+      projectsDir: path.join(projectsRoot, 'zero'),
+    });
+    try {
+      const runId = await runOnce(ctx, '落定用例：额度 0');
+      const body = (await (
+        await fetch(`${ctx.origin}/api/runs/${runId}/artifacts`)
+      ).json()) as { artifacts: { path: string; settled: boolean }[] };
+      assert.ok(body.artifacts.length > 0);
+      assert.equal(body.artifacts[0]?.settled, true, '应当已落定一份');
+
+      const name = body.artifacts[0]!.path.split('/').pop()!;
+      const download = await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/${name}`);
+      // 这条是本次改动的核心：沙盒已经销毁了，但交付物还在。
+      assert.equal(download.status, 200, '沙盒销毁不该让交付物消失');
+      const text = await download.text();
+      assert.ok(text.length > 0, '落定副本要有内容');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('超出保留额度被淘汰之后，产物照样可下载', async () => {
+    const ctx = await startServer({
+      maxRuns: 1,
+      projectsDir: path.join(projectsRoot, 'evict'),
+    });
+    try {
+      const first = await runOnce(ctx, '落定用例：第一个');
+      const second = await runOnce(ctx, '落定用例：第二个');
+
+      for (const runId of [first, second]) {
+        const body = (await (
+          await fetch(`${ctx.origin}/api/runs/${runId}/artifacts`)
+        ).json()) as { artifacts: { path: string }[] };
+        const name = body.artifacts[0]!.path.split('/').pop()!;
+        const download = await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/${name}`);
+        // 第一个的沙盒已被回收，但它落定过——所以仍然是 200。
+        assert.equal(download.status, 200, `${runId} 的产物应当仍可下载`);
+      }
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('导出 ZIP 也走落定副本：被淘汰的项目仍能导出', async () => {
+    const ctx = await startServer({
+      maxRuns: 0,
+      projectsDir: path.join(projectsRoot, 'zip'),
+    });
+    try {
+      await runOnce(ctx, '落定用例：导出');
+      const response = await fetch(`${ctx.origin}/api/projects/proj-settle/export`);
+      assert.equal(response.status, 200, '沙盒都销毁了，导出仍应成功');
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      assert.ok(bytes.byteLength > 0);
+      // ZIP 魔数，确认拿到的是个压缩包而不是错误页。
+      assert.equal(String.fromCharCode(bytes[0]!, bytes[1]!), 'PK');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('落定副本按项目与运行分目录，不会互相覆盖', async () => {
+    const dir = path.join(projectsRoot, 'layout');
+    const ctx = await startServer({ maxRuns: 5, projectsDir: dir });
+    try {
+      const runId = await runOnce(ctx, '落定用例：目录结构');
+      const fsp = await import('node:fs/promises');
+      const entries = await fsp.readdir(path.join(dir, 'proj-settle', 'runs'));
+      assert.ok(entries.includes(runId), `落定目录里应有 ${runId}，实际 ${entries.join(', ')}`);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+/** 轮询直到状态落在期望集合里，或超时。 */async function waitForStatus(
   origin: string,
   runId: string,
   expected: readonly string[],

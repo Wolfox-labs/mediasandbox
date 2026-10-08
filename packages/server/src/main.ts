@@ -48,6 +48,14 @@ const WEB_DIST = path.resolve(HERE, '../../web/dist');
  * 已在 `.gitignore` 里排除。
  */
 const DATA_ROOT = path.resolve(HERE, '../../..', 'data');
+/**
+ * 交付物落定目录。
+ *
+ * 与 `workspaces/` 分开是**有意的**：工作区是临时空间（按保留额度回收），
+ * 交付物是成果（长期留着）。此前两者是同一个目录，于是"防止工作区无限增长"
+ * 的代价变成了"把交付物删掉"——对一个产出交付物的系统来说，这个取舍是反的。
+ */
+const PROJECTS_ROOT = path.resolve(HERE, '../../..', 'projects');
 
 function log(message: string): void {
   process.stdout.write(`[mediasandbox] ${message}\n`);
@@ -240,6 +248,8 @@ async function main(): Promise<void> {
     blocks,
     templates,
     persist,
+    projectsDir: PROJECTS_ROOT,
+    onLog: (message) => log(`  ${message}`),
     decision,
     ...(llm !== undefined ? { llm } : {}),
     providers,
@@ -269,6 +279,7 @@ async function main(): Promise<void> {
   log(`  WebSocket ws://${host}:${port}/ws`);
   log(`  沙盒      ${defaultProvider}（可用: ${Object.keys(providers).join(', ')}）`);
   log(`  工作区    ${WORKSPACE_ROOT}`);
+  log(`  交付物    ${PROJECTS_ROOT}（运行结束后落定一份，不随沙盒回收消失）`);
   log(`  block 池  ${blocks.size} 类，分 ${blocks.groups().length} 组（结构化制作链路，webpage 环境）`);
   log(`  模板池    ${templates.size} 套（${templates.specs().map((t) => t.id).join(', ')}）`);
   log(

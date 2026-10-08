@@ -12,8 +12,9 @@
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import path from 'node:path';
+import { mkdir, readFile, stat as statFile, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
-import type { EnvType, SandboxProvider } from '@mediasandbox/sandbox';
+import type { Artifact, EnvType, SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
 import { ENV_TYPES } from '@mediasandbox/sandbox';
 import {
   BLOCK_GROUP_LABELS,
@@ -62,6 +63,20 @@ export interface ServerDeps {
    * 而"读回"不在 `RunStore` 需要的那个写穿接口里。
    */
   readonly persist?: JsonPersist | undefined;
+  /**
+   * 交付物落定目录。
+   *
+   * 省略则产物**只在沙盒工作区里**——沙盒一被回收（保留额度满），产物就没了。
+   *
+   * 给了之后，每次运行结束会把 `artifacts/` **复制一份**到这里，与沙盒生命周期
+   * 解耦。这么做是因为原来的取舍是反的：那套保留额度本来是为了"别让工作区无限增长"，
+   * 代价却是**把交付物本身删掉**——对一个"产出交付物"的系统来说，等于把成果当垃圾清。
+   *
+   * 正确的分法是：**工作区照旧回收（那是临时空间），交付物单独留。**
+   */
+  readonly projectsDir?: string | undefined;
+  /** 日志出口。落定失败之类"不该让运行失败但必须让人知道"的事走它。 */
+  readonly onLog?: ((message: string) => void) | undefined;
   /** 按 provider 名取实现：'local' 或 'docker'。 */
   readonly providers: Readonly<Record<string, SandboxProvider>>;
   readonly defaultProvider: string;
@@ -71,14 +86,13 @@ export interface ServerDeps {
   /**
    * 沙盒保留策略。
    *
-   * 产物下载是**从沙盒工作区实时读**的（本层刻意不缓存产物内容），
-   * 所以 run 结束后不能立刻销毁沙盒，否则产物下不下来。
-   * 但也不能永不销毁——每跑一次就永久留下一个工作区（Local 是目录，Docker 是容器），
-   * 跑 100 次就有 100 个。
+   * 沙盒工作区不能永不销毁——每跑一次就永久留下一个（Local 是目录，Docker 是容器），
+   * 跑 100 次就有 100 个。取折中：**保留最近 N 个**，超出后按完成时间从旧到新销毁。
    *
-   * 取折中：**保留最近 N 个**，超出后按完成时间从旧到新销毁。
-   * 被淘汰的 run 再下载产物会得到 410（该分支本来就已存在）。
-   * 设为 0 表示不保留（run 一结束就销毁，产物不可再下载）。
+   * **它管的是工作区，不是交付物**：配了 `projectsDir` 之后，产物在运行结束时已经
+   * 落定一份，被淘汰的 run 照样下载得到。只有当 `projectsDir` 省略时，
+   * 淘汰才会连带产物一起失去（那种情况返回 410）。
+   * 设为 0 表示不留工作区——**交付物仍然留下**。
    */
   readonly sandboxRetention?:
     | {
@@ -192,6 +206,105 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
   }
 
+  /**
+   * 交付物落定目录：`<projectsDir>/<projectId>/runs/<runId>/`。
+   *
+   * 没配 `projectsDir` 就返回 undefined —— 那时的行为与从前一致
+   * （产物只在沙盒里，随回收消失）。这条是**可选增强**，不是新的前提。
+   */
+  function settledDirFor(record: RunRecord): string | undefined {
+    if (deps.projectsDir === undefined) return undefined;
+    return path.join(deps.projectsDir, record.projectId, 'runs', record.id);
+  }
+
+  /**
+   * 把一个产物路径拼到落定目录下。**越界一律返回 undefined**。
+   *
+   * 产物路径最终来自工具产出，不是可信输入。两道检查：段里不能有 `..`、
+   * 不能是绝对路径；`resolve` 之后还必须仍在落定目录内。
+   */
+  function settledPathFor(record: RunRecord, artifactPath: string): string | undefined {
+    const dir = settledDirFor(record);
+    if (dir === undefined) return undefined;
+    const rel = artifactPath.replace(/\\/g, '/');
+    if (rel.startsWith('/') || rel.split('/').includes('..')) return undefined;
+    const base = path.resolve(dir);
+    const full = path.resolve(base, rel);
+    return full.startsWith(`${base}${path.sep}`) ? full : undefined;
+  }
+
+  /**
+   * 把这次运行的产物复制一份到落定目录。
+   *
+   * **在沙盒回收之前调用**：回收是不可逆的，落定失败还有机会重试，回收之后再无可能。
+   * 落定失败**不让运行失败**——运行已经成功了，产物也在沙盒里；失败只记日志。
+   */
+  async function settleArtifacts(record: RunRecord, handle: SandboxHandle): Promise<void> {
+    if (deps.projectsDir === undefined || record.artifacts.length === 0) return;
+    const provider = deps.providers[record.provider];
+    if (provider === undefined) return;
+
+    let saved = 0;
+    const failures: string[] = [];
+    for (const artifact of record.artifacts) {
+      const target = settledPathFor(record, artifact.path);
+      if (target === undefined) {
+        failures.push(`${artifact.path}（路径越界或不合法）`);
+        continue;
+      }
+      try {
+        const bytes = await provider.readFile(handle, artifact.path);
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, bytes);
+        saved += 1;
+      } catch (error) {
+        failures.push(
+          `${artifact.path}（${error instanceof Error ? error.message : String(error)}）`,
+        );
+      }
+    }
+
+    if (failures.length > 0) {
+      deps.onLog?.(`运行 ${record.id} 有 ${failures.length} 个产物未能落定：${failures.join('；')}`);
+    }
+    if (saved > 0) {
+      deps.onLog?.(`运行 ${record.id} 落定 ${saved} 个产物到 ${settledDirFor(record) ?? ''}`);
+    }
+  }
+
+  /**
+   * 读一个产物：**先看落定副本，再看沙盒**。
+   *
+   * 顺序不能反：沙盒会被回收，落定副本不会。先问沙盒的话，回收之后就再也读不到，
+   * 而副本明明还在——那正是这次要修掉的行为。
+   */
+  async function readArtifact(
+    record: RunRecord,
+    artifact: Artifact,
+  ): Promise<
+    { bytes: Uint8Array } | { error: 'NO_SANDBOX' } | { error: 'READ_FAILED'; detail: string }
+  > {
+    const settled = settledPathFor(record, artifact.path);
+    if (settled !== undefined) {
+      try {
+        return { bytes: new Uint8Array(await readFile(settled)) };
+      } catch {
+        // 落定副本不在（老数据、或落定那一步失败过）→ 老老实实回沙盒取。
+      }
+    }
+
+    const provider = deps.providers[record.provider];
+    if (provider === undefined) return { error: 'NO_SANDBOX' };
+    const sandboxId = sandboxIdByRun.get(record.id);
+    const handle = sandboxId === undefined ? undefined : await provider.get(sandboxId);
+    if (handle === undefined) return { error: 'NO_SANDBOX' };
+    try {
+      return { bytes: await provider.readFile(handle, artifact.path) };
+    } catch (error) {
+      return { error: 'READ_FAILED', detail: String(error) };
+    }
+  }
+
   function broadcast(runId: string, event: OrchestrationEvent): void {
     const payload = JSON.stringify(toWireEvent(runId, event));
     for (const [socket, filter] of subscribers) {
@@ -296,6 +409,10 @@ export function createServer(deps: ServerDeps): CreateServerResult {
             }
           : {}),
       });
+
+      // **落定必须在沙盒回收之前**：回收是不可逆的（`finally` 里就做），
+      // 落定失败还有机会重试，回收之后再无可能。
+      await settleArtifacts(record, result.handle);
     } catch (error) {
       store.update(record.id, {
         status: controller.signal.aborted ? 'cancelled' : 'failed',
@@ -534,30 +651,20 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     let skipped = 0;
 
     for (const run of runs) {
-      const provider = deps.providers[run.provider];
-      const sandboxId = sandboxIdByRun.get(run.id);
-      if (provider === undefined || sandboxId === undefined) {
-        skipped += run.artifacts.length;
-        continue;
-      }
-      const handle = await provider.get(sandboxId);
-      if (handle === undefined) {
-        // 沙盒已被回收，这个 run 的产物读不到了。
-        skipped += run.artifacts.length;
-        continue;
-      }
       for (const artifact of run.artifacts) {
-        try {
-          const bytes = await provider.readFile(handle, artifact.path);
-          // 包内路径带 run 前缀，避免多次运行的同名产物（都叫 artifacts/copy.md）互相覆盖。
-          const shortRun = run.id.replace(/^run-/, '');
-          entries.push({
-            path: `${projectId}/${shortRun}/${artifact.path.split('/').pop() ?? 'artifact'}`,
-            data: bytes,
-          });
-        } catch {
+        // 与单文件下载共用同一条读取路径：先落定副本、再沙盒。
+        // 各写一份的话，"回收之后还能不能导出"会变成两个答案。
+        const read = await readArtifact(run, artifact);
+        if ('error' in read) {
           skipped += 1;
+          continue;
         }
+        // 包内路径带 run 前缀，避免多次运行的同名产物（都叫 artifacts/copy.md）互相覆盖。
+        const shortRun = run.id.replace(/^run-/, '');
+        entries.push({
+          path: `${projectId}/${shortRun}/${artifact.path.split('/').pop() ?? 'artifact'}`,
+          data: read.bytes,
+        });
       }
     }
 
@@ -566,7 +673,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         res,
         410,
         '没有可导出的产物',
-        skipped > 0 ? `${skipped} 个产物所在的沙盒已被回收` : '该项目还没有产物',
+        skipped > 0
+          ? `${skipped} 个产物所在的沙盒已被回收，且没有落定副本`
+          : '该项目还没有产物',
       );
       return;
     }
@@ -584,13 +693,27 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     res.send(zip);
   });
 
-  app.get('/api/runs/:runId/artifacts', (req: Request, res: Response) => {
+  app.get('/api/runs/:runId/artifacts', async (req: Request, res: Response) => {
     const record = store.get(paramOf(req, 'runId'));
     if (record === undefined) {
       errorResponse(res, 404, '运行不存在');
       return;
     }
-    res.json({ artifacts: record.artifacts });
+    // `settled` 是**派生**出来的（落定副本还在不在），不是存下来的字段：
+    // 存一份就要跟文件系统对账，而对账迟早会对不上。
+    const artifacts = await Promise.all(
+      record.artifacts.map(async (a) => {
+        const settled = settledPathFor(record, a.path);
+        const exists =
+          settled !== undefined &&
+          (await statFile(settled).then(
+            () => true,
+            () => false,
+          ));
+        return { ...a, settled: exists };
+      }),
+    );
+    res.json({ artifacts });
   });
 
   /** 下载单个产物。名字只允许 artifacts/ 下的文件。 */
@@ -598,11 +721,6 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     const record = store.get(paramOf(req, 'runId'));
     if (record === undefined) {
       errorResponse(res, 404, '运行不存在');
-      return;
-    }
-    const provider = deps.providers[record.provider];
-    if (provider === undefined) {
-      errorResponse(res, 500, `provider ${record.provider} 已不可用`);
       return;
     }
 
@@ -613,21 +731,18 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
 
-    const sandboxId = sandboxIdByRun.get(record.id);
-    const handle = sandboxId === undefined ? undefined : await provider.get(sandboxId);
-    if (handle === undefined) {
-      errorResponse(res, 410, '沙盒已销毁，产物不可再读');
+    const read = await readArtifact(record, target);
+    if ('error' in read) {
+      if (read.error === 'NO_SANDBOX') {
+        errorResponse(res, 410, '沙盒已销毁，产物不可再读', '该产物也没有落定副本');
+      } else {
+        errorResponse(res, 500, '读取产物失败', read.detail);
+      }
       return;
     }
-
-    try {
-      const bytes = await provider.readFile(handle, target.path);
-      res.setHeader('content-type', target.mimeHint);
-      res.setHeader('content-length', String(bytes.byteLength));
-      res.send(Buffer.from(bytes));
-    } catch (error) {
-      errorResponse(res, 500, '读取产物失败', String(error));
-    }
+    res.setHeader('content-type', target.mimeHint);
+    res.setHeader('content-length', String(read.bytes.byteLength));
+    res.send(Buffer.from(read.bytes));
   });
 
   app.post('/api/runs/:runId/cancel', (req: Request, res: Response) => {
@@ -756,7 +871,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
 
     // 落盘只存**外部来源**的：内置的由代码提供，存一份只会造成两个真相来源。
-    void saveExternalBlocks();
+    // 不 await：写入在 `JsonPersist` 内部**按文件排队**，顺序有保证——
+    // 并发整文件写会互相覆盖，实测踩到过"删掉的模板在盘上复活"。
+    saveExternalBlocks();
 
     res.status(201).json({
       block: { id: spec.id, label: spec.label, group: spec.group },
@@ -844,7 +961,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       throw error;
     }
 
-    void saveUserTemplates();
+    saveUserTemplates();
     res.status(201).json({
       template: {
         id: spec.id,
@@ -875,7 +992,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       errorResponse(res, 404, `未知模板: ${id}`);
       return;
     }
-    void saveUserTemplates();
+    saveUserTemplates();
     res.json({ removed: id });
   });
 
@@ -885,18 +1002,18 @@ export function createServer(deps: ServerDeps): CreateServerResult {
    * **只存非内置的**：内置的由代码提供，也存一份就会有两个真相来源，
    * 而它们迟早会不一致（改了代码忘了改数据文件）。
    */
-  async function saveExternalBlocks(): Promise<void> {
+  function saveExternalBlocks(): void {
     if (deps.persist === undefined || deps.blocks === undefined) return;
     const builtin = new Set(builtinBlockIds());
     const external = deps.blocks.specs().filter((s) => !builtin.has(s.id));
-    await deps.persist.saveExternalBlocks(external);
+    deps.persist.saveExternalBlocks(external);
   }
 
   /** 把用户沉淀的模板落盘。理由同上：只存非内置的。 */
-  async function saveUserTemplates(): Promise<void> {
+  function saveUserTemplates(): void {
     if (deps.persist === undefined || deps.templates === undefined) return;
     const userTemplates = deps.templates.specs().filter((t) => !t.builtin);
-    await deps.persist.saveTemplates(userTemplates);
+    deps.persist.saveTemplates(userTemplates);
   }
 
   // SPA 回退：非 /api、非 /ws 的 GET 一律交还 index.html。

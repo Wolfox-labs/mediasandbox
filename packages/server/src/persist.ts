@@ -42,6 +42,16 @@ export interface RunPersist {
   appendEvent(runId: string, event: OrchestrationEvent): void;
 }
 
+/**
+ * 池子类文件的写链键。
+ *
+ * 它们不是 run，但**同样需要顺序保证**：`templates.json` 是整体重写的，
+ * 两次并发写会互相覆盖 —— 实测踩到过：连续"创建模板 → 删除模板"之后，
+ * 创建那次的写入后落地，于是**删掉的模板在盘上复活了**。
+ */
+const BLOCKS_KEY = '#blocks';
+const TEMPLATES_KEY = '#templates';
+
 export interface PersistOptions {
   /** 数据根目录。子目录与文件由本模块自己建。 */
   readonly rootDir: string;
@@ -102,13 +112,13 @@ export class JsonPersist implements RunPersist {
     return this.ready;
   }
 
-  /** 把一件事排进某个 run 的写链。前一件失败不影响后一件。 */
-  private enqueue(runId: string, task: () => Promise<void>): void {
-    const prev = this.chains.get(runId) ?? Promise.resolve();
+  /** 把一件事排进某条写链。前一件失败不影响后一件。 */
+  private enqueue(key: string, task: () => Promise<void>): void {
+    const prev = this.chains.get(key) ?? Promise.resolve();
     const next = prev.then(task).catch((error: unknown) => {
-      this.options.onError?.(`落盘失败（run ${runId}）`, error);
+      this.options.onError?.(`落盘失败（${key}）`, error);
     });
-    this.chains.set(runId, next);
+    this.chains.set(key, next);
   }
 
   saveMeta(record: RunRecord): void {
@@ -195,18 +205,22 @@ export class JsonPersist implements RunPersist {
   }
 
   /** 保存用户新增的 block（**只存外部来源的**，内置的由代码提供）。 */
-  async saveExternalBlocks(specs: readonly unknown[]): Promise<void> {
-    await this.ensureReady();
-    await writeFile(this.blocksFile, `${JSON.stringify(specs, null, 2)}\n`, 'utf8');
+  saveExternalBlocks(specs: readonly unknown[]): void {
+    this.enqueue(BLOCKS_KEY, async () => {
+      await this.ensureReady();
+      await writeFile(this.blocksFile, `${JSON.stringify(specs, null, 2)}\n`, 'utf8');
+    });
   }
 
   async loadExternalBlocks(): Promise<unknown[]> {
     return await this.readArray(this.blocksFile);
   }
 
-  async saveTemplates(specs: readonly unknown[]): Promise<void> {
-    await this.ensureReady();
-    await writeFile(this.templatesFile, `${JSON.stringify(specs, null, 2)}\n`, 'utf8');
+  saveTemplates(specs: readonly unknown[]): void {
+    this.enqueue(TEMPLATES_KEY, async () => {
+      await this.ensureReady();
+      await writeFile(this.templatesFile, `${JSON.stringify(specs, null, 2)}\n`, 'utf8');
+    });
   }
 
   async loadTemplates(): Promise<unknown[]> {
