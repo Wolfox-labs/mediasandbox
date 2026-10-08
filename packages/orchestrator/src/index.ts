@@ -64,6 +64,7 @@ export {
   type SlotFillPlan,
   type SlotValue,
   type StructureFix,
+  type ValidatePageSpecOptions,
 } from './structured/page-spec.js';
 export {
   blockTypeSequence,

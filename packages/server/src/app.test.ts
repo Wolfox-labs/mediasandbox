@@ -1070,3 +1070,308 @@ describe('持久化：重启之后东西还在', () => {
     }
   });
 });
+
+/**
+ * 结构：读得明确、改得下来。
+ *
+ * 结构从 P1 起就是**产出**（run 详情与 WebSocket 都带着它），但此前只能读：
+ * 既没有"按给定结构重跑"的入口，也没有任何一条能把定点编辑落库的路。
+ * 这一组守住两条通道，以及它们的边界（环境、运行中、原子性、重启之后）。
+ */
+describe('结构：带指定 PageSpec 重跑与定点编辑', () => {
+  const dataRoot = path.join(os.tmpdir(), `mediasandbox-structure-test-${process.pid}`);
+
+  after(async () => {
+    const fsp = await import('node:fs/promises');
+    await fsp.rm(dataRoot, { recursive: true, force: true });
+  });
+
+  /** 一份最小的合法结构：三块，够验顺序调整。 */
+  const SPEC = {
+    blocks: [
+      { id: 'b1', type: 'hero' },
+      { id: 'b2', type: 'features' },
+      { id: 'b3', type: 'footer' },
+    ],
+  };
+
+  type StructureView = {
+    readonly page: { readonly templateId: string | null; readonly blocks: { id: string; type: string; status: string }[] };
+    readonly steps: unknown[];
+  };
+
+  async function post(
+    ctx: Awaited<ReturnType<typeof startServer>>,
+    path: string,
+    body: unknown,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const response = await fetch(`${ctx.origin}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  }
+
+  /** 跑一次带 pageSpec 的 webpage 运行，等到终态。 */
+  async function runWithSpec(
+    ctx: Awaited<ReturnType<typeof startServer>>,
+    extra: Record<string, unknown> = {},
+  ): Promise<string> {
+    const created = await post(ctx, '/api/runs', {
+      goal: '做一个产品介绍落地页',
+      envType: 'webpage',
+      pageSpec: SPEC,
+      ...extra,
+    });
+    assert.equal(created.status, 202, JSON.stringify(created.body));
+    const runId = created.body['runId'] as string;
+    await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+    return runId;
+  }
+
+  async function structureOf(
+    ctx: Awaited<ReturnType<typeof startServer>>,
+    runId: string,
+  ): Promise<StructureView> {
+    const response = await fetch(`${ctx.origin}/api/runs/${runId}/structure`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { structure: StructureView };
+    return body.structure;
+  }
+
+  function types(view: StructureView): string[] {
+    return view.page.blocks.map((b) => b.type);
+  }
+
+  it('pageSpec 只在 webpage 环境下被接受——静默忽略是最坏的结果', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const result = await post(ctx, '/api/runs', {
+        goal: '写一段产品介绍',
+        envType: 'copy',
+        pageSpec: SPEC,
+      });
+      assert.equal(result.status, 400);
+      assert.match(String(result.body['error'] ?? ''), /webpage/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('pageSpec 形态不对时 400，说清是哪个字段，且不留运行记录', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const cases: [unknown, RegExp][] = [
+        [{ blocks: [] }, /非空数组/],
+        [{ blocks: [{ id: 'b1', type: 'hero', slots: { title: { kind: 'nope' } } }] }, /kind 非法/],
+        [{ blocks: [{ id: 'b1', type: 'hero' }, { id: 'b1', type: 'cta' }] }, /重复/],
+        [{ blocks: [{ id: 'b1', type: 'hero', status: 'weird' }] }, /status 非法/],
+        [{ blocks: [{ id: '不 合 法', type: 'hero' }] }, /id 形态非法/],
+        // 标了 filled 却没给内容：只按结构重跑应当标 pending（或缺省），
+        // 而 filled 的含义就是"内容已在手里"。
+        [{ blocks: [{ id: 'b1', type: 'hero', status: 'filled' }] }, /必需 slot/],
+      ];
+      for (const [pageSpec, expected] of cases) {
+        const result = await post(ctx, '/api/runs', {
+          goal: '做一个产品介绍落地页',
+          envType: 'webpage',
+          pageSpec,
+        });
+        assert.equal(result.status, 400, JSON.stringify(pageSpec));
+        assert.match(String(result.body['error'] ?? ''), expected, JSON.stringify(pageSpec));
+      }
+      // 先验输入再建记录：否则一个 400 会留下一条永远 queued 的运行。
+      const list = (await (await fetch(`${ctx.origin}/api/runs`)).json()) as { runs: unknown[] };
+      assert.deepEqual(list.runs, []);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('带 pageSpec 跑：结构就是给定的那份，决策层一轮都没被问', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const runId = await runWithSpec(ctx);
+      const detail = (await (await fetch(`${ctx.origin}/api/runs/${runId}`)).json()) as {
+        status: string;
+        structure: StructureView | null;
+      };
+      assert.equal(detail.status, 'succeeded', JSON.stringify(detail).slice(0, 400));
+      assert.deepEqual(detail.structure === null ? [] : types(detail.structure), [
+        'hero',
+        'features',
+        'footer',
+      ]);
+      // 没有决策轮次就没有留痕：编一条假的"问过了"只会让留痕骗人。
+      assert.deepEqual(detail.structure?.steps, []);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('pageSpec 盖过 templateId / candidateBlockIds / maxBlocks，并主动说明', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const created = await post(ctx, '/api/runs', {
+        goal: '做一个产品介绍落地页',
+        envType: 'webpage',
+        pageSpec: SPEC,
+        // 刻意给一个**不存在**的模板：被盖过的参数不该再拿"未知模板"把人挡在门外。
+        templateId: 'no-such-template',
+        candidateBlockIds: ['hero'],
+        maxBlocks: 1,
+      });
+      assert.equal(created.status, 202, JSON.stringify(created.body));
+      const note = String(created.body['note'] ?? '');
+      assert.match(note, /templateId/, '被盖过的入参要主动说出来');
+      assert.match(note, /candidateBlockIds/);
+
+      const runId = created.body['runId'] as string;
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+      const view = await structureOf(ctx, runId);
+      assert.equal(view.page.templateId, null, '模板不该被套上');
+      assert.deepEqual(types(view), ['hero', 'features', 'footer'], 'maxBlocks 不该限制给定结构');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('GET /api/runs/:id/structure 与 run 详情里的结构是同一份', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const runId = await runWithSpec(ctx);
+      const view = await structureOf(ctx, runId);
+      const detail = (await (await fetch(`${ctx.origin}/api/runs/${runId}`)).json()) as {
+        structure: unknown;
+      };
+      assert.deepEqual(view, detail.structure);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('运行还在进行中时拒绝改结构——编辑会被执行结果整个覆盖', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const runId = await runWithSpec(ctx);
+      // 直接置成 running，不去撞"刚好还在跑"的那一刻：时序断言必然是脆的。
+      ctx.store.update(runId, { status: 'running' });
+      const result = await post(ctx, `/api/runs/${runId}/structure/ops`, {
+        ops: [{ op: 'move', blockId: 'b1', toIndex: 2 }],
+      });
+      assert.equal(result.status, 409);
+      assert.match(String(result.body['error'] ?? ''), /进行中/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('没有结构化留痕的运行上改结构 → 409，而不是 500', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const created = await post(ctx, '/api/runs', { goal: '写一段产品介绍', envType: 'copy' });
+      assert.equal(created.status, 202);
+      const runId = created.body['runId'] as string;
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      const ops = await post(ctx, `/api/runs/${runId}/structure/ops`, {
+        ops: [{ op: 'remove', blockId: 'b1' }],
+      });
+      assert.equal(ops.status, 409);
+      assert.match(String(ops.body['error'] ?? ''), /没有结构/);
+
+      const get = await fetch(`${ctx.origin}/api/runs/${runId}/structure`);
+      assert.equal(get.status, 409);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('ops 定点编辑：移动、删除、追加都生效，并带回规范化修正', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const runId = await runWithSpec(ctx);
+      const result = await post(ctx, `/api/runs/${runId}/structure/ops`, {
+        ops: [
+          // footer 挪到最前——版式规范化的作用就是把这类"单看合法、顺序不合语义"的排布纠回来。
+          { op: 'move', blockId: 'b3', toIndex: 0 },
+          { op: 'remove', blockId: 'b2' },
+          { op: 'append', type: 'cta', slots: { text: { kind: 'text', text: '现在开始' } } },
+        ],
+      });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.equal(result.body['applied'], 3);
+
+      const view = result.body['structure'] as StructureView;
+      assert.deepEqual(types(view), ['hero', 'cta', 'footer']);
+      const fixes = result.body['fixes'] as { kind: string; detail: string }[];
+      assert.ok(fixes.length >= 1, 'footer 归位没留下修正记录');
+
+      // 编辑不是只活在这一次响应里：详情里也必须是改过的那份。
+      assert.deepEqual(types(await structureOf(ctx, runId)), ['hero', 'cta', 'footer']);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('一批 op 里有一条失败，整批不生效——半批生效会让人对不上账', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const runId = await runWithSpec(ctx);
+
+      const outOfRange = await post(ctx, `/api/runs/${runId}/structure/ops`, {
+        ops: [
+          { op: 'remove', blockId: 'b2' },
+          { op: 'move', blockId: 'b1', toIndex: 99 },
+        ],
+      });
+      assert.equal(outOfRange.status, 400);
+      assert.match(String(outOfRange.body['detail'] ?? ''), /INDEX_OUT_OF_RANGE/);
+      // 前一条（删掉 b2）不能生效。
+      assert.deepEqual(types(await structureOf(ctx, runId)), ['hero', 'features', 'footer']);
+
+      const unknownType = await post(ctx, `/api/runs/${runId}/structure/ops`, {
+        ops: [{ op: 'append', type: 'no-such-block' }],
+      });
+      assert.equal(unknownType.status, 400, JSON.stringify(unknownType.body));
+      assert.match(String(unknownType.body['detail'] ?? ''), /UNKNOWN_BLOCK/);
+      assert.deepEqual(types(await structureOf(ctx, runId)), ['hero', 'features', 'footer']);
+
+      const badShape = await post(ctx, `/api/runs/${runId}/structure/ops`, {
+        ops: [{ op: 'replace', blockId: 'b1', slots: { title: { kind: 'text' } } }],
+      });
+      assert.equal(badShape.status, 400);
+      assert.match(String(badShape.body['error'] ?? ''), /text/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('编辑落库：重启之后还是改过的那份结构', async () => {
+    const dir = path.join(dataRoot, 'runs');
+    const first = await startServer({ structured: true, dataDir: dir });
+    let runId = '';
+    try {
+      runId = await runWithSpec(first, { projectId: 'proj-structure-edit' });
+      const result = await post(first, `/api/runs/${runId}/structure/ops`, {
+        ops: [{ op: 'remove', blockId: 'b3' }],
+      });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+    } finally {
+      await first.close();
+    }
+
+    const persist = new JsonPersist({ rootDir: dir });
+    const second = await startServer({
+      structured: true,
+      dataDir: dir,
+      pools: await loadPersistedPools(persist),
+    });
+    try {
+      assert.deepEqual(types(await structureOf(second, runId)), ['hero', 'features']);
+    } finally {
+      await second.close();
+    }
+  });
+});

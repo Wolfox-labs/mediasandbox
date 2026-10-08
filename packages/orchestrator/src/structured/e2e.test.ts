@@ -42,7 +42,7 @@ import type { PageSpec } from './page-spec.js';
 import { extractTemplate, type TemplateSpec } from './template-spec.js';
 import { Orchestrator, type RunResult } from '../orchestrator.js';
 import { DemoDecisionClient } from '../decision/demo-client.js';
-import type { DecisionClient } from '../decision/types.js';
+import type { DecisionBatchResult, DecisionClient } from '../decision/types.js';
 import { planLayers } from '../plan/types.js';
 
 let root = '';
@@ -628,6 +628,77 @@ describe('结构化链路：自定义 block 能真正参与制作', () => {
     assert.ok(
       html.includes('ms-generic__title'),
       '通用渲染器没被调用——title slot 没出小标题，说明内容填了却没画出来',
+    );
+    await sandbox.destroy(result.handle);
+  });
+});
+
+/**
+ * 「带指定 PageSpec 重跑」：结构**不由模型决定**。
+ *
+ * 这里用**一问就抛**的决策层，而不是断言"模型答了什么"：只要链路上还剩任何一次
+ * 决策往返，这次运行就会失败。断言"没问过"比断言"答案是什么"硬得多。
+ */
+describe('结构化链路：带指定结构重跑', () => {
+  class ExplodingDecision implements DecisionClient {
+    readonly kind = 'stub' as const;
+    calls = 0;
+    async health(): Promise<{ ok: boolean; detail: string }> {
+      return { ok: true, detail: 'exploding' };
+    }
+    async decide(): Promise<DecisionBatchResult> {
+      this.calls += 1;
+      throw new Error('带指定结构跑时不该问决策层');
+    }
+  }
+
+  it('照给定结构跑完，一次决策都没问，结构原样交回', async () => {
+    const pool = createBlockRegistry();
+    const decisionClient = new ExplodingDecision();
+    let captured: { page: PageSpec; steps: readonly unknown[] } | undefined;
+
+    const result = await new Orchestrator().run(
+      {
+        projectId: 'e2e-given-spec',
+        goal: '做一个产品介绍落地页',
+        envType: 'webpage',
+        blocks: pool,
+        pageSpec: {
+          projectId: 'e2e-given-spec',
+          goal: '做一个产品介绍落地页',
+          templateId: null,
+          candidateBlockIds: ['hero', 'features', 'cta'],
+          blocks: [
+            { id: 'b1', type: 'hero', slots: {}, status: 'pending', sources: {} },
+            { id: 'b2', type: 'cta', slots: {}, status: 'pending', sources: {} },
+          ],
+          qualityScore: null,
+          createdAt: 0,
+        },
+      },
+      {
+        registry: registry(pool),
+        decision: decisionClient,
+        sandbox,
+        onEvent: (e) => {
+          if (e.type === 'plan_assembled' && e.structure !== undefined) captured = e.structure;
+        },
+      },
+    );
+
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    assert.equal(decisionClient.calls, 0, '结构已经给了，却还是问了决策层');
+    // 结构原样交回：给定几块就是几块，顺序不动。
+    assert.deepEqual(
+      captured?.page.blocks.map((b) => b.type),
+      ['hero', 'cta'],
+    );
+    // 没有决策轮次就没有留痕：编一条"问过了"只会让留痕骗人。
+    assert.deepEqual(captured?.steps, []);
+    // 计划的依据里要能读出"结构是调用方给的"——否则事后没法解释这次结构从哪来。
+    assert.ok(
+      result.plan?.rationale.some((line) => line.includes('结构由调用方给定')),
+      `计划依据里没说明结构来源：${(result.plan?.rationale ?? []).join(' | ')}`,
     );
     await sandbox.destroy(result.handle);
   });

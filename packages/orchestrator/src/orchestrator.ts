@@ -79,6 +79,13 @@ export interface RunRequest {
   /** 页面上是否标注每块的来源（生成式/确定性/用户），便于演示与排查。 */
   readonly annotate?: boolean | undefined;
   /**
+   * **既定结构**：照它跑，结构不再由决策模型决定。
+   *
+   * "带指定 PageSpec 重跑"的入口——用户改完结构再执行时，模型不该把结构
+   * 重新决定一遍（那等于把用户的编辑丢掉）。校验与版式规范化照旧执行。
+   */
+  readonly pageSpec?: PageSpec | undefined;
+  /**
    * 套用的模板。由调用方从模板池解析后传入——模板池属于服务层，
    * 编排层只认"这一个模板长什么样"，不认"模板从哪来"。
    */
@@ -388,6 +395,7 @@ export class Orchestrator {
             ...(request.brand !== undefined ? { brand: request.brand } : {}),
             ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
             ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
+            ...(request.pageSpec !== undefined ? { pageSpec: request.pageSpec } : {}),
             ...(request.template !== undefined ? { template: request.template } : {}),
             ...(request.blocks !== undefined ? { blocks: request.blocks } : {}),
             ...(request.allowPaidGeneration !== undefined

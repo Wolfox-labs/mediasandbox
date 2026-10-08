@@ -185,6 +185,26 @@ function validateSlotValue(
 }
 
 /**
+ * `validatePageSpec` 的开关。
+ *
+ * 只有一个开关，因为它只有一个真实的第二种场景。
+ */
+export interface ValidatePageSpecOptions {
+  /**
+   * `filled` 的块是否必须 slot 齐全。默认 **true**。
+   *
+   * 关掉它的场景只有一个：**结构留痕**。运行结束时回填进记录的结构只带
+   * `status` 与 `sources`，内容留在产物与 `src/blocks/<id>.json` 里
+   * （见 `mergeBlockStatuses` 的说明）。在那种数据里，"filled 但一个 slot 都没有"
+   * 是**正常形态**，不是缺漏——拿默认规则去校验它，会把每一次结构编辑都判成非法。
+   *
+   * 默认值不能反过来说：完整结构（`fill-block` 的产出、HTTP 传进来的整份结构）
+   * 里 filled 却缺必需 slot，确实是缺漏，必须拦住。
+   */
+  readonly requireSlots?: boolean | undefined;
+}
+
+/**
  * 校验结构化表示。
  *
  * 与 `validatePlan` 同一条思路：**把所有结构性问题在渲染之前一次查清**。
@@ -193,7 +213,12 @@ function validateSlotValue(
  * `registry` 省略时只做自洽校验（id 唯一、必需 slot 齐全），
  * 不查"block 类型是否存在"。
  */
-export function validatePageSpec(spec: PageSpec, registry?: BlockRegistry): void {
+export function validatePageSpec(
+  spec: PageSpec,
+  registry?: BlockRegistry,
+  options: ValidatePageSpecOptions = {},
+): void {
+  const requireSlots = options.requireSlots !== false;
   if (spec.blocks.length === 0) {
     throw new PageSpecError('页面结构为空：一个 block 都没有', 'EMPTY_PAGE');
   }
@@ -238,7 +263,7 @@ export function validatePageSpec(spec: PageSpec, registry?: BlockRegistry): void
 
       // 必需 slot 只在 block 声明为 filled 时才要求齐全：
       // pending 的 block 还没填，缺 slot 是它的正常状态。
-      if (block.status === 'filled') {
+      if (block.status === 'filled' && requireSlots) {
         for (const declared of blockSpec.slots) {
           if (declared.required && block.slots[declared.name] === undefined) {
             throw new PageSpecError(

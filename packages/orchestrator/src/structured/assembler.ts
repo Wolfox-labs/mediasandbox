@@ -20,9 +20,9 @@
 import type { ToolRegistry } from '../tools/registry.js';
 import type { DecisionClient } from '../decision/types.js';
 import { PlanError, validatePlan, type ExecutionPlan, type PlanInput, type PlanNode } from '../plan/types.js';
-import { createBlockRegistry, type BlockSpec } from './block-spec.js';
-import type { PageSpec } from './page-spec.js';
-import { StructurePlanner } from './planner.js';
+import { createBlockRegistry, type BlockRegistry, type BlockSpec } from './block-spec.js';
+import { normalizePageSpec, validatePageSpec, type PageSpec } from './page-spec.js';
+import { StructurePlanner, type PlanStructureResult } from './planner.js';
 import type { AssembleRequest, AssembleResult } from '../plan/assembler.js';
 
 /** 结构化链路用到的工具 id。 */
@@ -71,26 +71,31 @@ export async function assembleStructured(args: {
   // block 时，池子必须是**同一个**，否则那些 block 在 `/api/blocks` 里看得见、
   // 在候选集里却永远不存在。省略时退回内置池，保持"不配也能跑通"。
   const blocks = args.request.blocks ?? createBlockRegistry();
-  const candidates = resolveCandidates(request.candidateBlockIds, blocks);
 
-  // ── 1. 逐块决策，定稿结构 ────────────────────────────────────────────
+  // ── 1. 定稿结构：给定的照用，没给才逐块问决策模型 ────────────────────
+  //
+  // 「带指定 PageSpec 重跑」走上面那条：用户改完结构（或只想按同一结构再跑一次）时，
+  // 不该再让模型把结构决定一遍——那等于把用户的编辑丢掉。
   const planner = new StructurePlanner(blocks, decision);
-  const planned = await planner.plan({
-    projectId: request.projectId ?? '(unset)',
-    goal: request.goal,
-    candidateBlockIds: candidates,
-    ...(request.maxBlocks !== undefined ? { maxBlocks: request.maxBlocks } : {}),
-    // 让规划器知道"这次有没有生成层可用"：有才会去问 `slot_source`。
-    // 没生成层的时候问"要不要生成式"是个空问题，白花一次决策往返。
-    ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
-    ...(request.template !== undefined ? { template: request.template } : {}),
-    ...(request.context.constraints !== undefined
-      ? { constraints: request.context.constraints }
-      : {}),
-    ...(request.decisionTimeoutMs !== undefined
-      ? { decisionTimeoutMs: request.decisionTimeoutMs }
-      : {}),
-  });
+  const planned: PlanStructureResult =
+    request.pageSpec !== undefined
+      ? planFromGivenSpec(request.pageSpec, request, blocks)
+      : await planner.plan({
+          projectId: request.projectId ?? '(unset)',
+          goal: request.goal,
+          candidateBlockIds: resolveCandidates(request.candidateBlockIds, blocks),
+          ...(request.maxBlocks !== undefined ? { maxBlocks: request.maxBlocks } : {}),
+          // 让规划器知道"这次有没有生成层可用"：有才会去问 `slot_source`。
+          // 没生成层的时候问"要不要生成式"是个空问题，白花一次决策往返。
+          ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
+          ...(request.template !== undefined ? { template: request.template } : {}),
+          ...(request.context.constraints !== undefined
+            ? { constraints: request.context.constraints }
+            : {}),
+          ...(request.decisionTimeoutMs !== undefined
+            ? { decisionTimeoutMs: request.decisionTimeoutMs }
+            : {}),
+        });
 
   const page = planned.page;
   const rationale = [...planned.rationale];
@@ -172,6 +177,9 @@ export async function assembleStructured(args: {
       structure: {
         blocks: page.blocks.map((b) => ({ id: b.id, type: b.type })),
         qualityScore: page.qualityScore,
+        // 结构是谁定的，一行说清：重跑之后"模型是不是又改了结构"是必问的问题，
+        // 而这个答案只能从留痕里读出来。
+        source: request.pageSpec === undefined ? 'planned' : 'given',
       },
       steps: planned.steps,
       usage: planned.usage,
@@ -179,6 +187,59 @@ export async function assembleStructured(args: {
     },
     decisionLatencyMs: planned.decisionLatencyMs,
     structure: { page, steps: planned.steps },
+  };
+}
+
+/**
+ * 既定结构 → 与规划器等价的产出。
+ *
+ * ## 不绕过校验与规范化
+ *
+ * 给定结构同样要过 `validatePageSpec`（类型在池子里、slot 形态对得上、
+ * 不可重复的没重复）与 `normalizePageSpec`（两端块归位）。绕过它们，等于开了
+ * 一条"手写结构就能排出版式错误"的后门——而用户手工编辑恰恰最需要这道兜底。
+ *
+ * ## 为什么一个决策问题都不问
+ *
+ * "照给定结构重跑"的全部意义就是**结构不由模型决定**。再问一轮 `slot_source`
+ * 只会白花往返，还会让"这次重跑到底改没改结构"说不清。
+ * 块里已经记着的 `slotPlans` 照常被填充器读走，所以生成式/确定性的选择不会丢。
+ *
+ * ## 三处对齐
+ *
+ * `projectId` 与 `goal` 对齐到**本次请求**：结构是上一次的产出，而这次要按这次的
+ * 目标填内容、把页面写进这次的沙盒。不对齐的话，产物会带着上一个项目的标识、
+ * 文案也停在旧目标上。`templateId` 与 `qualityScore` 是留痕，原样带过去。
+ */
+function planFromGivenSpec(
+  given: PageSpec,
+  request: AssembleRequest,
+  blocks: BlockRegistry,
+): PlanStructureResult {
+  const page: PageSpec = {
+    ...given,
+    projectId: request.projectId ?? given.projectId,
+    goal: request.goal,
+  };
+
+  validatePageSpec(page, blocks);
+  const { page: normalized, fixes } = normalizePageSpec(page, blocks);
+
+  const rationale = [
+    `结构由调用方给定（${normalized.blocks.length} 块），本次不向决策层提问`,
+    ...fixes.map((fix) => `版式规范化：${fix.detail}`),
+  ];
+
+  return {
+    page: normalized,
+    // **没有决策轮次就没有留痕**：编一条"问过了"只会让留痕骗人，
+    // 而留痕的全部价值就是"它能解释这次结构是怎么来的"。
+    steps: [],
+    rationale,
+    decisionLatencyMs: 0,
+    decisionCalls: 0,
+    usage: { inputTokens: 0, outputTokens: 0 },
+    fixes,
   };
 }
 

@@ -287,6 +287,17 @@ describe('结构化中间表示：校验', () => {
     );
   });
 
+  it('留痕形态要显式关掉齐全性检查才放行，默认仍然拦', () => {
+    // 记录里的结构就是"filled 但没有内容"：内容在产物与 src/blocks/*.json 里，
+    // 结构留痕只带 status 与 sources。结构编辑要能校验通过，否则每次编辑都判非法。
+    validatePageSpec(page([block('b1', 'hero', 'filled')]), reg, { requireSlots: false });
+    // 但默认不能跟着放宽：完整结构里 filled 却缺必需 slot 确实是缺漏。
+    assert.throws(
+      () => validatePageSpec(page([block('b1', 'hero', 'filled')]), reg),
+      /必需 slot title 缺失/,
+    );
+  });
+
   it('pending 的块缺 slot 是正常的——结构定了但还没填', () => {
     validatePageSpec(page([block('b1', 'hero', 'pending')]), reg);
   });

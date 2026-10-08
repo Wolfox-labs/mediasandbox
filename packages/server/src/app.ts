@@ -20,6 +20,7 @@ import {
   BLOCK_GROUP_LABELS,
   BlockError,
   Orchestrator,
+  PageSpecError,
   TemplateError,
   builtinBlockIds,
   extractTemplate,
@@ -30,6 +31,7 @@ import {
   type FallbackPolicy,
   type LlmClient,
   type OrchestrationEvent,
+  type PageSpec,
   type TemplateRegistry,
   type TemplateSpec,
   type ToolRegistry,
@@ -37,6 +39,13 @@ import {
 import { RunStore, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
 import { JsonPersist } from './persist.js';
 import { BlockInputError, parseBlockSpec } from './block-input.js';
+import {
+  StructureInputError,
+  applyStructureOps,
+  parsePageSpecInput,
+  parseStructureOps,
+  validateStructureInput,
+} from './structure-input.js';
 import { createZip, type ZipEntry } from './zip.js';
 
 export interface ServerDeps {
@@ -346,6 +355,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       readonly annotate?: boolean | undefined;
       /** 已从模板池解析出来的模板（不是 id）。 */
       readonly template?: TemplateSpec | undefined;
+      /** 既定结构：照它跑，结构不再由决策模型决定（"带指定 PageSpec 重跑"）。 */
+      readonly pageSpec?: PageSpec | undefined;
     };
   }): Promise<void> {
     const { record, provider, goal, envType } = args;
@@ -486,6 +497,50 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
 
+    // ── 既定结构：「带指定 PageSpec 重跑」的入口 ─────────────────────────
+    //
+    // **必须显式传 webpage**：给个 auto 再让结构被另一条链路静默忽略，正是
+    // "说了要照结构跑、结果没照"的那类缺陷。宁可在入口就拒掉。
+    //
+    // 解析放在这里、组装放到后面：先把外部输入验完再 `store.create`，
+    // 否则一个 400 会留下一条永远 queued 的运行记录。
+    let structureInput: ReturnType<typeof parsePageSpecInput> | undefined;
+    if (body['pageSpec'] !== undefined) {
+      if (envType !== 'webpage') {
+        errorResponse(
+          res,
+          400,
+          'pageSpec 只对 webpage 环境有意义',
+          `envType 是 ${envType}；要按给定结构跑请显式传 webpage`,
+        );
+        return;
+      }
+      try {
+        structureInput = parsePageSpecInput(body['pageSpec']);
+      } catch (error) {
+        if (error instanceof StructureInputError) {
+          errorResponse(res, 400, error.message);
+          return;
+        }
+        throw error;
+      }
+      // 语义这一层也在这里过：池子里没有的类型、filled 却缺必需 slot，
+      // 现在就能回 400，而不是先收下这次运行、再让它跑成 failed。
+      if (deps.blocks === undefined) {
+        errorResponse(res, 503, '本次部署未装配 block 池', 'pageSpec 需要 block 池才能校验与执行');
+        return;
+      }
+      try {
+        validateStructureInput(structureInput, goal, deps.blocks);
+      } catch (error) {
+        if (error instanceof PageSpecError) {
+          errorResponse(res, 400, error.message, `code=${error.code}`);
+          return;
+        }
+        throw error;
+      }
+    }
+
     const providerName =
       typeof body['provider'] === 'string' ? body['provider'] : deps.defaultProvider;
     const provider = deps.providers[providerName];
@@ -524,7 +579,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     // 编排层只认"这一个模板长什么样"，不认"模板池在哪"。
     const templateId = typeof body['templateId'] === 'string' ? body['templateId'] : undefined;
     let template: TemplateSpec | undefined;
-    if (templateId !== undefined) {
+    // 给了既定结构时 `templateId` 被盖过：不解析也不校验——
+    // 否则会拿一个**已被忽略**的参数把人挡在门外。
+    if (templateId !== undefined && structureInput === undefined) {
       if (deps.templates === undefined) {
         errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
         return;
@@ -567,12 +624,47 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           ? { useGenerative: body['useGenerative'] }
           : {}),
         ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
+        // 既定结构：带上它，结构**不再由决策模型决定**（templateId / candidateBlockIds /
+        // maxBlocks 也就一并被盖过）。projectId 与 goal 取本次运行的：
+        // 结构是上一次的产出，而这次要按这次的目标填、写进这次的沙盒。
+        ...(structureInput !== undefined
+          ? {
+              pageSpec: {
+                projectId: record.projectId,
+                goal,
+                templateId: structureInput.templateId,
+                // 候选集由**实际用到的块类型**派生（按首次出现去重，与 `blockTypesOf`
+                // 同一套语义）：结构已经定稿，那个候选集合是历史，不是这一问的输入。
+                candidateBlockIds: [...new Set(structureInput.blocks.map((b) => b.type))],
+                blocks: structureInput.blocks,
+                qualityScore: structureInput.qualityScore,
+                createdAt: Date.now(),
+              },
+            }
+          : {}),
       },
     });
     inFlight.add(task);
     void task.finally(() => inFlight.delete(task));
 
-    res.status(202).json({ runId, status: 'queued' });
+    // 被既定结构盖过的入参要**主动说出来**：不吭声的话，调用方会以为
+    // 自己传的 templateId 起了作用，然后在页面上找不到原因。
+    const ignored: string[] = [];
+    if (structureInput !== undefined) {
+      if (templateId !== undefined) ignored.push('templateId');
+      if (candidateBlockIds !== undefined && candidateBlockIds.length > 0) {
+        ignored.push('candidateBlockIds');
+      }
+      if (typeof body['maxBlocks'] === 'number') ignored.push('maxBlocks');
+    }
+
+    res.status(202).json({
+      runId,
+      status: 'queued',
+      ...(ignored.length > 0
+        ? { note: `已按 pageSpec 跑，以下入参被忽略：${ignored.join('、')}` }
+        : {}),
+    });
   });
 
   // ── 查询运行 ────────────────────────────────────────────────────────
@@ -768,6 +860,89 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
     res.json({ runId, cancelled: store.cancel(runId) });
+  });
+
+  // ── 结构：读与改 ────────────────────────────────────────────────────
+  //
+  // 结构从 P1 起就是**产出**（`GET /api/runs/:id` 与 WebSocket 都带着它），
+  // 但它此前只能读。下面两条是"读得明确、改得下来"的落点：
+  // 前端要能定点增删移，并且**改完还在**（重启之后依然是改过的那份）。
+
+  /** 单独取一份结构。形状与 run 详情、WebSocket 推的**同一个压缩函数**，前端只写一套解析。 */
+  app.get('/api/runs/:runId/structure', (req: Request, res: Response) => {
+    const record = store.get(paramOf(req, 'runId'));
+    if (record === undefined) {
+      errorResponse(res, 404, '运行不存在');
+      return;
+    }
+    if (record.structure === undefined) {
+      // 不是 404：运行**是**存在的，只是它不是结构化链路跑出来的（或还没定稿）。
+      errorResponse(
+        res,
+        409,
+        '这次运行没有结构化留痕',
+        '只有 webpage 环境的结构化链路会产出结构；也可能是运行还没定稿',
+      );
+      return;
+    }
+    res.json({ runId: record.id, structure: compactStructure(record.structure) });
+  });
+
+  /**
+   * 定点编辑结构并落库。
+   *
+   * 为什么是"op 列表"而不是"整份 PageSpec 覆盖"：前端拿到的是压缩视图
+   * （块只有 id/type/status/slotNames），覆盖式提交会把它没看见的 slot 内容抹掉，
+   * 而且绕过了增删移的语义校验（越界不夹取、找不到就报错）。
+   */
+  app.post('/api/runs/:runId/structure/ops', (req: Request, res: Response) => {
+    const record = store.get(paramOf(req, 'runId'));
+    if (record === undefined) {
+      errorResponse(res, 404, '运行不存在');
+      return;
+    }
+    // 先看"这次请求与这次运行合不合得上"，再看"部署能不能办"：
+    // 一条本来就没有结构的运行，报"没装 block 池"会把排查方向带偏。
+    if (record.structure === undefined) {
+      errorResponse(res, 409, '这次运行没有结构化留痕', '没有结构可改');
+      return;
+    }
+    // 跑动中改结构会与产出结构打架：run 结束时 `structure` 会被执行结果整个覆盖，
+    // 用户刚做的编辑会**看起来生效、随后无声消失**。宁可现在拒掉。
+    if (record.status === 'running' || record.status === 'queued') {
+      errorResponse(res, 409, '运行还在进行中，不能改结构', '等它结束再改，否则编辑会被执行结果覆盖');
+      return;
+    }
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const ops = parseStructureOps(body['ops']);
+      const { page, fixes } = applyStructureOps(record.structure.page, ops, registry);
+      // 落库走 `store.update`：它会把整条记录写穿到盘上（配了 dataDir 时）。
+      store.update(record.id, { structure: { page, steps: record.structure.steps } });
+      res.json({
+        runId: record.id,
+        applied: ops.length,
+        structure: compactStructure({ page, steps: record.structure.steps }),
+        // 规范化改了什么必须能被读出来：静默挪块会让人以为是自己记错了。
+        fixes,
+      });
+    } catch (error) {
+      if (error instanceof StructureInputError) {
+        errorResponse(res, 400, error.message);
+        return;
+      }
+      if (error instanceof PageSpecError) {
+        errorResponse(res, 400, error.message, `code=${error.code}`);
+        return;
+      }
+      throw error;
+    }
   });
 
   /** 工具目录：前端据此展示"可以排布什么"。 */

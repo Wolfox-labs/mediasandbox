@@ -59,6 +59,13 @@ export interface AssembleRequest {
   /** 页面上是否标注每块的来源，便于演示与排查。 */
   readonly annotate?: boolean | undefined;
   /**
+   * **既定结构**：给了它就照它跑，结构不再由决策模型决定。
+   *
+   * 这是"带指定 PageSpec 重跑"的入口（用户改完结构再执行、或换目标补跑一次）。
+   * 校验与版式规范化照旧执行——给定结构同样要合规，否则等于绕开词表。
+   */
+  readonly pageSpec?: PageSpec | undefined;
+  /**
    * block 池。省略则用内置池。
    *
    * **必须能被传进来**：服务层装了外部来源（模型提议 / 用户手打 / 导入）的 block，
