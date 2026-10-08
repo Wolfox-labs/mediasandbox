@@ -36,7 +36,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { LocalSandbox, readText } from '@mediasandbox/sandbox';
 import { ToolRegistry } from '../tools/registry.js';
 import { BUILTIN_TOOLS } from '../tools/builtin.js';
-import { STRUCTURED_TOOLS } from './tools.js';
+import { createStructuredTools } from './tools.js';
+import { createBlockRegistry, type BlockRegistry, type BlockSpec } from './block-spec.js';
+import type { PageSpec } from './page-spec.js';
+import { extractTemplate, type TemplateSpec } from './template-spec.js';
 import { Orchestrator, type RunResult } from '../orchestrator.js';
 import { DemoDecisionClient } from '../decision/demo-client.js';
 import type { DecisionClient } from '../decision/types.js';
@@ -54,8 +57,11 @@ after(async () => {
   if (root !== '') await rm(root, { recursive: true, force: true });
 });
 
-function registry(): ToolRegistry {
-  return new ToolRegistry().registerAll(BUILTIN_TOOLS).registerAll(STRUCTURED_TOOLS);
+function registry(pool: BlockRegistry = createBlockRegistry()): ToolRegistry {
+  // 工具装在**同一个池子**上：这是"自定义 block 全链路可用"的前提。
+  return new ToolRegistry()
+    .registerAll(BUILTIN_TOOLS)
+    .registerAll(createStructuredTools(pool));
 }
 
 /**
@@ -75,19 +81,42 @@ async function runStructured(args: {
   readonly candidateBlockIds?: readonly string[];
   readonly maxBlocks?: number;
   readonly annotate?: boolean;
+  /** 注入自定义 block 池；省略即内置池。 */
+  readonly blocks?: BlockRegistry;
+  /** 套用的模板。 */
+  readonly template?: TemplateSpec;
+  /**
+   * 把定稿的结构接出来。
+   *
+   * 结构**不在 `RunResult` 上**，它是随 `plan_assembled` 事件带出来的
+   * （见下面那条"结构留痕被带到调用方"的用例）。要断言结构的用例传个空对象进来即可。
+   */
+  readonly capture?: { page?: PageSpec | undefined };
 }): Promise<RunResult> {
+  const pool = args.blocks ?? createBlockRegistry();
   return await new Orchestrator().run(
     {
       projectId: args.projectId,
       goal: args.goal,
       envType: 'webpage',
+      blocks: pool,
+      ...(args.template !== undefined ? { template: args.template } : {}),
       ...(args.candidateBlockIds !== undefined
         ? { candidateBlockIds: args.candidateBlockIds }
         : {}),
       ...(args.maxBlocks !== undefined ? { maxBlocks: args.maxBlocks } : {}),
       ...(args.annotate !== undefined ? { annotate: args.annotate } : {}),
     },
-    { registry: registry(), decision: decision(), sandbox },
+    {
+      registry: registry(pool),
+      decision: decision(),
+      sandbox,
+      onEvent: (e) => {
+        if (e.type === 'plan_assembled' && e.structure !== undefined && args.capture !== undefined) {
+          args.capture.page = e.structure.page;
+        }
+      },
+    },
   );
 }
 
@@ -484,5 +513,142 @@ describe('结构化链路：与既有链路并存', () => {
     const html = await readIndexHtml(result);
     assert.ok(html.includes('<!DOCTYPE html>'));
     await sandbox.destroy(result.handle);
+  });
+});
+
+/**
+ * 自定义 block（模型提议 / 用户手打 / 导入）走完整条链路。
+ *
+ * 设计稿 §2.2 把这三类来源列为"用户可选项"，但此前是**断链**：
+ * 规划器、fill-block、assemble-page 各自 `createBlockRegistry()` 新建内置池，
+ * 于是外部 block 只在 `/api/blocks` 里存在。这里端到端守住修好之后的行为。
+ */
+describe('结构化链路：自定义 block 能真正参与制作', () => {
+  const promoBanner: BlockSpec = {
+    id: 'promo-banner',
+    label: '促销横幅',
+    description: '一条限时促销提示',
+    group: 'skeleton',
+    slots: [{ name: 'text', type: 'title', required: true, description: '促销语' }],
+    canLead: false,
+    repeatable: false,
+    costHint: 'fast',
+  };
+
+  it('不注入池子时，外部 block 进不了候选集——报错而不是悄悄换一个', async () => {
+    const result = await runStructured({
+      projectId: 'e2e-custom-nopool',
+      goal: 'g',
+      candidateBlockIds: ['hero', 'promo-banner'],
+    });
+    assert.notEqual(result.status, 'succeeded');
+    assert.match(result.reason ?? '', /未注册/);
+    await sandbox.destroy(result.handle);
+  });
+
+  it('注入池子后同一个请求能跑通，且这个块真的出现在结构里', async () => {
+    const pool = createBlockRegistry([promoBanner]);
+    const capture: { page?: PageSpec } = {};
+    const result = await runStructured({
+      projectId: 'e2e-custom-pool',
+      goal: '做一个产品介绍落地页',
+      // 只有 hero 能当首块 → 首轮直接采用；第二轮候选只剩 promo-banner → 也直接采用。
+      // 于是这个断言是确定性的，不依赖演示决策层的关键词判断。
+      candidateBlockIds: ['hero', 'promo-banner'],
+      blocks: pool,
+      capture,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    const types = capture.page?.blocks.map((b) => b.type) ?? [];
+    assert.ok(types.includes('promo-banner'), `结构里没有自定义块：${types.join(' → ')}`);
+    await sandbox.destroy(result.handle);
+  });
+
+  it('自定义 block 的填充也走通了——不是"选得到、填不了"', async () => {
+    const pool = createBlockRegistry([promoBanner]);
+    const result = await runStructured({
+      projectId: 'e2e-custom-fill',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'promo-banner'],
+      blocks: pool,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    const fillOutcomes = (result.execution?.outcomes ?? []).filter((o) => o.toolId === 'fill-block');
+    assert.ok(fillOutcomes.length >= 2);
+    for (const outcome of fillOutcomes) {
+      assert.equal(outcome.status, 'succeeded', `${outcome.nodeId}: ${outcome.error ?? ''}`);
+    }
+    await sandbox.destroy(result.handle);
+  });
+});
+
+describe('结构化链路：模板', () => {
+  function template(blocks: readonly string[]): TemplateSpec {
+    return {
+      id: 'tpl-e2e',
+      label: '端到端测试模板',
+      description: '用于测试',
+      blocks: blocks.map((type) => ({ type })),
+      builtin: false,
+    };
+  }
+
+  it('模板的起手结构落进页面，templateId 记在结构上', async () => {
+    const capture: { page?: PageSpec } = {};
+    const result = await runStructured({
+      projectId: 'e2e-tpl',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'features', 'cta', 'footer'],
+      template: template(['hero', 'features']),
+      capture,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    const page = capture.page;
+    assert.equal(page?.templateId, 'tpl-e2e');
+    assert.deepEqual(
+      page?.blocks.slice(0, 2).map((b) => b.type),
+      ['hero', 'features'],
+      '起手结构应当原样出现在页面开头',
+    );
+    await sandbox.destroy(result.handle);
+  });
+
+  it('从历史沉淀的模板能直接拿来起手——"越用越好用"的闭环', async () => {
+    // 先跑一次，把产出结构沉淀成模板。
+    const firstCapture: { page?: PageSpec } = {};
+    const first = await runStructured({
+      projectId: 'e2e-tpl-source',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'features', 'cta', 'footer'],
+      maxBlocks: 4,
+      capture: firstCapture,
+    });
+    assert.equal(first.status, 'succeeded', first.reason ?? '');
+    const source = firstCapture.page;
+    assert.ok(source !== undefined);
+    await sandbox.destroy(first.handle);
+
+    const recycled = extractTemplate(source, { id: 'tpl-recycled-e2e' });
+    assert.ok(recycled.blocks.length > 0);
+
+    // 再拿它起手跑第二次。
+    const secondCapture: { page?: PageSpec } = {};
+    const second = await runStructured({
+      projectId: 'e2e-tpl-reuse',
+      goal: '做另一个产品的落地页',
+      candidateBlockIds: ['hero', 'features', 'cta', 'footer'],
+      template: recycled,
+      capture: secondCapture,
+    });
+    assert.equal(second.status, 'succeeded', second.reason ?? '');
+    const reused = secondCapture.page;
+    assert.equal(reused?.templateId, 'tpl-recycled-e2e');
+    assert.deepEqual(
+      reused?.blocks.slice(0, recycled.blocks.length).map((b) => b.type),
+      recycled.blocks.map((b) => b.type),
+    );
+    // 沉淀的是结构，不是内容：新项目的页面不该出现上一次的目标原文。
+    assert.notEqual(reused?.goal, source.goal);
+    await sandbox.destroy(second.handle);
   });
 });

@@ -34,6 +34,17 @@ export interface RunRecord {
   reason?: string | undefined;
   /** 计划摘要，便于前端展示"排布了什么"。 */
   planSummary?: { readonly nodeId: string; readonly toolId: string; readonly note: string }[] | undefined;
+  /**
+   * **结构化链路定稿的结构**（结构化中间表示 + 逐轮决策留痕）。
+   *
+   * 存**完整形态**（含 slot 内容与原始概率分布），因为它同时是：
+   *   - 落盘沉淀成模板的原料（P8 要的是完整结构，不是压缩版）
+   *   - 前端"先看结构再执行"的数据源
+   *
+   * 对外的 REST 响应走 `compactStructure()` 压缩，与 WebSocket 推的是同一个形状——
+   * 两条通道形状不一致的话，前端刷新一次就得写两套解析。
+   */
+  structure?: { readonly page: PageSpec; readonly steps: readonly StructureStep[] } | undefined;
   error?: string | undefined;
 }
 
@@ -126,13 +137,16 @@ export function makeRunId(): string {
 }
 
 /**
- * 压缩结构化链路的结构与决策留痕，供 WebSocket 推送。
+ * 压缩结构化链路的结构与决策留痕，供 WebSocket 推送与 REST 详情共用。
  *
  * **刻意丢掉每轮的原始概率分布**：那是给排查用的，几百个浮点数对前端毫无价值，
  * 而它会让消息体积翻十倍。前端要的是"这一轮问了什么、选了哪块、为什么"。
  * 原始答案仍留在编排层的事件流里，需要时从 `GET /api/runs/:id` 拿。
+ *
+ * **REST 与 WebSocket 共用同一个压缩函数**：两条通道形状不一致的话，
+ * 前端刷新一次页面就得写两套解析——而"刷新后结构还在"正是持久化要解决的问题。
  */
-function compactStructure(structure: {
+export function compactStructure(structure: {
   readonly page: PageSpec;
   readonly steps: readonly StructureStep[];
 }): Record<string, unknown> {

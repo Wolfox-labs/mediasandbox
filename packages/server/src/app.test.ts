@@ -7,6 +7,9 @@ import { WebSocket } from 'ws';
 import { LocalSandbox } from '@mediasandbox/sandbox';
 import {
   BUILTIN_TOOLS,
+  createBlockRegistry,
+  createStructuredTools,
+  createTemplateRegistry,
   DEFAULT_POLICY,
   StubDecisionClient,
   ToolRegistry,
@@ -41,6 +44,8 @@ async function startServer(overrides: {
   emptyRegistry?: boolean;
   /** 沙盒保留额度。不传则用 createServer 的默认值。 */
   maxRuns?: number;
+  /** 装配结构化链路：block 池 + 模板池 + 两个结构化工具。 */
+  structured?: boolean;
 } = {}): Promise<{
   origin: string;
   close: () => Promise<void>;
@@ -53,8 +58,16 @@ async function startServer(overrides: {
     registry.registerAll(BUILTIN_TOOLS);
   }
 
+  // block 池与工具必须成对出现：工具装在哪个池子上，规划器就得用哪个池子。
+  const blocks = overrides.structured === true ? createBlockRegistry() : undefined;
+  if (blocks !== undefined) {
+    registry.registerAll(createStructuredTools(blocks));
+  }
+
   const instance = createServer({
     registry,
+    ...(blocks !== undefined ? { blocks } : {}),
+    ...(blocks !== undefined ? { templates: createTemplateRegistry(blocks) } : {}),
     decision: overrides.decision ?? makeDecision(),
     ...(overrides.llm !== undefined ? { llm: overrides.llm } : {}),
     providers: { local: localSandbox },
@@ -472,3 +485,105 @@ async function waitForStatus(
     await new Promise((r) => setTimeout(r, 100));
   }
 }
+
+describe('模板目录与 templateId 参数', () => {
+  it('GET /api/templates 列出内置模板，含起手结构与限定范围', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const body = (await (await fetch(`${ctx.origin}/api/templates`)).json()) as {
+        templates: {
+          id: string;
+          label: string;
+          builtin: boolean;
+          blocks: { type: string }[];
+          allowedBlockIds: string[] | null;
+        }[];
+      };
+      assert.ok(body.templates.length >= 3, '内置模板应当有几种');
+      const launch = body.templates.find((t) => t.id === 'product-launch');
+      assert.ok(launch !== undefined, '缺少 product-launch');
+      assert.equal(launch.builtin, true);
+      assert.ok(launch.blocks.length > 0, '起手结构不能是空的');
+      assert.ok(Array.isArray(launch.allowedBlockIds), '限定范围要带出来');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('未装配模板池时返回 503，而不是空列表', async () => {
+    const ctx = await startServer();
+    try {
+      const response = await fetch(`${ctx.origin}/api/templates`);
+      assert.equal(response.status, 503);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('POST /api/runs 带未知 templateId 时 400，并列出可用的', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const response = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ goal: '做落地页', envType: 'webpage', templateId: 'no-such' }),
+      });
+      assert.equal(response.status, 400);
+      const body = (await response.json()) as { detail?: string };
+      assert.match(body.detail ?? '', /product-launch/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('带合法 templateId 的 webpage 运行能跑通，结构记下 templateId', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const created = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做一个产品介绍落地页',
+          envType: 'webpage',
+          projectId: 'proj-tpl',
+          templateId: 'product-launch',
+          maxBlocks: 4,
+        }),
+      });
+      assert.equal(created.status, 202);
+      const { runId } = (await created.json()) as { runId: string };
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      const detail = (await (await fetch(`${ctx.origin}/api/runs/${runId}`)).json()) as {
+        status: string;
+        structure?: { page: { templateId: string | null; blocks: { type: string }[] } };
+      };
+      assert.equal(detail.status, 'succeeded', JSON.stringify(detail).slice(0, 400));
+      // 模板的起手结构必须真的出现在页面上，否则"选了模板"只是个摆设。
+      assert.deepEqual(
+        detail.structure?.page.blocks.slice(0, 2).map((b) => b.type),
+        ['hero', 'features'],
+      );
+      assert.equal(detail.structure?.page.templateId, 'product-launch');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('GET /api/blocks 带出 placement，前端能提示"这个块固定在末尾"', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const body = (await (await fetch(`${ctx.origin}/api/blocks`)).json()) as {
+        blocks: { id: string; placement: string }[];
+      };
+      const footer = body.blocks.find((b) => b.id === 'footer');
+      const nav = body.blocks.find((b) => b.id === 'nav');
+      const hero = body.blocks.find((b) => b.id === 'hero');
+      assert.equal(footer?.placement, 'last');
+      assert.equal(nav?.placement, 'first');
+      assert.equal(hero?.placement, 'any');
+    } finally {
+      await ctx.close();
+    }
+  });
+});

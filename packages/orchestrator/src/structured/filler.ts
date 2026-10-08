@@ -369,13 +369,22 @@ export async function fillBlock(args: {
     if (preserved !== undefined) {
       const shape = listLengthOf(preserved);
       if (shape > 0) {
-        // 列表型：**只取项数**，内容一律重新生成。
-        // 项数以决策层问出来的数量为准（`counts`），它没给时才退回占位长度——
-        // 数量是决策，占位长度只是 planner 顺手放的一个形状。
+        // 列表型要分两种情形，此前被混成了一种：
+        //
+        //   1. **真的带了内容**（模板预置 / 用户手填 / 上游产出）→ 整值保留
+        //   2. **空占位**（planner 为问数量而放的形状）→ 只取长度，内容现生成
+        //
+        // 早先两种都走"内容一律重新生成"，于是模板与用户给的列表内容被**静默丢掉**，
+        // 而 `sources` 还标着 `user` —— 状态说"这是你给的"，内容却是系统编的。
+        // 空占位那一支不能省（那条回归就是这么来的），真实内容这一支也不能丢。
         const wanted = counts[slot.name] ?? shape;
+        if (hasListContent(preserved)) {
+          slots[slot.name] = resizePreserved(preserved, filled, wanted);
+          sources[slot.name] = 'user';
+          continue;
+        }
         slots[slot.name] = resizeSlot(filled, wanted);
-        // 只有占位里**真的带了内容**才算用户提供。
-        sources[slot.name] = hasListContent(preserved) ? 'user' : 'deterministic';
+        sources[slot.name] = 'deterministic';
         continue;
       }
       // 非列表型：整值优先，这是"用户/上游真的给了内容"的情形。
@@ -487,6 +496,34 @@ function resizeSlot(value: SlotValue, length: number): SlotValue {
     return { kind: 'list-image', refs: out };
   }
   return value;
+}
+
+/**
+ * 把**已有的真实内容**调整到指定项数：多了截断，少了用确定性内容补齐。
+ *
+ * 刻意不复用 `resizeSlot` 的循环取模：那会把模板/用户给的第 1 条复制成第 4 条，
+ * 页面上看起来就是"同一条说了两遍"。补齐宁可换成朴素内容，也不要重复。
+ */
+function resizePreserved(preserved: SlotValue, fallback: SlotValue, length: number): SlotValue {
+  if (length <= 0) return preserved;
+  if (preserved.kind === 'list' && fallback.kind === 'list') {
+    const items = Array.from(
+      { length },
+      (_, i) => preserved.items[i] ?? fallback.items[i % Math.max(1, fallback.items.length)] ?? '',
+    );
+    return { kind: 'list', items };
+  }
+  if (preserved.kind === 'list-image' && fallback.kind === 'list-image') {
+    const refs = Array.from(
+      { length },
+      (_, i) =>
+        preserved.refs[i] ??
+        fallback.refs[i % Math.max(1, fallback.refs.length)] ??
+        { ref: '', alt: '' },
+    );
+    return { kind: 'list-image', refs };
+  }
+  return preserved;
 }
 
 /** 确定性地产出一个 slot 的值。 */

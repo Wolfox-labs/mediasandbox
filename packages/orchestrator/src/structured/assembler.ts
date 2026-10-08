@@ -67,7 +67,10 @@ export async function assembleStructured(args: {
     }
   }
 
-  const blocks = createBlockRegistry();
+  // block 池由调用方给就用自己的：服务层装了外部来源（模型提议/手打/导入）的
+  // block 时，池子必须是**同一个**，否则那些 block 在 `/api/blocks` 里看得见、
+  // 在候选集里却永远不存在。省略时退回内置池，保持"不配也能跑通"。
+  const blocks = args.request.blocks ?? createBlockRegistry();
   const candidates = resolveCandidates(request.candidateBlockIds, blocks);
 
   // ── 1. 逐块决策，定稿结构 ────────────────────────────────────────────
@@ -77,6 +80,7 @@ export async function assembleStructured(args: {
     goal: request.goal,
     candidateBlockIds: candidates,
     ...(request.maxBlocks !== undefined ? { maxBlocks: request.maxBlocks } : {}),
+    ...(request.template !== undefined ? { template: request.template } : {}),
     ...(request.context.constraints !== undefined
       ? { constraints: request.context.constraints }
       : {}),

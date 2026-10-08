@@ -24,9 +24,11 @@ import {
   type FallbackPolicy,
   type LlmClient,
   type OrchestrationEvent,
+  type TemplateRegistry,
+  type TemplateSpec,
   type ToolRegistry,
 } from '@mediasandbox/orchestrator';
-import { RunStore, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
+import { RunStore, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
 import { createZip, type ZipEntry } from './zip.js';
 
 export interface ServerDeps {
@@ -40,6 +42,12 @@ export interface ServerDeps {
    * 让"只有工具链"的既有测试与部署不必被迫提供它。
    */
   readonly blocks?: BlockRegistry | undefined;
+  /**
+   * 模板池。省略时 `/api/templates` 返回 503，且请求里带 `templateId` 会被拒。
+   *
+   * 与 `blocks` 一样是可选注入：既有测试与部署不必被迫提供它。
+   */
+  readonly templates?: TemplateRegistry | undefined;
   /** 按 provider 名取实现：'local' 或 'docker'。 */
   readonly providers: Readonly<Record<string, SandboxProvider>>;
   readonly defaultProvider: string;
@@ -196,6 +204,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       readonly brand?: string | undefined;
       readonly useGenerative?: boolean | undefined;
       readonly annotate?: boolean | undefined;
+      /** 已从模板池解析出来的模板（不是 id）。 */
+      readonly template?: TemplateSpec | undefined;
     };
   }): Promise<void> {
     const { record, provider, goal, envType } = args;
@@ -210,6 +220,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           projectId: record.projectId,
           goal,
           envType,
+          // block 池**必须**是服务层那一个：结构化链路若自己新建一个内置池，
+          // 外部来源（模型提议/手打/导入）的 block 就永远进不了候选集。
+          ...(deps.blocks !== undefined ? { blocks: deps.blocks } : {}),
           ...(args.tone !== undefined ? { tone: args.tone } : {}),
           ...(args.minArtifacts !== undefined ? { minArtifacts: args.minArtifacts } : {}),
           ...(args.structured ?? {}),
@@ -245,6 +258,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         // 执行结果里的 artifacts 是 readonly，复制一份存进可变记录。
         artifacts: [...(result.execution?.artifacts ?? [])],
         attempts: result.attempts,
+        // 结构是**产出**，不是过程：存下来之后刷新页面才还看得到。
+        // 只靠 WebSocket 的 `plan_assembled` 事件的话，错过那一刻就永远没了。
+        ...(result.structure !== undefined ? { structure: result.structure } : {}),
         ...(result.reason !== undefined ? { reason: result.reason } : {}),
         ...(result.plan !== undefined
           ? {
@@ -352,6 +368,27 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       ? body['candidateBlockIds'].filter((v): v is string => typeof v === 'string')
       : undefined;
 
+    // 模板：请求里给的是 id，这里解析成模板本身再往下传。
+    // 编排层只认"这一个模板长什么样"，不认"模板池在哪"。
+    const templateId = typeof body['templateId'] === 'string' ? body['templateId'] : undefined;
+    let template: TemplateSpec | undefined;
+    if (templateId !== undefined) {
+      if (deps.templates === undefined) {
+        errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
+        return;
+      }
+      if (!deps.templates.has(templateId)) {
+        errorResponse(
+          res,
+          400,
+          `未知模板: ${templateId}`,
+          `可用: ${deps.templates.specs().map((t) => t.id).join(', ')}`,
+        );
+        return;
+      }
+      template = deps.templates.get(templateId);
+    }
+
     const task = executeRun({
       record,
       provider,
@@ -365,6 +402,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         ...(candidateBlockIds !== undefined && candidateBlockIds.length > 0
           ? { candidateBlockIds }
           : {}),
+        ...(template !== undefined ? { template } : {}),
         ...(typeof body['maxBlocks'] === 'number' ? { maxBlocks: body['maxBlocks'] } : {}),
         ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
         // 缺省是 **false**：不显式要求就不调生成层。零成本是默认值。
@@ -623,6 +661,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         groupLabel: BLOCK_GROUP_LABELS[s.group],
         canLead: s.canLead,
         repeatable: s.repeatable,
+        // 版式位置约束：前端据此提示"这个块会固定在页面末尾"。
+        placement: s.placement ?? 'any',
         costHint: s.costHint,
         slots: s.slots,
       })),
@@ -630,6 +670,30 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         id: g,
         label: BLOCK_GROUP_LABELS[g],
         count: registry.filter({ group: g }).length,
+      })),
+    });
+  });
+
+  /**
+   * 模板目录：前端据此展示"起手可以用哪几套结构"。
+   *
+   * 模板与 block 池同构——都是"候选集来自注册表，扩展 = 加一条"。
+   * `builtin` 标出"我们提供的"与"从你项目里沉淀的"，界面可以分开呈现。
+   */
+  app.get('/api/templates', (_req: Request, res: Response) => {
+    const templates = deps.templates;
+    if (templates === undefined) {
+      errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
+      return;
+    }
+    res.json({
+      templates: templates.specs().map((t) => ({
+        id: t.id,
+        label: t.label,
+        description: t.description,
+        builtin: t.builtin,
+        blocks: t.blocks.map((b) => ({ type: b.type })),
+        allowedBlockIds: t.allowedBlockIds ?? null,
       })),
     });
   });
@@ -713,5 +777,8 @@ function serializeRun(record: RunRecord): Record<string, unknown> {
     error: record.error,
     planSummary: record.planSummary,
     eventCount: record.events.length,
+    // 与 WebSocket 推的是**同一个压缩函数**：刷新前后形状一致，前端只写一套解析。
+    structure:
+      record.structure !== undefined ? compactStructure(record.structure) : null,
   };
 }

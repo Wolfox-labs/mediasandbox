@@ -22,12 +22,25 @@
  * 填充管**内容**，渲染管**版式**。让填块直接吐 HTML 片段，就把两者焊死了：
  * 换版式要重跑全部填充（重新花钱），换内容要动渲染代码。
  * 产出 JSON 则两头都松：版式改了重渲染即可，填充结果还能复用。
+ *
+ * ## 为什么工具是**工厂**而不是常量
+ *
+ * 两个工具都要查 block 池：填块要按 `BlockSpec` 决定每个 slot 怎么填，
+ * 组装页要拿池子校验结构。而池子**必须与规划器用的是同一个**。
+ *
+ * 此前三处（规划器、fill-block、assemble-page）各自 `createBlockRegistry()`
+ * 新建了一个内置池，于是外部来源的 block（模型提议 / 用户手打 / 导入）
+ * 呈现为一条断链：`/api/blocks` 列得出来、却永远选不到；
+ * 就算硬塞进候选集，也会在**执行期**才报"未注册"。
+ *
+ * 现在池子从外面注入一次，三处共用。不注入时退回内置池，
+ * 保证"什么都不配也能跑通"这条底线不变。
  */
-import { ToolError, type ToolRegistration, type ToolRuntime, type ToolResult } from '../tools/types.js';
+import { ToolError, type ToolRegistration, type ToolResult, type ToolRuntime } from '../tools/types.js';
 import type { LlmClient } from '../llm/types.js';
+import { createBlockRegistry, type BlockRegistry } from './block-spec.js';
 import { deriveBrand, fillBlock } from './filler.js';
 import { validatePageSpec, type BlockInstance, type PageSpec } from './page-spec.js';
-import { createBlockRegistry } from './block-spec.js';
 import { renderPage } from './renderer.js';
 
 /** 读一个必需的字符串入参。 */
@@ -65,100 +78,107 @@ function parseJson<T>(raw: string, toolId: string, what: string): T {
  * 出参是**填好内容的同构 JSON**。这样每个块在网络与磁盘上都可独立传递、独立检查，
  * 也就能独立重做——"定点修复"的前提。
  */
-export const fillBlockTool: ToolRegistration = {
-  spec: {
-    id: 'fill-block',
-    label: '填充一个页面区块',
-    description:
-      '把结构里一个已定型的 block 的各个 slot 填成实际内容，产出一份带内容的 block JSON',
-    envTypes: ['webpage'],
-    role: 'generate',
-    category: 'structured',
-    inputs: [
-      { name: 'blockJson', type: 'text', required: true, description: '该 block 的 JSON' },
-      { name: 'goal', type: 'text', required: true, description: '页面目标，填充内容的依据' },
-      { name: 'brand', type: 'text', required: false, description: '站点名' },
-      { name: 'index', type: 'number', required: false, description: '该块在页面上的序号' },
-      {
-        name: 'useGenerative',
-        type: 'boolean',
-        required: false,
-        description: '是否用生成层写文案。false 时全部确定性填充，零成本',
-      },
-    ],
-    outputs: [
-      { name: 'block', type: 'text', required: true, description: '填好的 block JSON' },
-      { name: 'file', type: 'file', required: true, description: 'block JSON 的相对路径' },
-    ],
-    costHint: 'fast',
-  },
-  execute: async (runtime): Promise<ToolResult> => {
-    const blockJson = requireString(runtime.inputs, 'blockJson', 'fill-block');
-    const goal = requireString(runtime.inputs, 'goal', 'fill-block');
-    const brand = typeof runtime.inputs['brand'] === 'string' ? runtime.inputs['brand'] : '';
-    const indexRaw = runtime.inputs['index'];
-    const index = typeof indexRaw === 'number' && Number.isFinite(indexRaw) ? Math.round(indexRaw) : 0;
-    const useGenerative = boolInput(runtime.inputs, 'useGenerative', false);
+export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
+  return {
+    spec: {
+      id: 'fill-block',
+      label: '填充一个页面区块',
+      description:
+        '把结构里一个已定型的 block 的各个 slot 填成实际内容，产出一份带内容的 block JSON',
+      envTypes: ['webpage'],
+      role: 'generate',
+      category: 'structured',
+      inputs: [
+        { name: 'blockJson', type: 'text', required: true, description: '该 block 的 JSON' },
+        { name: 'goal', type: 'text', required: true, description: '页面目标，填充内容的依据' },
+        { name: 'brand', type: 'text', required: false, description: '站点名' },
+        { name: 'index', type: 'number', required: false, description: '该块在页面上的序号' },
+        {
+          name: 'useGenerative',
+          type: 'boolean',
+          required: false,
+          description: '是否用生成层写文案。false 时全部确定性填充，零成本',
+        },
+      ],
+      outputs: [
+        { name: 'block', type: 'text', required: true, description: '填好的 block JSON' },
+        { name: 'file', type: 'file', required: true, description: 'block JSON 的相对路径' },
+      ],
+      costHint: 'fast',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      const blockJson = requireString(runtime.inputs, 'blockJson', 'fill-block');
+      const goal = requireString(runtime.inputs, 'goal', 'fill-block');
+      const brand = typeof runtime.inputs['brand'] === 'string' ? runtime.inputs['brand'] : '';
+      const indexRaw = runtime.inputs['index'];
+      const index =
+        typeof indexRaw === 'number' && Number.isFinite(indexRaw) ? Math.round(indexRaw) : 0;
+      const useGenerative = boolInput(runtime.inputs, 'useGenerative', false);
 
-    const block = parseJson<BlockInstance>(blockJson, 'fill-block', 'block');
-    const registry = createBlockRegistry();
-    if (!registry.has(block.type)) {
-      throw new ToolError(
-        `block ${block.id} 的类型未注册: ${block.type}`,
-        'EXECUTION_FAILED',
-        'fill-block',
-      );
-    }
+      const block = parseJson<BlockInstance>(blockJson, 'fill-block', 'block');
+      if (!blocks.has(block.type)) {
+        throw new ToolError(
+          `block ${block.id} 的类型未注册: ${block.type}。` +
+            `自定义 block 必须与规划器用同一个池子（服务层注入 deps.blocks）`,
+          'EXECUTION_FAILED',
+          'fill-block',
+        );
+      }
 
-    // 生成式实现：只对"归生成层填"的 slot 类型调模型，其余仍是确定性。
-    // 粒度是 **slot**，不是 block —— "这块标题用确定性的、主视觉用生成式的"
-    // 必须表达得出来，否则素材层又退化成一揽子。
-    const generate =
-      useGenerative && runtime.llm !== undefined
-        ? makeSlotGenerator(runtime.llm, runtime)
-        : undefined;
+      // 生成式实现：只对"归生成层填"的 slot 类型调模型，其余仍是确定性。
+      // 粒度是 **slot**，不是 block —— "这块标题用确定性的、主视觉用生成式的"
+      // 必须表达得出来，否则素材层又退化成一揽子。
+      const generate =
+        useGenerative && runtime.llm !== undefined
+          ? makeSlotGenerator(runtime.llm, runtime)
+          : undefined;
 
-    // planner 放进 slots 里的数量信息要留着，否则"要几个"这一问就白问了。
-    const counts: Record<string, number> = {};
-    for (const [name, value] of Object.entries(block.slots)) {
-      counts[name] =
-        value.kind === 'list' ? value.items.length : value.kind === 'list-image' ? value.refs.length : 1;
-    }
+      // planner 放进 slots 里的数量信息要留着，否则"要几个"这一问就白问了。
+      const counts: Record<string, number> = {};
+      for (const [name, value] of Object.entries(block.slots)) {
+        counts[name] =
+          value.kind === 'list'
+            ? value.items.length
+            : value.kind === 'list-image'
+              ? value.refs.length
+              : 1;
+      }
 
-    const filled = await fillBlock({
-      spec: registry.get(block.type),
-      block,
-      goal,
-      // 没给 brand 就交给 `deriveBrand` 派生。
-      //
-      // 这里曾经写的是 `goal.slice(0, 16)` —— 与 `deriveBrand` **两套逻辑**，
-      // 于是修好了派生函数也没用：服务端这条路径根本不走它，
-      // 页面上顶着的仍是一句在词中间切断的残句（「…含首屏、特」）。
-      // 兜底只能有一处，否则改了 A 忘了 B，表现是"修了但没生效"。
-      brand: brand === '' ? deriveBrand(goal) : brand,
-      options: generate === undefined ? {} : { generate },
-      index,
-      counts,
-    });
+      const filled = await fillBlock({
+        spec: blocks.get(block.type),
+        block,
+        goal,
+        // 没给 brand 就交给 `deriveBrand` 派生。
+        //
+        // 这里曾经写的是 `goal.slice(0, 16)` —— 与 `deriveBrand` **两套逻辑**，
+        // 于是修好了派生函数也没用：服务端这条路径根本不走它，
+        // 页面上顶着的仍是一句在词中间切断的残句（「…含首屏、特」）。
+        // 兜底只能有一处，否则改了 A 忘了 B，表现是"修了但没生效"。
+        brand: brand === '' ? deriveBrand(goal) : brand,
+        options: generate === undefined ? {} : { generate },
+        index,
+        counts,
+      });
 
-    const relPath = `src/blocks/${block.id}.json`;
-    const outJson = JSON.stringify(filled.block, null, 2);
-    await runtime.sandbox.writeFile(runtime.handle, relPath, outJson);
+      const relPath = `src/blocks/${block.id}.json`;
+      const outJson = JSON.stringify(filled.block, null, 2);
+      await runtime.sandbox.writeFile(runtime.handle, relPath, outJson);
 
-    for (const warning of filled.warnings) runtime.log(warning);
-    if (useGenerative && runtime.llm === undefined) {
-      runtime.log('要求生成式填充但本次运行未提供 LlmClient，已全部走确定性填充');
-    }
+      for (const warning of filled.warnings) runtime.log(warning);
+      if (useGenerative && runtime.llm === undefined) {
+        runtime.log('要求生成式填充但本次运行未提供 LlmClient，已全部走确定性填充');
+      }
 
-    return {
-      outputs: { block: outJson, file: relPath },
-      artifacts: [],
-      summary:
-        `填充区块 ${block.id}(${block.type})，${Object.keys(filled.block.slots).length} 个 slot，` +
-        `${filled.generativeCalls} 次生成调用`,
-    };
-  },
-};
+      return {
+        outputs: { block: outJson, file: relPath },
+        artifacts: [],
+        summary:
+          `填充区块 ${block.id}(${block.type})，${Object.keys(filled.block.slots).length} 个 slot，` +
+          `${filled.generativeCalls} 次生成调用`,
+      };
+    },
+  };
+}
 
 /**
  * 造一个 slot 级生成器。
@@ -218,88 +238,107 @@ function makeSlotGenerator(
  * **数组顺序就是页面顺序**。这是全仓库唯一一处多对一的数据流——
  * 没有它，结构化制作在计划层面就退化成"一个大节点里填所有块"。
  */
-export const assemblePageTool: ToolRegistration = {
-  spec: {
-    id: 'assemble-page',
-    label: '组装结构化页面',
-    description:
-      '把各区块的填充结果按顺序组装成一个完整 HTML 页面，并做结构校验，写入 artifacts/index.html',
-    envTypes: ['webpage'],
-    role: 'transform',
-    category: 'structured',
-    inputs: [
-      { name: 'pageJson', type: 'text', required: true, description: '页面骨架 JSON（不含已填内容）' },
-      { name: 'blocks', type: 'json', required: true, description: '按页面顺序排列的已填充 block 列表' },
-      { name: 'title', type: 'text', required: false, description: '文档标题' },
-      { name: 'annotate', type: 'boolean', required: false, description: '是否标注每块的来源' },
-    ],
-    outputs: [
-      { name: 'html', type: 'text', required: true, description: '完整页面 HTML' },
-      { name: 'file', type: 'file', required: true, description: '产物相对路径' },
-      { name: 'blockCount', type: 'number', required: true, description: '页面上有几块' },
-    ],
-    costHint: 'fast',
-  },
-  execute: async (runtime): Promise<ToolResult> => {
-    const pageJson = requireString(runtime.inputs, 'pageJson', 'assemble-page');
-    const rawBlocks = runtime.inputs['blocks'];
-    if (!Array.isArray(rawBlocks)) {
-      throw new ToolError(
-        '工具 assemble-page 的 blocks 入参不是数组。' +
-          '它应当由多个 fill-block 节点的产出扇入而成',
-        'EXECUTION_FAILED',
-        'assemble-page',
-      );
-    }
-
-    const skeleton = parseJson<PageSpec>(pageJson, 'assemble-page', '页面骨架');
-
-    // 扇入来的每一项是 fill-block 的 `block` 端口，即一段 JSON 文本。
-    // 逐个解析并**校验形态**：某一项坏了要能指出是第几项，而不是笼统地说"组装失败"。
-    const filled: BlockInstance[] = [];
-    for (const [i, item] of rawBlocks.entries()) {
-      if (typeof item !== 'string') {
+export function createAssemblePageTool(blocks: BlockRegistry): ToolRegistration {
+  return {
+    spec: {
+      id: 'assemble-page',
+      label: '组装结构化页面',
+      description:
+        '把各区块的填充结果按顺序组装成一个完整 HTML 页面，并做结构校验，写入 artifacts/index.html',
+      envTypes: ['webpage'],
+      role: 'transform',
+      category: 'structured',
+      inputs: [
+        { name: 'pageJson', type: 'text', required: true, description: '页面骨架 JSON（不含已填内容）' },
+        { name: 'blocks', type: 'json', required: true, description: '按页面顺序排列的已填充 block 列表' },
+        { name: 'title', type: 'text', required: false, description: '文档标题' },
+        { name: 'annotate', type: 'boolean', required: false, description: '是否标注每块的来源' },
+      ],
+      outputs: [
+        { name: 'html', type: 'text', required: true, description: '完整页面 HTML' },
+        { name: 'file', type: 'file', required: true, description: '产物相对路径' },
+        { name: 'blockCount', type: 'number', required: true, description: '页面上有几块' },
+      ],
+      costHint: 'fast',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      const pageJson = requireString(runtime.inputs, 'pageJson', 'assemble-page');
+      const rawBlocks = runtime.inputs['blocks'];
+      if (!Array.isArray(rawBlocks)) {
         throw new ToolError(
-          `blocks 第 ${i + 1} 项不是字符串（实际 ${typeof item}），扇入的应当是 fill-block 的 block 产出`,
+          '工具 assemble-page 的 blocks 入参不是数组。' +
+            '它应当由多个 fill-block 节点的产出扇入而成',
           'EXECUTION_FAILED',
           'assemble-page',
         );
       }
-      const parsed = parseJson<BlockInstance>(item, 'assemble-page', `第 ${i + 1} 个 block`);
-      if (typeof parsed.id !== 'string' || typeof parsed.type !== 'string') {
-        throw new ToolError(
-          `blocks 第 ${i + 1} 项缺少 id 或 type 字段，不是合法的 block`,
-          'EXECUTION_FAILED',
-          'assemble-page',
-        );
+
+      const skeleton = parseJson<PageSpec>(pageJson, 'assemble-page', '页面骨架');
+
+      // 扇入来的每一项是 fill-block 的 `block` 端口，即一段 JSON 文本。
+      // 逐个解析并**校验形态**：某一项坏了要能指出是第几项，而不是笼统地说"组装失败"。
+      const filled: BlockInstance[] = [];
+      for (const [i, item] of rawBlocks.entries()) {
+        if (typeof item !== 'string') {
+          throw new ToolError(
+            `blocks 第 ${i + 1} 项不是字符串（实际 ${typeof item}），扇入的应当是 fill-block 的 block 产出`,
+            'EXECUTION_FAILED',
+            'assemble-page',
+          );
+        }
+        const parsed = parseJson<BlockInstance>(item, 'assemble-page', `第 ${i + 1} 个 block`);
+        if (typeof parsed.id !== 'string' || typeof parsed.type !== 'string') {
+          throw new ToolError(
+            `blocks 第 ${i + 1} 项缺少 id 或 type 字段，不是合法的 block`,
+            'EXECUTION_FAILED',
+            'assemble-page',
+          );
+        }
+        filled.push(parsed);
       }
-      filled.push(parsed);
-    }
 
-    const page: PageSpec = { ...skeleton, blocks: filled };
-    // 渲染之前先校验结构。放到渲染后查，错误会埋进 HTML 里，肉眼看不出来。
-    validatePageSpec(page, createBlockRegistry());
+      const page: PageSpec = { ...skeleton, blocks: filled };
+      // 渲染之前先校验结构。放到渲染后查，错误会埋进 HTML 里，肉眼看不出来。
+      validatePageSpec(page, blocks);
 
-    const title =
-      typeof runtime.inputs['title'] === 'string' && runtime.inputs['title'] !== ''
-        ? runtime.inputs['title']
-        : page.goal;
-    const annotate = boolInput(runtime.inputs, 'annotate', false);
+      const title =
+        typeof runtime.inputs['title'] === 'string' && runtime.inputs['title'] !== ''
+          ? runtime.inputs['title']
+          : page.goal;
+      const annotate = boolInput(runtime.inputs, 'annotate', false);
 
-    const html = renderPage(page, { title, annotate });
-    const file = 'artifacts/index.html';
-    await runtime.sandbox.writeFile(runtime.handle, file, html);
+      const html = renderPage(page, { title, annotate });
+      const file = 'artifacts/index.html';
+      await runtime.sandbox.writeFile(runtime.handle, file, html);
 
-    const blockTypes = filled.map((b) => b.type).join(' → ');
-    return {
-      outputs: { html, file, blockCount: filled.length },
-      artifacts: await runtime.sandbox.collectArtifacts(runtime.handle),
-      summary: `组装页面 ${file}（${filled.length} 块：${blockTypes}，${html.length} 字符）`,
-    };
-  },
-};
+      const blockTypes = filled.map((b) => b.type).join(' → ');
+      return {
+        outputs: { html, file, blockCount: filled.length },
+        artifacts: await runtime.sandbox.collectArtifacts(runtime.handle),
+        summary: `组装页面 ${file}（${filled.length} 块：${blockTypes}，${html.length} 字符）`,
+      };
+    },
+  };
+}
 
-/** 结构化制作链路的工具全集。与 `BUILTIN_TOOLS` 分开，只在 webpage 环境装配。 */
-export const STRUCTURED_TOOLS: readonly ToolRegistration[] = [fillBlockTool, assemblePageTool].sort(
-  (a, b) => (a.spec.id < b.spec.id ? -1 : 1),
+/**
+ * 结构化制作链路的工具全集。与 `BUILTIN_TOOLS` 分开，只在 webpage 环境装配。
+ *
+ * 传进来的 `blocks` 必须是**这一次运行真正在用的那个池子** ——
+ * 包括服务层装了外部来源 block 的那个。传错了就会重现"选得到、填不了"的断链。
+ */
+export function createStructuredTools(blocks: BlockRegistry): readonly ToolRegistration[] {
+  return [createFillBlockTool(blocks), createAssemblePageTool(blocks)].sort((a, b) =>
+    a.spec.id < b.spec.id ? -1 : 1,
+  );
+}
+
+/**
+ * 默认工具集：装在**内置 block 池**上。
+ *
+ * 给不注入池子的调用方（测试、单机脚本）用。服务层应当改用
+ * `createStructuredTools(它自己的 blocks)`。
+ */
+export const STRUCTURED_TOOLS: readonly ToolRegistration[] = createStructuredTools(
+  createBlockRegistry(),
 );

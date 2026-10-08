@@ -22,6 +22,8 @@ import { ToolError } from './tools/types.js';
 import { PlanAssembler, type AssembleResult } from './plan/assembler.js';
 import type { PageSpec } from './structured/page-spec.js';
 import type { StructureStep } from './structured/planner.js';
+import type { BlockRegistry } from './structured/block-spec.js';
+import type { TemplateSpec } from './structured/template-spec.js';
 import {
   PlanExecutor,
   type ExecutionEvent,
@@ -66,6 +68,18 @@ export interface RunRequest {
   readonly useGenerative?: boolean | undefined;
   /** 页面上是否标注每块的来源（生成式/确定性/用户），便于演示与排查。 */
   readonly annotate?: boolean | undefined;
+  /**
+   * 套用的模板。由调用方从模板池解析后传入——模板池属于服务层，
+   * 编排层只认"这一个模板长什么样"，不认"模板从哪来"。
+   */
+  readonly template?: TemplateSpec | undefined;
+  /**
+   * block 池。省略则结构化链路退回内置池。
+   *
+   * 装了外部来源（模型提议/手打/导入）的 block 时**必须传**：
+   * 否则那些 block 在 `/api/blocks` 里列得出来、却永远进不了候选集。
+   */
+  readonly blocks?: BlockRegistry | undefined;
 }
 
 export interface RunOptions {
@@ -116,6 +130,15 @@ export interface RunResult {
   readonly execution?: ExecutionResult | undefined;
   /** 最终使用的计划。 */
   readonly plan?: ExecutionPlan | undefined;
+  /**
+   * **结构化链路专有**：逐块决策定稿的页面与每一轮的决策留痕。
+   *
+   * 单链链路没有这个东西——它的结构藏在生成出来的字符串里，拿不出来。
+   * 结构化链路的结构是数据，所以能作为**产出**交出来，而不是只作为过程事件。
+   */
+  readonly structure?:
+    | { readonly page: PageSpec; readonly steps: readonly StructureStep[] }
+    | undefined;
   /** 本次运行使用的沙盒。调用方据此读取产物、决定何时销毁。 */
   readonly handle: SandboxHandle;
   /** 每次尝试的记录，便于排查与前端展示。 */
@@ -176,6 +199,14 @@ export class Orchestrator {
 
     let lastPlan: ExecutionPlan | undefined;
     let lastExecution: ExecutionResult | undefined;
+    /**
+     * 最后一次定稿的结构。
+     *
+     * 它**必须出现在 `RunResult` 上**，不能只躺在 `plan_assembled` 事件里：
+     * 事件是"过程"，结果是"产出"。调用方（服务层）要把它存进运行记录、
+     * 要能刷新页面后仍然拿得到——只靠订阅事件的话，错过那一刻就永远没了。
+     */
+    let lastStructure: AssembleResult['structure'];
     /** 换方案时要排除的工具——已试过且失败的主工具。 */
     const excludeTools = new Set<string>();
 
@@ -184,7 +215,7 @@ export class Orchestrator {
     try {
       for (;;) {
         if (signal?.aborted === true) {
-          return this.finish('failed', lastExecution, lastPlan, handle, attempts, startedAt, '调用方已取消', emit);
+          return this.finish('failed', lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, '调用方已取消', emit);
         }
 
         attemptNumber += 1;
@@ -223,10 +254,13 @@ export class Orchestrator {
             ...(request.brand !== undefined ? { brand: request.brand } : {}),
             ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
             ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
+            ...(request.template !== undefined ? { template: request.template } : {}),
+            ...(request.blocks !== undefined ? { blocks: request.blocks } : {}),
             ...(decisionTimeoutMs !== undefined ? { decisionTimeoutMs } : {}),
           });
           plan = assembled.plan;
           structure = assembled.structure;
+          lastStructure = assembled.structure;
         } catch (error) {
           // **attemptNumber，不是写死的 1。**
           //
@@ -260,7 +294,7 @@ export class Orchestrator {
             });
             continue;
           }
-          return this.finish('escalated', lastExecution, lastPlan, handle, attempts, startedAt, decisionResult.detail, emit);
+          return this.finish('escalated', lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, decisionResult.detail, emit);
         }
 
         lastPlan = plan;
@@ -298,7 +332,7 @@ export class Orchestrator {
             status: 'succeeded',
             detail: `产出 ${execution.artifacts.length} 个产物`,
           });
-          return this.finish('succeeded', execution, plan, handle, attempts, startedAt, undefined, emit);
+          return this.finish('succeeded', execution, plan, structure, handle, attempts, startedAt, undefined, emit);
         }
 
         // ── 3. 失败 → 兜底 ────────────────────────────────────────────
@@ -349,6 +383,7 @@ export class Orchestrator {
           'escalated',
           execution,
           plan,
+          structure,
           handle,
           attempts,
           startedAt,
@@ -366,6 +401,7 @@ export class Orchestrator {
     status: 'succeeded' | 'failed' | 'escalated',
     execution: ExecutionResult | undefined,
     plan: ExecutionPlan | undefined,
+    structure: AssembleResult['structure'],
     handle: SandboxHandle,
     attempts: AttemptRecord[],
     startedAt: number,
@@ -385,6 +421,7 @@ export class Orchestrator {
       status,
       ...(execution !== undefined ? { execution } : {}),
       ...(plan !== undefined ? { plan } : {}),
+      ...(structure !== undefined ? { structure } : {}),
       handle,
       attempts,
       durationMs,

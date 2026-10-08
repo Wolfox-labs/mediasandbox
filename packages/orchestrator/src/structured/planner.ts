@@ -41,6 +41,7 @@ import {
 } from '../decision/types.js';
 import { argmaxDeterministic } from '../decision/types.js';
 import { BLOCK_GROUP_LABELS, type BlockRegistry, type BlockSpec, type SlotSpec } from './block-spec.js';
+import { applyTemplate, narrowCandidates, type TemplateSpec } from './template-spec.js';
 import {
   appendBlock,
   createPageSpec,
@@ -130,6 +131,17 @@ export interface PlanStructureRequest {
   readonly goal: string;
   /** 本次候选集——用户从 block 池里选出来的要用的类型。 */
   readonly candidateBlockIds: readonly string[];
+  /**
+   * 套用的模板。省略即不套模板。
+   *
+   * 模板同时起两个作用（设计稿 §7.1）：
+   *   - **限定范围**：`allowedBlockIds` 与候选集取交集，防跑偏
+   *   - **起手结构**：`blocks` 直接铺成已排好的前缀，规划器从它之后继续
+   *
+   * 注意 `maxBlocks` 是**整页**上限，模板占掉的块数算在里面 ——
+   * 否则"套了模板"反而能把页面撑得比不套更长。
+   */
+  readonly template?: TemplateSpec | undefined;
   /** 页面 block 数上限。 */
   readonly maxBlocks?: number | undefined;
   /** 用户追加的硬约束，会进决策层的 state。 */
@@ -186,7 +198,7 @@ export class StructurePlanner {
       throw new StructureError('block 池为空', 'NO_CANDIDATES');
     }
 
-    const candidateIds = [...new Set(request.candidateBlockIds)];
+    const candidateIds = narrowCandidates([...new Set(request.candidateBlockIds)], request.template);
     if (candidateIds.length === 0) {
       throw new StructureError('本次候选集为空，无法开始结构决策', 'NO_CANDIDATES');
     }
@@ -203,8 +215,23 @@ export class StructurePlanner {
       candidateBlockIds: candidateIds,
     });
 
-    /** 已经用过的 block 类型，用于排除"不可重复"的那些。 */
-    const usedTypes: string[] = [];
+    // ── 模板的起手结构 ────────────────────────────────────────────────
+    //
+    // 它承载的是**用户已经决定的结构**，因此优先于模型的逐块决策 ——
+    // 那正是"选了模板就只在这个范围里工作、不跑偏"的意思。
+    //
+    // 注意这与红线不冲突：红线管的是**生成层**不能决定结构（设计稿 §2.1），
+    // 不是"用户不能决定结构"。用户选模板，本身就是 §6.2 列出的干预点之一。
+    if (request.template !== undefined) {
+      page = applyTemplate(page, request.template);
+      rationale.push(
+        `套用模板 ${request.template.id}（${request.template.label}）：` +
+          `起手 ${page.blocks.length} 块 —— ${describePageSpec(page)}`,
+      );
+    }
+
+    /** 已经用过的 block 类型，用于排除"不可重复"的那些。模板铺上的也算用过。 */
+    const usedTypes: string[] = page.blocks.map((b) => b.type);
     /** 上一个被选中的 block 的 spec，用于补问数量。 */
     let lastSpec: BlockSpec | null = null;
     let lastBlockId: string | null = null;
@@ -219,7 +246,23 @@ export class StructurePlanner {
       }
     };
 
-    for (let round = 0; round < maxBlocks; round += 1) {
+    // 模板给的结构**自己就收了尾**时，不再扩展。
+    // 沉淀出来的模板是"跑完过的整页"，通常带 footer —— 那种情况下页面已经完整，
+    // 再问"要不要再来一块"只会得到一块排在页脚后面的正文。
+    const seededLast = page.blocks.at(-1);
+    const structurallyClosed =
+      seededLast !== undefined &&
+      blocks.has(seededLast.type) &&
+      isTerminal(blocks.get(seededLast.type));
+    if (structurallyClosed) {
+      rationale.push(
+        `模板的起手结构已以 ${seededLast!.type}（页面末尾块）收尾，不再扩展`,
+      );
+    }
+
+    // 循环条件是**整页块数**而不是轮数：套了模板之后，"还能排几块"
+    // 取决于模板占掉多少，而不是还能问几轮。
+    for (let round = 0; !structurallyClosed && page.blocks.length < maxBlocks; round += 1) {
       const available = this.availableSpecs(candidateIds, usedTypes);
       if (available.length === 0) {
         rationale.push(`第 ${round + 1} 轮：候选集里的 block 已用尽（不可重复的都已出现），结束`);

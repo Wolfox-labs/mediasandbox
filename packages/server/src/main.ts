@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_TOOLS,
   createBlockRegistry,
+  createStructuredTools,
+  createTemplateRegistry,
   DEFAULT_POLICY,
   DemoDecisionClient,
   RizzoFlowClient,
@@ -23,7 +25,6 @@ import {
   StubDecisionClient,
   ToolRegistry,
   OpenAiCompatibleClient,
-  STRUCTURED_TOOLS,
   type DecisionClient,
   type LlmClient,
 } from '@mediasandbox/orchestrator';
@@ -179,8 +180,15 @@ async function buildProviders(): Promise<{
 async function main(): Promise<void> {
   // 工具注册表：通用工具 + 结构化制作工具。结构化那两条只在 webpage 环境可见
   // （它们声明了 `envTypes: ['webpage']`），所以放进同一个注册表不会污染其它链路。
-  const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS).registerAll(STRUCTURED_TOOLS);
+  // block 池先建：结构化工具要**装在同一个池子上**，
+  // 否则自定义 block 会重现"规划器选得到、执行期说未注册"的断链。
   const blocks = createBlockRegistry();
+  const registry = new ToolRegistry()
+    .registerAll(BUILTIN_TOOLS)
+    .registerAll(createStructuredTools(blocks));
+  // 模板池依赖 block 池：模板里的块类型要在注册期就校验存在性，
+  // 否则一个排错的模板会把这个错误复制到之后每个用它的项目上。
+  const templates = createTemplateRegistry(blocks);
   const decision = buildDecision();
   const llm = buildLlm();
   const { providers, defaultProvider } = await buildProviders();
@@ -197,6 +205,7 @@ async function main(): Promise<void> {
   const instance = createServer({
     registry,
     blocks,
+    templates,
     decision,
     ...(llm !== undefined ? { llm } : {}),
     providers,
@@ -223,6 +232,7 @@ async function main(): Promise<void> {
   log(`  沙盒      ${defaultProvider}（可用: ${Object.keys(providers).join(', ')}）`);
   log(`  工作区    ${WORKSPACE_ROOT}`);
   log(`  block 池  ${blocks.size} 类，分 ${blocks.groups().length} 组（结构化制作链路，webpage 环境）`);
+  log(`  模板池    ${templates.size} 套（${templates.specs().map((t) => t.id).join(', ')}）`);
   log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
   if (!webDistExists) {
     log('  前端      未构建（跑 pnpm --filter @mediasandbox/web build 后即可经本服务访问）');

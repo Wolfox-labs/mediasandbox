@@ -93,8 +93,22 @@ export {
 } from './structured/filler.js';
 export { escapeHtml, pageStyles, renderPage, type RenderOptions } from './structured/renderer.js';
 export {
-  assemblePageTool,
-  fillBlockTool,
+  applyTemplate,
+  builtinTemplates,
+  createTemplateRegistry,
+  extractTemplate,
+  narrowCandidates,
+  TemplateError,
+  TemplateRegistry,
+  validateTemplate,
+  type TemplateBlock,
+  type TemplateErrorCode,
+  type TemplateSpec,
+} from './structured/template-spec.js';
+export {
+  createAssemblePageTool,
+  createFillBlockTool,
+  createStructuredTools,
   STRUCTURED_TOOLS,
 } from './structured/tools.js';
 export { assembleStructured } from './structured/assembler.js';

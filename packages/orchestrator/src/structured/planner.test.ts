@@ -26,6 +26,7 @@ import type {
 } from '../decision/types.js';
 import { DecisionError } from '../decision/types.js';
 import { createBlockRegistry } from './block-spec.js';
+import type { TemplateSpec } from './template-spec.js';
 import {
   CONTINUE_NO_THRESHOLD,
   CONTINUE_YES_THRESHOLD,
@@ -660,6 +661,114 @@ describe('结构规划器：末尾块收尾与版式规范化', () => {
     // 评分那一次请求的 instructions 里嵌了结构摘要；第一个块应当是 nav。
     // 若规范化排在评分之后，这里看到的还是 hero 开头 —— 评的就是一个要被改掉的中途状态。
     assert.match(qualityInstructions, /结构：1\. nav/);
+  });
+});
+
+describe('结构规划器：模板', () => {
+  /** 就地造一个模板，不走内置池 —— 测试要控制起手结构。 */
+  function tpl(blocks: readonly string[], allowed?: readonly string[]): TemplateSpec {
+    return {
+      id: 'tpl-test',
+      label: '测试模板',
+      description: '用于测试',
+      blocks: blocks.map((type) => ({ type })),
+      ...(allowed !== undefined ? { allowedBlockIds: allowed } : {}),
+      builtin: false,
+    };
+  }
+
+  it('起手结构被完整铺上，且模型从它之后继续排', async () => {
+    const decision = picker(['cta']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: ['hero', 'features', 'cta', 'text'],
+      template: tpl(['hero', 'features']),
+    });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['hero', 'features', 'cta']);
+    assert.equal(result.page.templateId, 'tpl-test');
+    assert.ok(
+      result.rationale.some((r) => r.includes('套用模板')),
+      '套了哪个模板要留痕，否则"为什么结构是这样"无从解释',
+    );
+  });
+
+  it('起手结构里的块算"已经用过"——不可重复的不会再被选中', async () => {
+    const decision = picker(['features']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: ['hero', 'features', 'text'],
+      template: tpl(['hero']),
+    });
+
+    // hero 是模板铺的，且不可重复 → 后续候选里不该再有它。
+    const heroCount = result.page.blocks.filter((b) => b.type === 'hero').length;
+    assert.equal(heroCount, 1);
+    for (const criteria of decision.criteria) {
+      if (result.page.blocks.length > 1) {
+        assert.ok(!criteria.includes('hero'), `候选集里不该再出现 hero: ${criteria.join(',')}`);
+      }
+    }
+  });
+
+  it('模板的 allowedBlockIds 真的收窄了候选集——这是防跑偏的主要手段', async () => {
+    const decision = picker(['features']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: ['hero', 'features', 'cta', 'text', 'quote'],
+      template: tpl(['hero'], ['hero', 'features']),
+    });
+
+    for (const b of result.page.blocks) {
+      assert.ok(['hero', 'features'].includes(b.type), `${b.type} 跑到模板范围外了`);
+    }
+    for (const criteria of decision.criteria) {
+      for (const id of criteria) {
+        assert.ok(['hero', 'features'].includes(id), `候选集里出现了范围外的 ${id}`);
+      }
+    }
+  });
+
+  it('模板自己已经以末尾块收尾时，不再扩展——页脚后面不该再有正文', async () => {
+    const decision = picker(['cta']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: ['nav', 'hero', 'footer', 'cta'],
+      template: tpl(['nav', 'hero', 'footer']),
+    });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['nav', 'hero', 'footer']);
+    assert.ok(result.rationale.some((r) => r.includes('收尾')));
+    // 一块都没多问"下一块放什么"。
+    assert.ok(
+      decision.batches.every((ids) => !ids.includes(STRUCTURE_QUESTIONS.nextBlock)),
+      '结构已经完整，不该再问下一块',
+    );
+  });
+
+  it('maxBlocks 是**整页**上限，模板占掉的块数算在里面', async () => {
+    const decision = picker(['cta', 'text', 'quote']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: ['hero', 'features', 'cta', 'text', 'quote'],
+      template: tpl(['hero', 'features']),
+      maxBlocks: 4,
+    });
+
+    assert.equal(result.page.blocks.length, 4, '模板 2 块 + 最多再排 2 块');
+  });
+
+  it('没套模板时行为不变（模板是可选增强，不是新前提）', async () => {
+    const decision = picker(['hero', 'features', 'cta']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDIDATES });
+    assert.deepEqual(blockTypeSequence(result.page), ['hero', 'features', 'cta']);
+    assert.equal(result.page.templateId, null);
   });
 });
 

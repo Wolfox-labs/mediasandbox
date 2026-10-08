@@ -23,8 +23,10 @@ import {
   type PlanNode,
 } from './types.js';
 import { assembleStructured } from '../structured/assembler.js';
+import type { BlockRegistry } from '../structured/block-spec.js';
 import type { PageSpec } from '../structured/page-spec.js';
 import type { StructureStep } from '../structured/planner.js';
+import type { TemplateSpec } from '../structured/template-spec.js';
 
 export interface AssembleRequest {
   readonly context: DecisionContext;
@@ -56,6 +58,17 @@ export interface AssembleRequest {
   readonly useGenerative?: boolean | undefined;
   /** 页面上是否标注每块的来源，便于演示与排查。 */
   readonly annotate?: boolean | undefined;
+  /**
+   * block 池。省略则用内置池。
+   *
+   * **必须能被传进来**：服务层装了外部来源（模型提议 / 用户手打 / 导入）的 block，
+   * 而结构化链路此前自己 `createBlockRegistry()` 新建一个内置池——
+   * 于是那些 block 在 `/api/blocks` 里列得出来、却**永远选不到**（池子不是同一个）。
+   * 这条断链与「候选集来自注册表」的设计前提直接冲突。
+   */
+  readonly blocks?: BlockRegistry | undefined;
+  /** 套用的模板。由调用方从模板池解析后传入（模板池在服务层）。 */
+  readonly template?: TemplateSpec | undefined;
 }
 
 export interface AssembleResult {

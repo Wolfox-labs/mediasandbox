@@ -314,6 +314,74 @@ describe('填充器：填出来的内容是完整的', () => {
     assert.equal(filled.sources['text'], 'user');
   });
 
+  it('列表型 slot 的真实内容被保留——此前它被静默丢掉，来源却标着 user', async () => {
+    // 这条区分两种"已有值"：空占位（planner 为问数量放的壳）与真实内容
+    // （模板预置 / 用户手填 / 上游产出）。早先两种都走"内容一律重新生成"，
+    // 于是真实内容被丢掉，而 `sources` 还写着 `user` —— 状态说"这是你给的"，
+    // 内容却是系统编的。
+    const block = pending('features', {
+      items: { kind: 'list', items: ['用户写的特性一', '用户写的特性二'] },
+    });
+    const filled = await fillBlock({
+      spec: specOf('features'),
+      block,
+      goal: 'g',
+      brand: 'b',
+      options: {},
+      index: 0,
+      counts: { items: 2 },
+    });
+    const items = filled.block.slots['items'];
+    assert.equal(items?.kind, 'list');
+    if (items?.kind === 'list') {
+      assert.deepEqual(items.items, ['用户写的特性一', '用户写的特性二']);
+    }
+    assert.equal(filled.sources['items'], 'user');
+  });
+
+  it('真实内容项数不足时用确定性内容补齐，而不是把已有条目复制一遍', async () => {
+    const block = pending('features', {
+      items: { kind: 'list', items: ['唯一一条真实内容'] },
+    });
+    const filled = await fillBlock({
+      spec: specOf('features'),
+      block,
+      goal: 'g',
+      brand: 'b',
+      options: {},
+      index: 0,
+      counts: { items: 3 },
+    });
+    const items = filled.block.slots['items'];
+    assert.equal(items?.kind, 'list');
+    if (items?.kind === 'list') {
+      assert.equal(items.items.length, 3);
+      assert.equal(items.items[0], '唯一一条真实内容');
+      assert.notEqual(
+        items.items[1],
+        '唯一一条真实内容',
+        '循环取模会把第 1 条复制成第 2 条，页面上看起来就是"同一条说了两遍"',
+      );
+    }
+  });
+
+  it('真实内容超出问出来的项数时截断', async () => {
+    const block = pending('features', {
+      items: { kind: 'list', items: ['一', '二', '三'] },
+    });
+    const filled = await fillBlock({
+      spec: specOf('features'),
+      block,
+      goal: 'g',
+      brand: 'b',
+      options: {},
+      index: 0,
+      counts: { items: 2 },
+    });
+    const items = filled.block.slots['items'];
+    if (items?.kind === 'list') assert.deepEqual(items.items, ['一', '二']);
+  });
+
   it('标签页的标签与面板一一对应', async () => {
     const filled = await fillBlock({
       spec: specOf('tabs'),
