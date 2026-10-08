@@ -30,7 +30,8 @@ export interface RunRecord {
   readonly events: OrchestrationEvent[];
   /** 最终执行的产物清单。 */
   artifacts: Artifact[];
-  attempts: readonly AttemptRecord[];  reason?: string | undefined;
+  attempts: readonly AttemptRecord[];
+  reason?: string | undefined;
   /** 计划摘要，便于前端展示"排布了什么"。 */
   planSummary?: { readonly nodeId: string; readonly toolId: string; readonly note: string }[] | undefined;
   error?: string | undefined;
