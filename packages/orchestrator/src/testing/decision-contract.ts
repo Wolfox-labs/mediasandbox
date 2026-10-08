@@ -43,7 +43,12 @@ export function defineDecisionContract(options: DecisionContractOptions): void {
     it('批量提交多个问题，键名原样保留', async () => {
       const result = await client.decide(CONTEXT, {
         q_a: { type: 'noul', instructions: '目标是否需要构建步骤？' },
-        q_b: { type: 'score', instructions: '目标描述的清晰程度' },
+        q_b: {
+          type: 'score',
+          instructions: '目标描述的清晰程度',
+          // 评分档位表是必填的，从低到高。见 `ScoreQuestion.criteria`。
+          criteria: ['很模糊', '较模糊', '一般', '较清晰', '很清晰'],
+        },
       });
       assert.deepEqual(Object.keys(result.answers).sort(), ['q_a', 'q_b']);
       assert.equal(result.answers['q_a']?.type, 'noul');
@@ -51,6 +56,20 @@ export function defineDecisionContract(options: DecisionContractOptions): void {
       assert.equal(result.meta.source, options.isStub ? 'stub' : 'systemone');
       assert.ok(result.meta.latencyMs >= 0);
       assert.equal(result.usage.outputTokens, 0, '决策层不生成 token');
+    });
+
+    it('评分档位少于 2 项被拒绝', async () => {
+      await assert.rejects(
+        () =>
+          client.decide(CONTEXT, {
+            q: { type: 'score', instructions: '只有一个档位', criteria: ['唯一'] },
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof DecisionError);
+          assert.equal(error.reason, 'BAD_REQUEST');
+          return true;
+        },
+      );
     });
 
     it('空问题集被拒绝', async () => {
@@ -126,7 +145,7 @@ export function defineDecisionContract(options: DecisionContractOptions): void {
       assert.equal(answer.value, answer.yesProbability >= 0.5);
     });
 
-    it('score 的值落在 [0,1]', async () => {
+    it('score 的值落在 0..1（已归一化）', async () => {
       const answer = await askScore(client, {
         context: CONTEXT,
         subject: 'Vite + React',

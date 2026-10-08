@@ -5,10 +5,16 @@
  * 必须通过同一套 provider 测试（见 src/testing/provider-suite.ts）。
  */
 
-/** 沙盒环境预设。每个预设对应一套预装工具链。 */
-export type EnvType = 'frontend' | 'image' | 'copy';
+/**
+ * 沙盒环境预设。每个预设对应一套预装工具链。
+ *
+ * `webpage` 与 `frontend` 并存而不是取代它：后者是"整页生成"链路，
+ * 通着、有测试、有真实产出验证过；前者是**结构化制作**链路（block 级粒度），
+ * 直接改造会同时破坏两条路。
+ */
+export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage';
 
-export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy'];
+export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage'];
 
 /** 沙盒句柄。由 create() 返回，后续所有操作都作用于它。 */
 export interface SandboxHandle {

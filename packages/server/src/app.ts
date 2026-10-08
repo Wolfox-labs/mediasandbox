@@ -14,8 +14,12 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import path from 'node:path';
 import type { Server } from 'node:http';
 import type { EnvType, SandboxProvider } from '@mediasandbox/sandbox';
+import { ENV_TYPES } from '@mediasandbox/sandbox';
 import {
+  BLOCK_GROUP_LABELS,
   Orchestrator,
+  type BlockGroup,
+  type BlockRegistry,
   type DecisionClient,
   type FallbackPolicy,
   type LlmClient,
@@ -29,6 +33,13 @@ export interface ServerDeps {
   readonly registry: ToolRegistry;
   readonly decision: DecisionClient;
   readonly llm?: LlmClient | undefined;
+  /**
+   * block 池。结构化制作（`webpage` 环境）的候选集来源。
+   *
+   * 省略时服务器照常工作，只是 `/api/blocks` 与结构化链路的候选选取不可用——
+   * 让"只有工具链"的既有测试与部署不必被迫提供它。
+   */
+  readonly blocks?: BlockRegistry | undefined;
   /** 按 provider 名取实现：'local' 或 'docker'。 */
   readonly providers: Readonly<Record<string, SandboxProvider>>;
   readonly defaultProvider: string;
@@ -69,8 +80,26 @@ export interface CreateServerResult {
   waitForIdle(): Promise<void>;
 }
 
+/**
+ * 解析环境类型。
+ *
+ * 从 `ENV_TYPES` 派生，不写死字面量列表——加一个环境却漏改这里，
+ * 表现是"前端能选，提交时被 400 拒绝"，而错误信息还写着旧的三种。
+ */
 function parseEnvType(value: unknown): EnvType | undefined {
-  return value === 'frontend' || value === 'image' || value === 'copy' ? value : undefined;
+  return typeof value === 'string' && (ENV_TYPES as readonly string[]).includes(value)
+    ? (value as EnvType)
+    : undefined;
+}
+
+/** 受支持环境的可读列表，供错误信息与流水线提示用。 */
+function envTypeList(): string {
+  return ENV_TYPES.join(' / ');
+}
+
+/** 校验分组名。 */
+function isBlockGroup(value: unknown): value is BlockGroup {
+  return value === 'skeleton' || value === 'content' || value === 'interactive';
 }
 
 /**
@@ -160,6 +189,14 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     envType: EnvType;
     tone?: string | undefined;
     minArtifacts?: number | undefined;
+    /** 结构化链路（webpage 环境）专用参数。 */
+    structured?: {
+      readonly candidateBlockIds?: readonly string[] | undefined;
+      readonly maxBlocks?: number | undefined;
+      readonly brand?: string | undefined;
+      readonly useGenerative?: boolean | undefined;
+      readonly annotate?: boolean | undefined;
+    };
   }): Promise<void> {
     const { record, provider, goal, envType } = args;
     const controller = new AbortController();
@@ -175,6 +212,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           envType,
           ...(args.tone !== undefined ? { tone: args.tone } : {}),
           ...(args.minArtifacts !== undefined ? { minArtifacts: args.minArtifacts } : {}),
+          ...(args.structured ?? {}),
         },
         {
           registry: deps.registry,
@@ -276,7 +314,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
     const envType = parseEnvType(body['envType'] ?? 'copy');
     if (envType === undefined) {
-      errorResponse(res, 400, 'envType 必须是 frontend / image / copy 之一');
+      errorResponse(res, 400, `envType 必须是 ${envTypeList()} 之一`);
       return;
     }
 
@@ -310,6 +348,10 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     });
 
     // 异步执行，立即返回 202。前端通过 WebSocket 跟进度。
+    const candidateBlockIds = Array.isArray(body['candidateBlockIds'])
+      ? body['candidateBlockIds'].filter((v): v is string => typeof v === 'string')
+      : undefined;
+
     const task = executeRun({
       record,
       provider,
@@ -319,6 +361,18 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       ...(typeof body['minArtifacts'] === 'number'
         ? { minArtifacts: body['minArtifacts'] }
         : {}),
+      structured: {
+        ...(candidateBlockIds !== undefined && candidateBlockIds.length > 0
+          ? { candidateBlockIds }
+          : {}),
+        ...(typeof body['maxBlocks'] === 'number' ? { maxBlocks: body['maxBlocks'] } : {}),
+        ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
+        // 缺省是 **false**：不显式要求就不调生成层。零成本是默认值。
+        ...(typeof body['useGenerative'] === 'boolean'
+          ? { useGenerative: body['useGenerative'] }
+          : {}),
+        ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
+      },
     });
     inFlight.add(task);
     void task.finally(() => inFlight.delete(task));
@@ -541,6 +595,41 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         outputs: s.outputs,
         ...(s.costHint !== undefined ? { costHint: s.costHint } : {}),
         ...(s.requiresCommands !== undefined ? { requiresCommands: s.requiresCommands } : {}),
+      })),
+    });
+  });
+
+  /**
+   * block 池目录：前端据此展示"本次可以用哪些 block"。
+   *
+   * 这是「用户从候选池里选取本次要用的 block」的数据来源。
+   * 池子与工具目录同构——都是"候选集来自注册表，扩展 = 加一条，不重训模型"。
+   */
+  app.get('/api/blocks', (req: Request, res: Response) => {
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+    const groupRaw = req.query['group'];
+    const group = isBlockGroup(groupRaw) ? groupRaw : undefined;
+    const specs = registry.filter(group !== undefined ? { group } : {});
+    res.json({
+      blocks: specs.map((s) => ({
+        id: s.id,
+        label: s.label,
+        description: s.description,
+        group: s.group,
+        groupLabel: BLOCK_GROUP_LABELS[s.group],
+        canLead: s.canLead,
+        repeatable: s.repeatable,
+        costHint: s.costHint,
+        slots: s.slots,
+      })),
+      groups: registry.groups().map((g) => ({
+        id: g,
+        label: BLOCK_GROUP_LABELS[g],
+        count: registry.filter({ group: g }).length,
       })),
     });
   });

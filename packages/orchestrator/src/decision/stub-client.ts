@@ -11,6 +11,7 @@
 import {
   DecisionError,
   assertChoiceCriteria,
+  assertScoreCriteria,
   type Answer,
   type ChoiceAnswer,
   type DecisionBatchResult,
@@ -150,6 +151,7 @@ export class StubDecisionClient implements DecisionClient {
     for (const [id, question] of Object.entries(questions)) {
       // 与真实客户端保持同一套入参校验，否则契约测试在桩上会漏掉这些分支。
       if (question.type === 'choice') assertChoiceCriteria(id, question.criteria);
+      if (question.type === 'score') assertScoreCriteria(id, question.criteria);
       const preset = this.preset.answers.get(presetKey(question.type, id));
       answers[id] = preset ?? this.defaultAnswer(question);
     }

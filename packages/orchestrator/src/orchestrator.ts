@@ -19,7 +19,9 @@ import type { DecisionClient, DecisionContext } from './decision/types.js';
 import type { LlmClient } from './llm/types.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { ToolError } from './tools/types.js';
-import { PlanAssembler } from './plan/assembler.js';
+import { PlanAssembler, type AssembleResult } from './plan/assembler.js';
+import type { PageSpec } from './structured/page-spec.js';
+import type { StructureStep } from './structured/planner.js';
 import {
   PlanExecutor,
   type ExecutionEvent,
@@ -47,6 +49,23 @@ export interface RunRequest {
   /** 决策层追加上下文（事实、约束等）。 */
   readonly constraints?: readonly string[] | undefined;
   readonly facts?: Readonly<Record<string, string>> | undefined;
+
+  // ── 以下仅 `webpage` 环境（结构化链路）使用 ──────────────────────────
+  /**
+   * 本次候选 block 类型——用户从 block 池里选出来的。
+   *
+   * 省略时用池子全集（这样默认就能跑通）。给出时**决策模型只在这里面选**，
+   * 与"候选集来自工具注册表"是同一条原则：扩展 block 词表 = 改池子，不重训模型。
+   */
+  readonly candidateBlockIds?: readonly string[] | undefined;
+  /** 页面 block 数上限。防止"要不要继续"永远答是。 */
+  readonly maxBlocks?: number | undefined;
+  /** 站点名。由用户或确定性代码给，不让模型编。 */
+  readonly brand?: string | undefined;
+  /** 文案是否走生成层。**默认 false**——零成本是默认值。 */
+  readonly useGenerative?: boolean | undefined;
+  /** 页面上是否标注每块的来源（生成式/确定性/用户），便于演示与排查。 */
+  readonly annotate?: boolean | undefined;
 }
 
 export interface RunOptions {
@@ -66,7 +85,19 @@ export interface RunOptions {
 export type OrchestrationEvent =
   | { readonly type: 'run_started'; readonly projectId: string; readonly goal: string; readonly at: number }
   | { readonly type: 'attempt_started'; readonly attempt: number; readonly switches: number; readonly at: number }
-  | { readonly type: 'plan_assembled'; readonly plan: ExecutionPlan; readonly at: number }
+  | {
+      readonly type: 'plan_assembled';
+      readonly plan: ExecutionPlan;
+      readonly at: number;
+      /**
+       * 结构化链路专有：定稿的页面结构与逐轮决策留痕。
+       *
+       * 带上它是为了让前端能**在填充开始之前**就把结构画出来——
+       * 结构是数据，本来就可以先展示再执行；单链链路给不出这个，
+       * 它的结构要等生成完才知道。
+       */
+      readonly structure?: { readonly page: PageSpec; readonly steps: readonly StructureStep[] } | undefined;
+    }
   | { readonly type: 'execution_event'; readonly event: ExecutionEvent }
   | { readonly type: 'attempt_failed'; readonly detail: string; readonly kind: string; readonly at: number }
   | { readonly type: 'action_taken'; readonly action: string; readonly detail: string; readonly at: number }
@@ -173,6 +204,7 @@ export class Orchestrator {
         };
 
         let plan: ExecutionPlan;
+        let structure: AssembleResult['structure'];
         try {
           const assembler = new PlanAssembler(registry, decision, {
             excludeTools: [...excludeTools],
@@ -181,13 +213,29 @@ export class Orchestrator {
             context,
             envType: request.envType,
             goal: request.goal,
+            projectId: request.projectId,
             ...(request.tone !== undefined ? { tone: request.tone } : {}),
             ...(request.minArtifacts !== undefined ? { minArtifacts: request.minArtifacts } : {}),
+            ...(request.candidateBlockIds !== undefined
+              ? { candidateBlockIds: request.candidateBlockIds }
+              : {}),
+            ...(request.maxBlocks !== undefined ? { maxBlocks: request.maxBlocks } : {}),
+            ...(request.brand !== undefined ? { brand: request.brand } : {}),
+            ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
+            ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
             ...(decisionTimeoutMs !== undefined ? { decisionTimeoutMs } : {}),
           });
           plan = assembled.plan;
+          structure = assembled.structure;
         } catch (error) {
-          const decisionResult = fallback.onFailure(error, 1);
+          // **attemptNumber，不是写死的 1。**
+          //
+          // 这里曾经传 `1`。后果不是"少重试几次"，而是**无限循环**：
+          // `onFailure` 里 `attempt <= maxRetries` 判定用的是传入的尝试号，
+          // 恒为 1 时永远成立，于是 `action` 永远是 `retry`，
+          // 而 `retry` 分支只 `continue`、不改变任何状态——转一整圈又回到这里，
+          // 再次传 1。实测跑满 300 秒、2107 个事件、一个 block 都没产出。
+          const decisionResult = fallback.onFailure(error, attemptNumber);
           const detail = error instanceof Error ? error.message : String(error);
           attempts.push({
             attempt: attemptNumber,
@@ -218,7 +266,12 @@ export class Orchestrator {
         lastPlan = plan;
         const planKey = planKeyOf(plan);
         fallback.markTried(planKey);
-        emit({ type: 'plan_assembled', plan, at: Date.now() });
+        emit({
+          type: 'plan_assembled',
+          plan,
+          at: Date.now(),
+          ...(structure !== undefined ? { structure } : {}),
+        });
 
         // ── 2. 执行计划 ────────────────────────────────────────────────
         const executor = new PlanExecutor();

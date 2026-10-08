@@ -70,6 +70,23 @@ export const ENV_PRESETS: Readonly<Record<EnvType, EnvPreset>> = {
     requiredCommands: ['node'],
     baselineEnv: { ...COMMON_ENV },
   },
+  // 结构化制作链路。与 frontend 的差别不在工具链（同样是 Node + 静态产物），
+  // 而在**粒度**：frontend 下工具是交付物级（整页），这里工具是 block 级。
+  // 保留独立目录骨架是刻意的——block 的中间结构落在 src/blocks/ 下，
+  // 与整页生成的 src/index.html 不会互相覆盖，两条链路可以同时跑。
+  webpage: {
+    envType: 'webpage',
+    label: '结构化网页环境',
+    description:
+      '按 block 组装网页：结构由决策模型逐块决定，素材逐块填充，产物为整页 HTML。',
+    directories: ['src', 'src/blocks', 'artifacts', 'logs'],
+    seedFiles: {
+      'src/blocks/.gitkeep': '',
+      'artifacts/.gitkeep': '',
+    },
+    requiredCommands: ['node'],
+    baselineEnv: { ...COMMON_ENV, NODE_ENV: 'development' },
+  },
 };
 
 export function getPreset(envType: EnvType): EnvPreset {

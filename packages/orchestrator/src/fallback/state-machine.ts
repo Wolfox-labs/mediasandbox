@@ -123,6 +123,19 @@ export function classifyFailure(error: unknown): FailureClassification {
           detail: `决策请求不合法（${error.reason}）：${error.message}`,
           retryable: false,
         };
+      case 'UNSUPPORTED_PRIMITIVE':
+        // 服务是好的，只是能力比我们假设的少一个原语。
+        // 重试得到同样的 422，换方案也换不掉"服务端不支持"这件事——
+        // 但**降级**能解决（规划器会改用 choice 问离散档位）。
+        //
+        // 归类成 `plan`：这是"我们怎么问"的问题，不是"服务坏了"。
+        // `retryable: false` 让它跳过重试；`maxSwitches` 会给规划器
+        // 一次重跑的机会，而规划器在下一次里就带着降级信息。
+        return {
+          kind: 'plan',
+          detail: `决策层不支持该原语，需降级：${error.message}`,
+          retryable: false,
+        };
     }
   }
 

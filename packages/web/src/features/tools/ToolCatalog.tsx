@@ -19,6 +19,13 @@ const ROUTE_NOTE: Readonly<Record<EnvType, { generative: string; deterministic: 
     generative: 'scaffold-frontend（调生成模型写 HTML）',
     deterministic: 'static-page-from-template（内置模板）',
   },
+  // 结构化链路的两条路线**不在"工具"这一层**，而在每个 slot 上：
+  // 结构永远由决策模型逐块决定，只有 slot 内容选择生成式还是确定性。
+  // 所以这里说的是 slot 层面的事，不是"选哪个工具"。
+  webpage: {
+    generative: 'fill-block（文案走生成层，逐 slot 调用）',
+    deterministic: 'fill-block（全部确定性填充，零成本）',
+  },
 };
 
 export function ToolCatalog(): ReactNode {

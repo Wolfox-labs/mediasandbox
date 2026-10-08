@@ -9,7 +9,13 @@
  *   - 按 `nodeId` 归并同一节点的多次事件（started → log → succeeded/failed）
  *   - 保留 rationale（组装依据）与 attempt（重试/换方案），它们是"可解释"的证据
  */
-import type { InnerExecutionEvent, PlanNodeSummary, RunStatus, WireEvent } from '../api/types.js';
+import type {
+  InnerExecutionEvent,
+  PlanNodeSummary,
+  RunStatus,
+  StructureView,
+  WireEvent,
+} from '../api/types.js';
 
 /** 单个节点的界面状态。 */
 export interface StepView {
@@ -51,6 +57,14 @@ export interface RunViewModel {
   rationale: readonly string[];
   reason?: string | undefined;
   finished?: { status: RunStatus; durationMs: number } | undefined;
+  /**
+   * 结构化链路专有：定稿的页面结构与逐轮决策留痕。
+   *
+   * 它随 `plan_assembled` 到达，**早于填充执行**——所以界面可以在产物出来
+   * 之前就把结构画出来。单链链路没有这个字段：它的结构藏在生成出来的
+   * 字符串里，要等生成完才存在。
+   */
+  structure?: StructureView | undefined;
 }
 
 function emptyViewModel(): RunViewModel {
@@ -183,6 +197,7 @@ export function foldEvents(events: readonly WireEvent[]): RunViewModel {
     rationale: string[];
     reason?: string;
     finished?: { status: RunStatus; durationMs: number };
+    structure?: StructureView;
   } = { status: 'unknown', attempts: [], rationale: [] };
 
   /** 当前尝试；没有就补一个（attempt_started 可能是第一条）。 */
@@ -227,6 +242,9 @@ export function foldEvents(events: readonly WireEvent[]): RunViewModel {
         const attempt = currentAttempt();
         applyPlan(attempt, event.nodes, event.rationale);
         mutable.rationale = [...event.rationale];
+        // 结构化链路的结构。换方案重跑时会被新的覆盖——
+        // 这一点是刻意的：界面上显示的必须是**本次生效**的结构。
+        if (event.structure !== undefined) mutable.structure = event.structure;
         break;
       }
 
@@ -271,5 +289,6 @@ export function foldEvents(events: readonly WireEvent[]): RunViewModel {
   vm.rationale = mutable.rationale;
   if (mutable.reason !== undefined) vm.reason = mutable.reason;
   if (mutable.finished !== undefined) vm.finished = mutable.finished;
+  if (mutable.structure !== undefined) vm.structure = mutable.structure;
   return vm;
 }

@@ -17,6 +17,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  ENV_TYPES,
   SandboxError,
   type Artifact,
   type EnvType,
@@ -52,6 +53,9 @@ export const IMAGE_BY_ENV: Readonly<Record<EnvType, string>> = {
   frontend: 'mediasandbox/frontend:latest',
   image: 'mediasandbox/image:latest',
   copy: 'mediasandbox/copy:latest',
+  // 结构化网页只需要 Node 工具链，与 copy 镜像同构，直接复用同一个镜像，
+  // 不为它单独维护一份 Dockerfile——多一份镜像就多一处会和别处漂移的地方。
+  webpage: 'mediasandbox/copy:latest',
 };
 
 export interface DockerSandboxOptions {
@@ -280,10 +284,11 @@ export class DockerSandbox implements SandboxProvider {
 
     const projectId = info.Config.Labels?.['mediasandbox.project'] ?? 'unknown';
     const envTypeRaw = info.Config.Labels?.['mediasandbox.env'] ?? 'copy';
-    const envType: EnvType =
-      envTypeRaw === 'frontend' || envTypeRaw === 'image' || envTypeRaw === 'copy'
-        ? envTypeRaw
-        : 'copy';
+    // 从 ENV_TYPES 派生，不写死字面量列表——加一个环境却漏改这里，
+    // 表现是"容器在跑，但句柄上的 envType 悄悄变成 copy"，很难查。
+    const envType: EnvType = (ENV_TYPES as readonly string[]).includes(envTypeRaw)
+      ? (envTypeRaw as EnvType)
+      : 'copy';
 
     const handle: SandboxHandle = {
       id: sandboxId,

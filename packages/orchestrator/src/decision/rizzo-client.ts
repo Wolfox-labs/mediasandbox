@@ -16,6 +16,7 @@ import {
   DecisionError,
   RIZZO_DEFAULT_BASE_URL,
   assertChoiceCriteria,
+  assertScoreCriteria,
   argmaxDeterministic,
   serializeContext,
   validateProbabilities,
@@ -78,7 +79,14 @@ function compileQuestions(
         };
         break;
       case 'score':
-        out[id] = { type: 'score', instructions: question.instructions };
+        // `criteria` 是**必填**的评分档位表（从低到高），服务端按它的
+        // 下标加权算出 0..1 的分数。不传直接 422。
+        assertScoreCriteria(id, question.criteria);
+        out[id] = {
+          type: 'score',
+          instructions: question.instructions,
+          criteria: [...question.criteria],
+        };
         break;
       case 'numeric': {
         const payload: Record<string, unknown> = {
@@ -96,8 +104,26 @@ function compileQuestions(
   return out;
 }
 
-/** 解析单个答案。结构不符即抛 BAD_RESPONSE，不做静默兜底。 */
-function parseAnswer(questionId: string, question: Question, raw: unknown): Answer {
+/**
+ * 从 422 响应体里认出"服务端不认识哪个原语"。
+ *
+ * fastapi 的判别联合校验失败时长这样：
+ *   {"detail":[{"type":"union_tag_invalid",
+ *               "loc":["body","questions","slot_count:items"],
+ *               "msg":"Input tag 'numeric' found using 'type' does not match
+ *                      any of the expected tags: 'noul', 'choice', 'score'", ...}]}
+ *
+ * 认不出来就返回 undefined，让调用方按普通 `BAD_RESPONSE` 处理——
+ * **不猜**。宁可当作服务故障，也不要因为误判而把一次真正的故障降级掉。
+ */
+function detectUnsupportedPrimitive(responseText: string): string | undefined {
+  const match = /Input tag '([a-z]+)' found using 'type' does not match any of the expected tags/.exec(
+    responseText,
+  );
+  return match?.[1];
+}
+
+/** 解析单个答案。结构不符即抛 BAD_RESPONSE，不做静默兜底。 */function parseAnswer(questionId: string, question: Question, raw: unknown): Answer {
   const record = asRecord(raw);
   if (record === undefined) {
     throw new DecisionError(`问题 ${questionId} 的答案不是对象`, 'BAD_RESPONSE');
@@ -210,13 +236,24 @@ function parseAnswer(questionId: string, question: Question, raw: unknown): Answ
           'BAD_RESPONSE',
         );
       }
-      if (value < 0 || value > 1) {
+      // **`score` 不是 0..1 的分数，是档位表上的加权下标。**
+      //
+      // 实测：criteria = ["A","B","C","D"] → probabilities {0:0.72, 1:0.15, 2:0.10, 3:0.03}
+      // → score = 0×0.72 + 1×0.15 + 2×0.10 + 3×0.03 = 0.4284，与返回值吻合。
+      // 五个档位时上限是 4，所以**不能按 [0,1] 校验**——
+      // 那样一个完全正常的答案会被判成"概率非法"。
+      //
+      // 这里校验的是"落在档位表范围内"，并**归一化到 0..1**，
+      // 让上层（以及界面上的质量分）拿到一个含义稳定的值。
+      const tiers = question.criteria.length;
+      const maxIndex = Math.max(1, tiers - 1);
+      if (value < 0 || value > maxIndex) {
         throw new DecisionError(
-          `问题 ${questionId} 的 score=${value} 不在 [0,1] 内`,
-          'INVALID_PROBABILITIES',
+          `问题 ${questionId} 的 score=${value} 超出档位范围 0..${maxIndex}（共 ${tiers} 档）`,
+          'BAD_RESPONSE',
         );
       }
-      return { type: 'score', value };
+      return { type: 'score', value: value / maxIndex };
     }
 
     case 'numeric': {
@@ -299,6 +336,17 @@ export class RizzoFlowClient implements DecisionClient {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
+      // 422 + `union_tag_invalid` = 服务端不认识我们发的某个原语。
+      // 这**不是**服务故障，重试没有意义，但也不该把整条链路判死——
+      // 上层可以降级到它支持的原语（见 `UnsupportedPrimitiveError`）。
+      const unsupported = detectUnsupportedPrimitive(text);
+      if (unsupported !== undefined) {
+        throw new DecisionError(
+          `决策服务不支持原语 ${unsupported}（HTTP ${response.status}）。` +
+            `服务端仅接受 noul / choice / score。`,
+          'UNSUPPORTED_PRIMITIVE',
+        );
+      }
       throw new DecisionError(
         `决策服务返回 HTTP ${response.status}: ${text.slice(0, 500)}`,
         'BAD_RESPONSE',

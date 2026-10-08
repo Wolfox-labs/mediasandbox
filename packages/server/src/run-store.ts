@@ -10,7 +10,9 @@ import type { Artifact } from '@mediasandbox/sandbox';
 import type {
   AttemptRecord,
   OrchestrationEvent,
+  PageSpec,
   RunResult,
+  StructureStep,
 } from '@mediasandbox/orchestrator';
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'escalated' | 'cancelled';
@@ -123,6 +125,46 @@ export function makeRunId(): string {
 }
 
 /**
+ * 压缩结构化链路的结构与决策留痕，供 WebSocket 推送。
+ *
+ * **刻意丢掉每轮的原始概率分布**：那是给排查用的，几百个浮点数对前端毫无价值，
+ * 而它会让消息体积翻十倍。前端要的是"这一轮问了什么、选了哪块、为什么"。
+ * 原始答案仍留在编排层的事件流里，需要时从 `GET /api/runs/:id` 拿。
+ */
+function compactStructure(structure: {
+  readonly page: PageSpec;
+  readonly steps: readonly StructureStep[];
+}): Record<string, unknown> {
+  return {
+    page: {
+      projectId: structure.page.projectId,
+      goal: structure.page.goal,
+      templateId: structure.page.templateId,
+      candidateBlockIds: structure.page.candidateBlockIds,
+      qualityScore: structure.page.qualityScore,
+      blocks: structure.page.blocks.map((b) => ({
+        id: b.id,
+        type: b.type,
+        status: b.status,
+        slotNames: Object.keys(b.slots),
+      })),
+    },
+    steps: structure.steps.map((s) => ({
+      round: s.round,
+      kind: s.kind,
+      questionIds: s.questionIds,
+      pickedBlockId: s.pickedBlockId,
+      continueProbability: s.continueProbability,
+      continued: s.continued,
+      counts: s.counts,
+      score: s.score,
+      latencyMs: s.latencyMs,
+      rationale: s.rationale,
+    })),
+  };
+}
+
+/**
  * 把编排事件压缩成前端需要的最小形态。
  *
  * 不在 WebSocket 上直接推原始事件：`plan_assembled` 带整个计划对象，
@@ -146,6 +188,10 @@ export function toWireEvent(runId: string, event: OrchestrationEvent): Record<st
           dependsOn: n.dependsOn,
         })),
         rationale: event.plan.rationale,
+        // 结构化链路的结构与逐轮留痕。**在填充开始之前就推给前端**——
+        // 结构是数据，本来就能先展示再执行；单链链路给不出这个，
+        // 它的结构要等生成完才存在。
+        ...(event.structure !== undefined ? { structure: compactStructure(event.structure) } : {}),
       };
     case 'execution_event':
       return {

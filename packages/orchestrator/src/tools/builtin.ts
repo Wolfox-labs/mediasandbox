@@ -564,7 +564,7 @@ const writeFileTool: ToolRegistration = {
     id: 'write-file',
     label: '写入文件',
     description: '把给定内容原样写入沙盒内的某个文件（确定性操作，不调用生成层）',
-    envTypes: ['copy', 'image', 'frontend'],
+    envTypes: ['copy', 'image', 'frontend', 'webpage'],
     role: 'transform',
     category: 'utility',
     inputs: [
@@ -591,7 +591,7 @@ const verifyArtifact: ToolRegistration = {
     id: 'verify-artifact',
     label: '校验产物',
     description: '检查 artifacts/ 下是否存在非空产物，作为交付前的最后一道检查',
-    envTypes: ['copy', 'image', 'frontend'],
+    envTypes: ['copy', 'image', 'frontend', 'webpage'],
     role: 'verify',
     category: 'utility',
     inputs: [{ name: 'minFiles', type: 'number', required: false, description: '至少几个产物' }],

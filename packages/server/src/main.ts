@@ -15,6 +15,7 @@ import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_TOOLS,
+  createBlockRegistry,
   DEFAULT_POLICY,
   DemoDecisionClient,
   RizzoFlowClient,
@@ -22,6 +23,7 @@ import {
   StubDecisionClient,
   ToolRegistry,
   OpenAiCompatibleClient,
+  STRUCTURED_TOOLS,
   type DecisionClient,
   type LlmClient,
 } from '@mediasandbox/orchestrator';
@@ -175,7 +177,10 @@ async function buildProviders(): Promise<{
 }
 
 async function main(): Promise<void> {
-  const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS);
+  // 工具注册表：通用工具 + 结构化制作工具。结构化那两条只在 webpage 环境可见
+  // （它们声明了 `envTypes: ['webpage']`），所以放进同一个注册表不会污染其它链路。
+  const registry = new ToolRegistry().registerAll(BUILTIN_TOOLS).registerAll(STRUCTURED_TOOLS);
+  const blocks = createBlockRegistry();
   const decision = buildDecision();
   const llm = buildLlm();
   const { providers, defaultProvider } = await buildProviders();
@@ -191,6 +196,7 @@ async function main(): Promise<void> {
 
   const instance = createServer({
     registry,
+    blocks,
     decision,
     ...(llm !== undefined ? { llm } : {}),
     providers,
@@ -216,6 +222,7 @@ async function main(): Promise<void> {
   log(`  WebSocket ws://${host}:${port}/ws`);
   log(`  沙盒      ${defaultProvider}（可用: ${Object.keys(providers).join(', ')}）`);
   log(`  工作区    ${WORKSPACE_ROOT}`);
+  log(`  block 池  ${blocks.size} 类，分 ${blocks.groups().length} 组（结构化制作链路，webpage 环境）`);
   log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
   if (!webDistExists) {
     log('  前端      未构建（跑 pnpm --filter @mediasandbox/web build 后即可经本服务访问）');

@@ -31,6 +31,16 @@ describe('失败归类', () => {
     assert.equal(c.retryable, false);
   });
 
+  it('决策层不支持某原语时不可重试，归为计划问题', () => {
+    // 实测 rizzo-flow 收到 numeric 会返 422。这不是服务故障，
+    // 重试一万次都是同样的 422；要解决只能**降级**（改用 choice 问档位）。
+    const c = classifyFailure(
+      new DecisionError('决策服务不支持原语 numeric（HTTP 422）', 'UNSUPPORTED_PRIMITIVE'),
+    );
+    assert.equal(c.kind, 'plan');
+    assert.equal(c.retryable, false);
+  });
+
   it('工具执行失败可重试', () => {
     const c = classifyFailure(new ToolError('命令退出码 1', 'EXECUTION_FAILED', 'build-frontend'));
     assert.equal(c.kind, 'tool');
@@ -114,6 +124,47 @@ describe('FallbackStateMachine', () => {
     assert.equal(switchDecision.action, 'switch_plan');
     assert.equal(switchDecision.state, 'switching');
     assert.equal(sm.switchCount, 1);
+  });
+
+  /**
+   * 回归：**尝试号必须每轮递增，否则是无限循环。**
+   *
+   * `onFailure` 用传入的尝试号判 `attempt <= maxRetries`。调用方曾经把它
+   * 写死成 `1`（`orchestrator.ts` 的组装失败分支），于是这个判定恒成立、
+   * `action` 永远是 `retry`，而 `retry` 分支只 `continue`、不改任何状态——
+   * 转一圈回到同一个地方，再次传 1。
+   *
+   * 实测后果：跑满 300 秒、2107 个事件、**一个 block 都没产出**，
+   * 而且因为状态机始终停在 `retrying`，连熔断都不会触发。
+   *
+   * 这个用例从"调用方视角"钉住该性质：按 `attemptNumber` 递增调用时，
+   * 必须**有限步内**走到非 retry 的动作。
+   */
+  it('按递增尝试号调用时，有限步内必然走出 retry（不会无限循环）', () => {
+    const sm = new FallbackStateMachine({ ...FAST, maxSwitches: 1 });
+    const error = new DecisionError('响应异常', 'BAD_RESPONSE');
+
+    let action = 'retry';
+    let steps = 0;
+    // 上限取得远大于 maxRetries + maxSwitches，只要不无限循环就一定先出去。
+    for (let attempt = 1; attempt <= 100 && action === 'retry'; attempt += 1) {
+      action = sm.onFailure(error, attempt).action;
+      steps += 1;
+    }
+    assert.notEqual(action, 'retry', `${steps} 步之内没有走出 retry——状态机卡住了`);
+    assert.ok(steps <= 10, `用了 ${steps} 步才走出 retry，超出预期`);
+  });
+
+  it('若调用方错误地固定传同一个尝试号，会暴露成"永远 retry"（对照）', () => {
+    // 这条不是要证明"固定传 1 是对的"，恰恰相反：它把错误调用的**症状**
+    // 记录下来，好让将来有人再这么写时，能一眼认出这个特征。
+    const sm = new FallbackStateMachine({ ...FAST, maxSwitches: 1 });
+    const error = new DecisionError('响应异常', 'BAD_RESPONSE');
+    let retries = 0;
+    for (let i = 0; i < 50; i += 1) {
+      if (sm.onFailure(error, 1).action === 'retry') retries += 1;
+    }
+    assert.equal(retries, 50, '固定传 1 时 50 次调用全是 retry —— 这就是那个无限循环');
   });
 
   it('换方案后重新计次，新方案也能重试', () => {

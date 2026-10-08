@@ -6,17 +6,69 @@
  * 所以这里宁可写死也不要 `any`，字段对不上时在编译期就能发现。
  */
 
-/** 沙盒环境类型。 */
-export type EnvType = 'frontend' | 'image' | 'copy';
+/**
+ * 沙盒环境类型。
+ *
+ * `webpage` 与 `frontend` 并存：后者是整页生成（工具是交付物级），
+ * 前者是**结构化制作**（工具是 block 级，结构由决策模型逐块决定）。
+ */
+export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage';
 
-export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy'];
+export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage'];
 
 /** 环境的中文说明，界面展示用。 */
 export const ENV_LABELS: Readonly<Record<EnvType, { label: string; hint: string }>> = {
-  frontend: { label: '前端 / 网页', hint: '产出 HTML 页面与静态站点' },
+  frontend: { label: '前端 / 网页', hint: '产出 HTML 页面与静态站点（整页生成）' },
   image: { label: '图像', hint: '产出图片类作品' },
   copy: { label: '文案', hint: '产出 Markdown 文稿' },
+  webpage: {
+    label: '结构化网页',
+    hint: '结构由决策模型逐块决定，可选取 block 候选集，逐块填充并组装成整页',
+  },
 };
+
+/** block 分组。 */
+export type BlockGroup = 'skeleton' | 'content' | 'interactive';
+
+/** block 的 slot 类型。决定**由谁来填**。 */
+export type SlotType =
+  | 'text'
+  | 'title'
+  | 'image'
+  | 'code'
+  | 'link'
+  | 'literal'
+  | 'list-text'
+  | 'list-image';
+
+/** 一个具名 slot 的声明。 */
+export interface SlotSpecDto {
+  readonly name: string;
+  readonly type: SlotType;
+  readonly required: boolean;
+  readonly description: string;
+  /** `list-*` 型才有：项数区间。 */
+  readonly countRange?: { readonly min: number; readonly max: number } | undefined;
+}
+
+/** block 池里的一项（`GET /api/blocks`）。 */
+export interface BlockSpecDto {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly group: BlockGroup;
+  readonly groupLabel: string;
+  readonly canLead: boolean;
+  readonly repeatable: boolean;
+  readonly costHint: 'fast' | 'medium' | 'slow';
+  readonly slots: readonly SlotSpecDto[];
+}
+
+export interface BlockGroupDto {
+  readonly id: BlockGroup;
+  readonly label: string;
+  readonly count: number;
+}
 
 /** 运行状态。 */
 export type RunStatus =
@@ -137,6 +189,41 @@ export interface ToolSpecDto {
   readonly costHint?: string | undefined;
 }
 
+/**
+ * 结构化链路的页面结构（`plan_assembled` 事件里带的裁剪版）。
+ *
+ * 后端刻意丢掉了每轮的**原始概率分布**——那是排查用的，
+ * 几百个浮点数对界面毫无价值，还会让消息体积翻十倍。
+ * 这里要的是"这一轮问了什么、选了哪块、为什么"。
+ */
+export interface StructureView {
+  readonly page: {
+    readonly projectId: string;
+    readonly goal: string;
+    readonly templateId: string | null;
+    readonly candidateBlockIds: readonly string[];
+    readonly qualityScore: number | null;
+    readonly blocks: readonly {
+      readonly id: string;
+      readonly type: string;
+      readonly status: string;
+      readonly slotNames: readonly string[];
+    }[];
+  };
+  readonly steps: readonly {
+    readonly round: number;
+    readonly kind: 'select' | 'count_only' | 'quality';
+    readonly questionIds: readonly string[];
+    readonly pickedBlockId: string | null;
+    readonly continueProbability: number | null;
+    readonly continued: boolean | null;
+    readonly counts: Readonly<Record<string, number>>;
+    readonly score: number | null;
+    readonly latencyMs: number;
+    readonly rationale: string;
+  }[];
+}
+
 /** 健康检查（`GET /api/health`）。 */
 export interface HealthResponse {
   readonly ok: boolean;
@@ -162,6 +249,8 @@ export type WireEvent =
       readonly type: 'plan_assembled';
       readonly nodes: readonly PlanNodeSummary[];
       readonly rationale: readonly string[];
+      /** 仅结构化链路（`webpage` 环境）带这个字段。 */
+      readonly structure?: StructureView | undefined;
     }
   | {
       readonly runId: string;

@@ -1,0 +1,9 @@
+{
+  "goal": "做一个产品介绍落地页，含首屏、特性与行动号召",
+  "envType": "webpage",
+  "provider": "local",
+  "candidateBlockIds": ["nav", "hero", "features", "gallery", "cta", "footer", "tabs", "accordion"],
+  "maxBlocks": 6,
+  "useGenerative": false,
+  "annotate": true
+}

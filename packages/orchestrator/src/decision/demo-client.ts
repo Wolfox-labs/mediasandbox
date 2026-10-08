@@ -36,6 +36,53 @@ const Q = {
   finalize: 'finalize',
 } as const;
 
+/**
+ * 结构化链路的问题 id，与 `structured/planner.ts` 的 `STRUCTURE_QUESTIONS` 对齐。
+ *
+ * 这里重复声明而不 import：`decision/` 是更底层的一层，
+ * 让它反向依赖 `structured/` 会把两层绑死。字符串对齐由
+ * `structured/planner.test.ts` 的端到端用例守住。
+ */
+const SQ = {
+  nextBlock: 'next_block',
+  continueStruct: 'continue_structuring',
+  slotCount: 'slot_count',
+  structureQuality: 'structure_quality',
+} as const;
+
+/**
+ * 理想的版式顺序。演示决策层**按这个表逐块推进**，于是产出的结构
+ * 看起来像一份正常的页面：先讲清是什么，再展开，最后收尾。
+ *
+ * 它刻意是一张**表**而不是一段推理：要能一眼看出"它凭什么这么排"，
+ * 而不是伪装成智能。真实 `RizzoFlowClient` 接上后本文件不参与。
+ */
+const LAYOUT_ORDER: readonly string[] = [
+  'nav',
+  'hero',
+  'features',
+  'gallery',
+  'text',
+  'image',
+  'table',
+  'code',
+  'quote',
+  'tabs',
+  'accordion',
+  'video',
+  'form',
+  'cta',
+  'footer',
+];
+
+/**
+ * 收尾块。出现它之后就认为版式齐了，"还要不要再来一块"答否。
+ *
+ * 这条让演示里的停止**有依据**（而不是"跑满 N 块就硬停"），
+ * 也让 `noul` 原语在演示里有真实语义。
+ */
+const CLOSING_BLOCKS: readonly string[] = ['cta', 'footer'];
+
 /** 关键词 → 工具 id 的映射表。按顺序匹配，先命中者胜。 */
 interface Rule {
   readonly keywords: readonly string[];
@@ -132,6 +179,12 @@ export class DemoDecisionClient implements DecisionClient {
     getPrimary: () => string | undefined,
     setPrimary: (value: string) => void,
   ): Answer {
+    // ── 结构化链路：网页环境的问题集与单链路完全不同 ────────────────
+    if (context.envType === 'webpage') {
+      const structured = this.answerStructured(id, question);
+      if (structured !== undefined) return structured;
+    }
+
     // ── 主产出工具：这是唯一需要"理解目标"的问题 ──────────────────
     if (id === Q.primaryTool && question.type === 'choice') {
       const available = Object.keys(question.criteria);
@@ -168,6 +221,87 @@ export class DemoDecisionClient implements DecisionClient {
     return this.fallback(question);
   }
 
+  /**
+   * 结构化链路（`webpage` 环境）的演示回答。
+   *
+   * 返回 `undefined` 表示"这个问题不属于结构化链路"，交回给单链路的处理逻辑。
+   * 判断依据是**问题 id**，不是环境——`continue_structuring` 只在结构化链路里出现。
+   * 这样即便将来环境名变了，路由也不会错。
+   */
+  private answerStructured(id: string, question: Question): Answer | undefined {
+    // ── "下一块放什么"：按版式表推进，并**优先选还没用过的** ──────────
+    if (id === SQ.nextBlock && question.type === 'choice') {
+      const available = Object.keys(question.criteria);
+      // 现在页面上已经有哪些块，从 state 里读。
+      //
+      // **不能用 `decide` 内部的局部变量记账**：一轮就是一次 `decide` 调用，
+      // 局部变量活不过一轮，于是每轮都以为"还什么都没放"，反复选同一个块，
+      // 页面变成 hero → features → features → features。
+      // 结构化链路的 state 里本来就带 `当前结构`，用它才是可靠来源。
+      const placed = this.placedTypes(question);
+      const ordered = LAYOUT_ORDER.filter((type) => available.includes(type));
+      const pick = ordered.find((type) => !placed.includes(type)) ?? ordered[0] ?? available[0];
+      if (pick === undefined) {
+        throw new DecisionError('结构化链路的候选集为空', 'BAD_REQUEST');
+      }
+      return this.choiceAnswer(pick, available);
+    }
+
+    // ── "还要不要再来一块"：出现收尾块就停 ──────────────────────────
+    if (id === SQ.continueStruct && question.type === 'noul') {
+      const placed = this.placedTypes(question);
+      const closed = placed.some((t) => CLOSING_BLOCKS.includes(t));
+      const wants = !closed && placed.length < 6;
+      return { type: 'noul', value: wants, yesProbability: wants ? 0.88 : 0.08 };
+    }
+
+    // ── "要几个"：取区间中位，内容单薄页面上看起来也不空 ────────────
+    if (id.startsWith(`${SQ.slotCount}:`) && question.type === 'numeric') {
+      const range = question.range ?? { min: 2, max: 4 };
+      return { type: 'numeric', value: Math.round((range.min + range.max) / 2) };
+    }
+
+    // ── 结构评分：有首块、有内容、有收尾就给高分 ────────────────────
+    if (id === SQ.structureQuality && question.type === 'score') {
+      const placed = this.placedTypes(question);
+      const hasLead = placed.some((t) => t === 'hero' || t === 'nav' || t === 'text' || t === 'image');
+      const hasClosing = placed.some((t) => CLOSING_BLOCKS.includes(t));
+      const body = placed.filter((t) => !CLOSING_BLOCKS.includes(t) && t !== 'nav' && t !== 'hero');
+      let score = 0.3;
+      if (hasLead) score += 0.25;
+      if (body.length >= 1) score += 0.2;
+      if (body.length >= 2) score += 0.05;
+      if (hasClosing) score += 0.2;
+      return { type: 'score', value: Math.min(1, Number(score.toFixed(2))) };
+    }
+
+    return undefined;
+  }
+
+  /**
+   * 从问句文本里还原"页面上已经有哪些块"。
+   *
+   * 规划器把 `当前结构` 写进了 `noul` / `score` 的问句，格式是
+   * `…（1. hero#b1[filled]{title,subtitle} → 2. features#b2…）`。
+   * 这里按 `序号. 类型#id` 的形状取出来。
+   *
+   * 为什么不从 `DecisionContext.facts` 读：`decide` 的签名里 `context` 是按
+   * 整批给的，本轮刚选中的块还没进去（那是同一批的答案）。问句里的结构才是
+   * 最新的一份。
+   */
+  private placedTypes(question: Question): string[] {
+    const text =
+      question.type === 'noul' || question.type === 'score' || question.type === 'choice'
+        ? question.instructions
+        : '';
+    const out: string[] = [];
+    for (const match of text.matchAll(/\d+\.\s*([a-z][a-z0-9-]*)#/g)) {
+      const type = match[1];
+      if (type !== undefined && !out.includes(type)) out.push(type);
+    }
+    return out;
+  }
+
   /** 按环境与目标关键词挑主产出；候选集里没有就退到第一个可用项。 */
   private choosePrimary(context: DecisionContext, goal: string, available: readonly string[]): string {
     const pick = (candidate: string | undefined): string | undefined =>
@@ -184,7 +318,6 @@ export class DemoDecisionClient implements DecisionClient {
         : context.envType === 'image'
           ? [imageHit, pick('render-image'), pick('solid-image')]
           : [pick('draft-copy'), pick('template-copy')];
-
     for (const candidate of ordered) {
       if (candidate !== undefined) return candidate;
     }

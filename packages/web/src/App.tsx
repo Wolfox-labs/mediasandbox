@@ -22,27 +22,51 @@ const TABS: readonly { id: Tab; label: string; hint: string }[] = [
   { id: 'tools', label: '工具链', hint: '决策层的候选集来自这里' },
 ];
 
-/** 从 URL hash 读初始标签。无效或缺失时回落工作台。 */
-function readTabFromHash(): Tab {
+/**
+ * 从 URL hash 解析出标签与（可选的）运行 id。
+ *
+ * 两种形态：
+ *   `#workbench`                 只看标签
+ *   `#workbench/run-2026...`     直接定位到某次运行
+ *
+ * 为什么要支持后者：运行结果此前**不可分享、不可直达**——
+ * 刷新一下就回到空白工作台，演示时得手点一遍，无头截图也没法指向某次运行。
+ * 加上之后，"把这次结果发给别人看一眼"就是给一个 URL。
+ */
+function readLocationFromHash(): { tab: Tab; runId: string | undefined } {
   const raw = window.location.hash.replace(/^#\/?/, '');
-  return TABS.some((t) => t.id === raw) ? (raw as Tab) : 'workbench';
+  const slash = raw.indexOf('/');
+  const tabPart = slash >= 0 ? raw.slice(0, slash) : raw;
+  const runIdPart = slash >= 0 ? raw.slice(slash + 1) : '';
+  return {
+    tab: TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : 'workbench',
+    runId: runIdPart === '' ? undefined : decodeURIComponent(runIdPart),
+  };
 }
 
 export function App(): ReactNode {
-  const [tab, setTab] = useState<Tab>(readTabFromHash);
+  const initial = readLocationFromHash();
+  const [tab, setTab] = useState<Tab>(initial.tab);
+  const [deepLinkRunId, setDeepLinkRunId] = useState<string | undefined>(initial.runId);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
   // 标签与 URL hash 双向同步：这样每个页面都可被直接链接
   // （也用得上浏览器前进/后退，以及无头截图时按 URL 直达）。
   useEffect(() => {
-    const onHashChange = (): void => setTab(readTabFromHash());
+    const onHashChange = (): void => {
+      const next = readLocationFromHash();
+      setTab(next.tab);
+      setDeepLinkRunId(next.runId);
+    };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
   const selectTab = (next: Tab): void => {
     setTab(next);
+    // 切标签时丢掉运行 id —— 它是工作台的概念，带到别的标签上没有意义。
+    setDeepLinkRunId(undefined);
     window.location.hash = next;
   };
 
@@ -140,7 +164,7 @@ export function App(): ReactNode {
       </header>
 
       <main className="min-h-0 flex-1">
-        {tab === 'workbench' && <Workbench />}
+        {tab === 'workbench' && <Workbench initialRunId={deepLinkRunId} />}
         {tab === 'projects' && <ProjectManager />}
         {tab === 'sandbox' && <SandboxConsole health={health} />}
         {tab === 'tools' && <ToolCatalog />}

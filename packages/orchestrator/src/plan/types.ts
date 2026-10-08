@@ -24,8 +24,8 @@ export interface PlanNode {
   readonly note: string;
 }
 
-/** 入参的两种来源。 */
-export type PlanInput = PortRef | LiteralInput;
+/** 入参的三种来源。 */
+export type PlanInput = PortRef | RefsInput | LiteralInput;
 
 export interface PortRef {
   readonly kind: 'ref';
@@ -33,6 +33,21 @@ export interface PortRef {
   readonly nodeId: string;
   /** 上游节点的产出端口名。 */
   readonly port: string;
+}
+
+/**
+ * 多路引用（扇入）：把**多个上游节点**的产出聚成一个数组喂给同一个入参。
+ *
+ * 为什么需要它：结构化制作里"把 N 个已填充的 block 拼成一页"是天然的多对一关系，
+ * 而 `PortRef` 一个入参只能连一个上游。没有它，就只能把所有 block 塞进一个节点里填，
+ * 于是"每块独立、可定点重做"在计划层面不存在——而那是整个结构化链路的前提。
+ *
+ * **顺序有意义**：数组顺序就是交付顺序（页面上 block 的先后），
+ * 因此执行器按 `refs` 的声明顺序取值，不做任何排序。
+ */
+export interface RefsInput {
+  readonly kind: 'refs';
+  readonly refs: readonly PortRef[];
 }
 
 export interface LiteralInput {
@@ -111,18 +126,23 @@ export function validatePlan(plan: ExecutionPlan, registry?: PortLookup): void {
       }
     }
     for (const [portName, input] of Object.entries(node.inputs)) {
-      if (input.kind !== 'ref') continue;
-      if (!byId.has(input.nodeId)) {
-        throw new PlanError(
-          `节点 ${node.id} 的入参 ${portName} 引用不存在的节点 ${input.nodeId}`,
-          'DANGLING_DEPENDENCY',
-        );
-      }
-      if (!node.dependsOn.includes(input.nodeId)) {
-        throw new PlanError(
-          `节点 ${node.id} 的入参 ${portName} 引用了 ${input.nodeId}，但未声明依赖`,
-          'DANGLING_DEPENDENCY',
-        );
+      if (input.kind === 'literal') continue;
+      // `ref` 与 `refs` 的校验规则相同，只是后者有一组。统一成数组走一遍，
+      // 避免两条分支将来各改一半。
+      const refs = input.kind === 'ref' ? [input] : input.refs;
+      for (const ref of refs) {
+        if (!byId.has(ref.nodeId)) {
+          throw new PlanError(
+            `节点 ${node.id} 的入参 ${portName} 引用不存在的节点 ${ref.nodeId}`,
+            'DANGLING_DEPENDENCY',
+          );
+        }
+        if (!node.dependsOn.includes(ref.nodeId)) {
+          throw new PlanError(
+            `节点 ${node.id} 的入参 ${portName} 引用了 ${ref.nodeId}，但未声明依赖`,
+            'DANGLING_DEPENDENCY',
+          );
+        }
       }
     }
   }
@@ -131,22 +151,25 @@ export function validatePlan(plan: ExecutionPlan, registry?: PortLookup): void {
   if (registry !== undefined) {
     for (const node of plan.nodes) {
       for (const [portName, input] of Object.entries(node.inputs)) {
-        if (input.kind !== 'ref') continue;
-        const upstream = byId.get(input.nodeId);
-        if (upstream === undefined) continue; // 上面已报过
-        const outputs = registry.outputPortsOf(upstream.toolId);
-        if (outputs === undefined) {
-          throw new PlanError(
-            `节点 ${node.id} 的上游 ${upstream.id} 引用了未注册的工具 ${upstream.toolId}`,
-            'UNKNOWN_TOOL',
-          );
-        }
-        if (!outputs.includes(input.port)) {
-          throw new PlanError(
-            `节点 ${node.id} 的入参 ${portName} 引用了 ${input.nodeId} 的产出端口 ${input.port}，` +
-              `但该节点只产出了 [${outputs.join(', ')}]`,
-            'BAD_PORT_REF',
-          );
+        if (input.kind === 'literal') continue;
+        const refs = input.kind === 'ref' ? [input] : input.refs;
+        for (const ref of refs) {
+          const upstream = byId.get(ref.nodeId);
+          if (upstream === undefined) continue; // 上面已报过
+          const outputs = registry.outputPortsOf(upstream.toolId);
+          if (outputs === undefined) {
+            throw new PlanError(
+              `节点 ${node.id} 的上游 ${upstream.id} 引用了未注册的工具 ${upstream.toolId}`,
+              'UNKNOWN_TOOL',
+            );
+          }
+          if (!outputs.includes(ref.port)) {
+            throw new PlanError(
+              `节点 ${node.id} 的入参 ${portName} 引用了 ${ref.nodeId} 的产出端口 ${ref.port}，` +
+                `但该节点只产出了 [${outputs.join(', ')}]`,
+              'BAD_PORT_REF',
+            );
+          }
         }
       }
     }

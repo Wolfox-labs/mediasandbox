@@ -23,6 +23,76 @@ export {
 } from './tools/registry.js';
 export { BUILTIN_TOOLS } from './tools/builtin.js';
 
+// ── 结构化制作层（P1/P2） ─────────────────────────────────────────────────
+export {
+  BlockError,
+  BlockRegistry,
+  BLOCK_GROUPS,
+  BLOCK_GROUP_LABELS,
+  BUILTIN_BLOCKS,
+  builtinBlockIds,
+  createBlockRegistry,
+  type BlockErrorCode,
+  type BlockGroup,
+  type BlockOption,
+  type BlockQuery,
+  type BlockSpec,
+  type SlotSpec,
+  type SlotType,
+} from './structured/block-spec.js';
+export {
+  appendBlock,
+  blockTypesOf,
+  createPageSpec,
+  describePageSpec,
+  nextBlockId,
+  PageSpecError,
+  replaceBlock,
+  validatePageSpec,
+  valueKindFor,
+  type BlockInstance,
+  type BlockStatus,
+  type ImageRef,
+  type PageSpec,
+  type PageSpecErrorCode,
+  type SlotSource,
+  type SlotValue,
+} from './structured/page-spec.js';
+export {
+  blockTypeSequence,
+  CONTINUE_NO_THRESHOLD,
+  CONTINUE_YES_THRESHOLD,
+  DEFAULT_MAX_BLOCKS,
+  isFilled,
+  StructureError,
+  StructurePlanner,
+  STRUCTURE_QUESTIONS,
+  type PlanStructureRequest,
+  type PlanStructureResult,
+  type StructureErrorCode,
+  type StructureStep,
+} from './structured/planner.js';
+export {
+  deriveBrand,
+  fillBlock,
+  fillPage,
+  isWebpageEnv,
+  nonEmptyLines,
+  placeholderImageDataUri,
+  shorten,
+  type FillOptions,
+  type FilledBlock,
+  type GenerateSlotRequest,
+  type GenerateSlotResult,
+} from './structured/filler.js';
+export { escapeHtml, pageStyles, renderPage, type RenderOptions } from './structured/renderer.js';
+export {
+  assemblePageTool,
+  fillBlockTool,
+  STRUCTURED_TOOLS,
+} from './structured/tools.js';
+export { assembleStructured } from './structured/assembler.js';
+
 // ── 计划层 ────────────────────────────────────────────────────────────────
 export * from './plan/types.js';
 export { PlanAssembler, type AssembleRequest, type AssembleResult } from './plan/assembler.js';

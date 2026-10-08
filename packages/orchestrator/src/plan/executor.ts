@@ -22,6 +22,7 @@ import {
   type ExecutionPlan,
   type PlanInput,
   type PlanNode,
+  type PortRef,
 } from './types.js';
 
 /** 节点执行状态。 */
@@ -502,18 +503,30 @@ function resolveInput(
   results: ReadonlyMap<string, ToolResult>,
 ): unknown {
   if (input.kind === 'literal') return input.value;
+  // 扇入：按声明顺序取值，顺序即交付顺序，不做排序。
+  if (input.kind === 'refs') {
+    return input.refs.map((ref) => resolveRef(nodeId, portName, ref, results));
+  }
+  return resolveRef(nodeId, portName, input, results);
+}
 
-  const upstream = results.get(input.nodeId);
+function resolveRef(
+  nodeId: string,
+  portName: string,
+  ref: PortRef,
+  results: ReadonlyMap<string, ToolResult>,
+): unknown {
+  const upstream = results.get(ref.nodeId);
   if (upstream === undefined) {
     throw new PlanError(
-      `节点 ${nodeId} 的入参 ${portName} 引用了 ${input.nodeId}，但它没有产出（可能已失败）`,
+      `节点 ${nodeId} 的入参 ${portName} 引用了 ${ref.nodeId}，但它没有产出（可能已失败）`,
       'BAD_PORT_REF',
     );
   }
-  const value = upstream.outputs[input.port];
+  const value = upstream.outputs[ref.port];
   if (value === undefined) {
     throw new PlanError(
-      `节点 ${nodeId} 的入参 ${portName} 引用了 ${input.nodeId} 的产出端口 ${input.port}，` +
+      `节点 ${nodeId} 的入参 ${portName} 引用了 ${ref.nodeId} 的产出端口 ${ref.port}，` +
         `但该节点只产出了 [${Object.keys(upstream.outputs).join(', ')}]`,
       'MISSING_INPUT',
     );

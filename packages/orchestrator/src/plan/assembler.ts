@@ -22,6 +22,9 @@ import {
   type PlanInput,
   type PlanNode,
 } from './types.js';
+import { assembleStructured } from '../structured/assembler.js';
+import type { PageSpec } from '../structured/page-spec.js';
+import type { StructureStep } from '../structured/planner.js';
 
 export interface AssembleRequest {
   readonly context: DecisionContext;
@@ -34,6 +37,25 @@ export interface AssembleRequest {
   readonly minArtifacts?: number | undefined;
   /** 决策超时。 */
   readonly decisionTimeoutMs?: number | undefined;
+
+  // ── 以下仅 `webpage` 环境（结构化链路）使用 ──────────────────────────
+  /** 项目 id。结构化链路的计划里会用到，其它链路不需要。 */
+  readonly projectId?: string | undefined;
+  /**
+   * 本次候选 block 类型。省略则用 block 池全集。
+   *
+   * 这是「用户从候选池里选取本次要用的 block」的落点：
+   * **决策模型只在候选集里选**，与工具注册表那条原则同构。
+   */
+  readonly candidateBlockIds?: readonly string[] | undefined;
+  /** 页面 block 数上限。防止"要不要继续"永远答是。 */
+  readonly maxBlocks?: number | undefined;
+  /** 站点名。结构化链路里由用户或确定性代码给，不让模型编。 */
+  readonly brand?: string | undefined;
+  /** 文案是否走生成层。默认 false —— **零成本是默认值**。 */
+  readonly useGenerative?: boolean | undefined;
+  /** 页面上是否标注每块的来源，便于演示与排查。 */
+  readonly annotate?: boolean | undefined;
 }
 
 export interface AssembleResult {
@@ -42,6 +64,18 @@ export interface AssembleResult {
   readonly answers: Readonly<Record<string, unknown>>;
   /** 决策耗时（毫秒），含网络往返。 */
   readonly decisionLatencyMs: number;
+  /**
+   * **结构化链路专有**：逐块决策定稿的页面，以及每一轮的决策留痕。
+   *
+   * 单链链路没有这个东西——它的结构藏在生成出来的字符串里，拿不出来。
+   * 结构化链路的结构是数据，所以能一路带到前端给用户看、给用户改。
+   */
+  readonly structure?:
+    | {
+        readonly page: PageSpec;
+        readonly steps: readonly StructureStep[];
+      }
+    | undefined;
 }
 
 /** 决策问题 id。集中定义，避免散落的字符串。 */
@@ -55,8 +89,12 @@ const Q = {
 
 /**
  * 各环境下的"收尾工具"。主产出之后要把东西落进 artifacts/ 并校验。
+ *
+ * `webpage` **刻意不在这里**：它走结构化链路，收尾由 `assemble-page` 自己完成
+ * （写 `artifacts/index.html`），没有"挑一个收尾方式"这一步。
+ * 给它编一个默认值只会让人以为那条路会用到它。
  */
-const FINALIZE_BY_ENV: Readonly<Record<EnvType, string>> = {
+const FINALIZE_BY_ENV: Readonly<Partial<Record<EnvType, string>>> = {
   frontend: 'build-frontend',
   image: 'process-image',
   copy: 'write-file',
@@ -123,6 +161,20 @@ export class PlanAssembler {
   async assemble(request: AssembleRequest): Promise<AssembleResult> {
     const { registry, decision } = this;
     const { context, envType } = request;
+
+    // `webpage` 走**结构化链路**：结构由决策模型逐块决定，计划是"每块一个节点
+    // + 一个组装节点"的扇入 DAG。它与下面那条单链路径不是同一个形状，
+    // 所以在这里分流，而不是把两套逻辑缠在一个函数里。
+    if (envType === 'webpage') {
+      return await assembleStructured({
+        registry,
+        decision,
+        request,
+        ...(this.options.excludeTools !== undefined
+          ? { excludeTools: this.options.excludeTools }
+          : {}),
+      });
+    }
 
     const candidates = primaryCandidates(registry, envType, this.options.excludeTools ?? []);
     if (candidates.length === 0) {
@@ -443,8 +495,11 @@ function pickFinalize(
   }
 
   // 弃权或不可用：回落到该环境的确定性默认。
+  // `webpage` 没有默认值——它走结构化链路，收尾由 assemble-page 自己完成。
   const fallback = FINALIZE_BY_ENV[envType];
-  if (registry.has(fallback) && fallback !== 'process-image') return fallback;
+  if (fallback !== undefined && registry.has(fallback) && fallback !== 'process-image') {
+    return fallback;
+  }
   return null;
 }
 

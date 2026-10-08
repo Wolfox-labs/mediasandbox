@@ -71,16 +71,45 @@ export interface ChoiceQuestion {
   readonly criteria: Readonly<Record<string, string>>;
 }
 
+/**
+ * `score` 问句。
+ *
+ * **`criteria` 是必须的**，而且语义容易误解，这里说清楚：
+ * 它是**有序的评分档位表**（从最低到最高），服务端返回的值是
+ * "落在档位表的哪个位置"——即各档位概率的加权平均下标。
+ *
+ * 实测（`criteria = ["A","B","C","D"]`）：
+ * ```
+ * probabilities: { "0": 0.7223, "1": 0.1533, "2": 0.0982, "3": 0.0262 }
+ * score: 0.4284        ← 0×0.7223 + 1×0.1533 + 2×0.0982 + 3×0.0262
+ * ```
+ *
+ * 也就是说：**两档时 `score` 就是"偏向高档"的程度；五档时它是 0..1 上的位置。**
+ * 这正好能当质量分用——前提是**档位表要给出**。
+ * 不传档位表服务端直接 422（`criteria` Field required）。
+ */
 export interface ScoreQuestion {
   readonly type: 'score';
   readonly instructions: string;
+  /**
+   * 评分档位，**从最低到最高**，至少 2 项。
+   *
+   * 顺序有意义：服务端按下标加权，把"很好"放在第一位会让高分变成低分。
+   */
+  readonly criteria: readonly string[];
+}
+
+/** 数值问句的量程。结构化制作里列表型 slot 的 `countRange` 复用它。 */
+export interface NumericRange {
+  readonly min: number;
+  readonly max: number;
 }
 
 export interface NumericQuestion {
   readonly type: 'numeric';
   readonly instructions: string;
   /** 提示模型的量程。 */
-  readonly range?: { readonly min: number; readonly max: number };
+  readonly range?: NumericRange;
 }
 
 export type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion | NumericQuestion;
@@ -105,7 +134,13 @@ export interface ChoiceAnswer {
 
 export interface ScoreAnswer {
   readonly type: 'score';
-  /** 0..1；弃权时为 null。 */
+  /**
+   * **归一化到 0..1** 的质量分；弃权时为 null。
+   *
+   * 注意服务端原样返回的是**档位表上的加权下标**（0..档位数-1），
+   * 由 `RizzoFlowClient` 负责归一化。上层与界面只看这个 0..1 的值，
+   * 不必知道档位表有几档——否则每换一次档位表，所有阈值都要重调。
+   */
   readonly value: number | null;
   readonly abstention?: Abstention;
 }
@@ -190,11 +225,37 @@ export type DecisionErrorReason =
   /** 请求本身不合法（例如候选集少于 2 项或超过 26 项）。 */
   | 'BAD_REQUEST'
   /** 超出等待时间。 */
-  | 'TIMEOUT';
+  | 'TIMEOUT'
+  /**
+   * 服务端不认识请求里的某个原语。
+   *
+   * **单独一个 reason 而不是混进 `BAD_RESPONSE`**，因为处置方式完全不同：
+   * `BAD_RESPONSE` 是"服务坏了"，值得重试；而这个是"服务是好的，只是能力比
+   * 我们假设的少一个原语"，重试一万次也是同样的结果。
+   * 实测 rizzo-flow 只支持 `noul` / `choice` / `score`，**不接受 `numeric`**
+   * （422 `union_tag_invalid`）。
+   *
+   * 上层据此**降级**：改用 `choice` 问一个离散档位，而不是把整条链路判失败。
+   */
+  | 'UNSUPPORTED_PRIMITIVE';
+
+/**
+ * 校验评分档位表。
+ *
+ * 至少 2 项——服务端会返 `too_short`（"List should have at least 2 items"）。
+ * 一档的评分表没有区分度，本来也问不出东西。
+ */
+export function assertScoreCriteria(questionId: string, criteria: readonly string[]): void {
+  if (criteria.length < 2) {
+    throw new DecisionError(
+      `问题 ${questionId} 的评分档位只有 ${criteria.length} 项，至少需要 2 项`,
+      'BAD_REQUEST',
+    );
+  }
+}
 
 /** 校验候选集规模。 */
-export function assertChoiceCriteria(questionId: string, criteria: Readonly<Record<string, string>>): void {
-  const count = Object.keys(criteria).length;
+export function assertChoiceCriteria(questionId: string, criteria: Readonly<Record<string, string>>): void {  const count = Object.keys(criteria).length;
   if (count < 2) {
     throw new DecisionError(
       `问题 ${questionId} 的候选集只有 ${count} 项，至少需要 2 项`,
@@ -296,8 +357,21 @@ export interface ScoreRequest {
   readonly context: DecisionContext;
   readonly subject: string;
   readonly rubric: string;
+  /**
+   * 评分档位，从最低到最高，至少 2 项。省略时用一组通用的中文档位。
+   */
+  readonly criteria?: readonly string[] | undefined;
   readonly timeoutMs?: number;
 }
+
+/** 缺省评分档位。从低到高——顺序有意义，见 `ScoreQuestion.criteria`。 */
+export const DEFAULT_SCORE_CRITERIA: readonly string[] = [
+  '很差',
+  '较差',
+  '一般',
+  '较好',
+  '很好',
+];
 
 export interface NumericRequest {
   readonly context: DecisionContext;
@@ -337,6 +411,7 @@ export async function askScore(client: DecisionClient, request: ScoreRequest): P
       [SINGLE_KEY]: {
         type: 'score',
         instructions: `${request.rubric}\n待评分对象: ${request.subject}`,
+        criteria: [...(request.criteria ?? DEFAULT_SCORE_CRITERIA)],
       },
     },
     request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {},

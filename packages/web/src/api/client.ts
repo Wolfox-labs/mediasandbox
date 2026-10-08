@@ -6,6 +6,9 @@
  */
 import type {
   Artifact,
+  BlockGroup,
+  BlockGroupDto,
+  BlockSpecDto,
   EnvType,
   HealthResponse,
   ProjectDto,
@@ -75,6 +78,23 @@ export interface CreateRunInput {
   readonly tone?: string | undefined;
   readonly minArtifacts?: number | undefined;
   readonly provider?: string | undefined;
+
+  // ── 以下仅 `webpage` 环境（结构化制作）使用 ──────────────────────────
+  /**
+   * 本次候选 block 类型——用户从 block 池里选出来的。
+   *
+   * 省略则用池子全集。给出时**决策模型只在这里面选**，这就是
+   * "先提供 block 候选池（分组），允许选取需要的 block 参与之后的制作"的落点。
+   */
+  readonly candidateBlockIds?: readonly string[] | undefined;
+  /** 页面 block 数上限。 */
+  readonly maxBlocks?: number | undefined;
+  /** 站点名。 */
+  readonly brand?: string | undefined;
+  /** 文案是否走生成层。**默认 false**，零成本。 */
+  readonly useGenerative?: boolean | undefined;
+  /** 页面上是否标注每块的来源（生成式/确定性/用户）。 */
+  readonly annotate?: boolean | undefined;
 }
 
 export const api = {
@@ -85,6 +105,12 @@ export const api = {
   tools(envType?: EnvType): Promise<{ tools: ToolSpecDto[] }> {
     const query = envType !== undefined ? `?envType=${envType}` : '';
     return request<{ tools: ToolSpecDto[] }>(`/api/tools${query}`);
+  },
+
+  /** block 池目录：结构化制作的候选集来源。 */
+  blocks(group?: BlockGroup): Promise<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }> {
+    const query = group !== undefined ? `?group=${group}` : '';
+    return request<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }>(`/api/blocks${query}`);
   },
 
   createRun(input: CreateRunInput): Promise<{ runId: string; status: string }> {

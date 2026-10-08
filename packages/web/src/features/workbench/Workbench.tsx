@@ -22,6 +22,8 @@ import { Panel, Spinner, StatusBadge, EmptyState } from '../../ui/components.js'
 import { formatTime } from '../../ui/styles.js';
 import { DecisionPanel } from './DecisionPanel.js';
 import { StepFlow } from './StepFlow.js';
+import { StructurePanel } from './StructurePanel.js';
+import { BlockPoolPanel } from './BlockPoolPanel.js';
 import { PreviewPane } from '../preview/PreviewPane.js';
 
 /** 示例目标：降低演示门槛，点一下就能跑。 */
@@ -29,20 +31,83 @@ const EXAMPLES: Readonly<Record<EnvType, readonly string[]>> = {
   copy: ['为通用 Agent 沙盒平台写一段产品介绍，面向高校竞赛评委', '写一份数字媒体竞赛的项目摘要'],
   image: ['生成一张科技感的作品封面图', '做一张产品海报底图'],
   frontend: ['做一个产品介绍落地页，含标题、特性列表和页脚', '做一个竞赛作品的展示页'],
+  webpage: [
+    '做一个产品介绍落地页，含首屏、特性与行动号召',
+    '做一个竞赛作品展示页，含图集与作品说明',
+  ],
 };
 
-export function Workbench(): ReactNode {
+export interface WorkbenchProps {
+  /**
+   * 由 URL（`#workbench/<runId>`）指定的运行。
+   *
+   * 支持它是因为运行结果此前不可直达：刷新回空白、演示要手点、无头截图
+   * 也没法指向某次运行。现在给一个 URL 就能打开同一次结果。
+   */
+  readonly initialRunId?: string | undefined;
+}
+
+export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
   const [goal, setGoal] = useState('');
   const [envType, setEnvType] = useState<EnvType>('copy');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
+  // ── 结构化制作（webpage 环境）专用输入 ────────────────────────────────
+  //
+  // 这几项**只在 webpage 环境提交**，其它环境带上它们没有意义，
+  // 后端也不会读。放在同一个组件里而不是拆出第二个工作台，
+  // 是因为"选环境"本来就是这里的一步——拆开会让用户先选页面再选环境，绕。
+  const [candidateBlockIds, setCandidateBlockIds] = useState<readonly string[]>([]);
+  const [maxBlocks, setMaxBlocks] = useState(6);
+  const [useGenerative, setUseGenerative] = useState(false);
+  const [annotate, setAnnotate] = useState(true);
+
+  const [activeRunId, setActiveRunId] = useState<string | undefined>(initialRunId);
   const [runs, setRuns] = useState<readonly RunListItem[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | undefined>(undefined);
 
   const { events, connection, reset } = useRunStream(activeRunId);
   const vm = useMemo(() => foldEvents(events), [events]);
+
+  // 深链进来的运行：跟进 URL 变化（同页内换 hash 时也要跟着走）。
+  useEffect(() => {
+    if (initialRunId !== undefined) setActiveRunId(initialRunId);
+  }, [initialRunId]);
+
+  /**
+   * 选中一次运行时，把 id 写进 URL。
+   *
+   * 用 `replaceState` 而不是改 `location.hash`：改 hash 会触发 `hashchange`，
+   * App 再把它当成"外部导航"回灌下来，来回抖动。`replaceState` 只改地址栏，
+   * 不产生历史记录也不触发事件——选运行本来也不该是一次导航。
+   *
+   * 顺带的好处：刷新页面能回到同一次运行，链接可以直接发给别人。
+   */
+  const selectRun = (runId: string): void => {
+    setActiveRunId(runId);
+    window.history.replaceState(null, '', `#workbench/${encodeURIComponent(runId)}`);
+  };
+
+  /** 结构化链路的页面结构，由视图模型从 `plan_assembled` 事件里取。 */
+  const structure = vm.structure;
+
+  /**
+   * 当前**查看的这次运行**是不是结构化链路。
+   *
+   * 必须看 `activeRunId` 对应那条记录，**不能看提交表单上的 `envType`**。
+   * 两者是独立的：用户可能刚选了「结构化网页」但还没提交，
+   * 也可能正在回看一条文案运行。用表单的值去决定右栏显示什么，
+   * 会出现"看着结构化网页的运行、右栏却是 preview 且空着"这种错配
+   * ——截图里就是这样：左侧环境停在「文案」，中间是网页运行。
+   */
+  const activeRun = runs.find((r) => r.id === activeRunId);
+  const isStructuredRun = activeRun?.envType === 'webpage';
+  /** 还没选运行时就按表单选的环境预览形态，避免空白。 */
+  const showBlockPool = activeRunId === undefined ? envType === 'webpage' : isStructuredRun;
+
+  /** 中间那块「页面结构」面板同理，跟着运行走。 */
+  const showStructure = showBlockPool;
 
   /** 终态到达后刷新历史与产物列表。用 ref 防重复触发。 */
   const refreshedFor = useRef<string | undefined>(undefined);
@@ -104,10 +169,23 @@ export function Workbench(): ReactNode {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const { runId } = await api.createRun({ goal: trimmed, envType });
+      const { runId } = await api.createRun({
+        goal: trimmed,
+        envType,
+        // 结构化参数只在 webpage 环境提交。带上别的环境的参数没有意义，
+        // 还会让请求体里出现一堆后端不读的字段。
+        ...(envType === 'webpage'
+          ? {
+              candidateBlockIds: candidateBlockIds.length > 0 ? candidateBlockIds : undefined,
+              maxBlocks,
+              useGenerative,
+              annotate,
+            }
+          : {}),
+      });
       reset();
       refreshedFor.current = undefined;
-      setActiveRunId(runId);
+      selectRun(runId);
       refreshRuns();
     } catch (error) {
       const message =
@@ -229,7 +307,7 @@ export function Workbench(): ReactNode {
                 <li key={run.id}>
                   <button
                     type="button"
-                    onClick={() => setActiveRunId(run.id)}
+                    onClick={() => selectRun(run.id)}
                     className={`w-full px-3 py-2 text-left transition-colors hover:bg-ink-700/60 ${
                       run.id === activeRunId ? 'bg-accent/10' : ''
                     }`}
@@ -294,6 +372,18 @@ export function Workbench(): ReactNode {
           <DecisionPanel attempts={vm.attempts} />
         </Panel>
 
+        {/*
+          结构化链路多一块面板：**结构本身**。
+          它排在这里而不是塞进"决策过程"，是因为两者回答的问题不同——
+          前者是"决策层怎么选的"，后者是"选出来的结构长什么样"。
+          混在一起会让结构淹没在事件流里，而结构恰恰是结构化制作的主角。
+        */}
+        {showStructure && (
+          <Panel title="页面结构" className="min-h-0 flex-[3]" bodyClassName="min-h-0">
+            <StructurePanel structure={structure} />
+          </Panel>
+        )}
+
         <Panel title="执行步骤" className="min-h-0 flex-[3]" bodyClassName="min-h-0">
           {vm.current === undefined ? (
             <EmptyState
@@ -306,26 +396,48 @@ export function Workbench(): ReactNode {
         </Panel>
       </div>
 
-      {/* ── 右栏：预览 ─────────────────────────────────────────────── */}
-      <Panel
-        title="实时预览"
-        className="min-h-0"
-        actions={
-          artifactList.length > 0 ? (
-            <span className="font-mono text-[11px] text-slate-500">
-              {artifactList.length} 个产物
-            </span>
-          ) : undefined
-        }
-        bodyClassName="min-h-0"
-      >
-        <PreviewPane
-          runId={activeRunId}
-          artifacts={artifactList}
-          selected={selectedArtifact}
-          onSelect={setSelectedArtifact}
-        />
-      </Panel>
+      {/* ── 右栏：block 候选池（结构化）或预览 ─────────────────────── */}
+      {showBlockPool ? (
+        <Panel
+          title="block 候选池"
+          className="min-h-0"
+          actions={
+            <span className="text-[11px] text-slate-500">勾选后参与本次制作</span>
+          }
+          bodyClassName="min-h-0 overflow-y-auto"
+        >
+          <BlockPoolPanel
+            selected={candidateBlockIds}
+            onSelectionChange={setCandidateBlockIds}
+            maxBlocks={maxBlocks}
+            onMaxBlocksChange={setMaxBlocks}
+            useGenerative={useGenerative}
+            onUseGenerativeChange={setUseGenerative}
+            annotate={annotate}
+            onAnnotateChange={setAnnotate}
+          />
+        </Panel>
+      ) : (
+        <Panel
+          title="实时预览"
+          className="min-h-0"
+          actions={
+            artifactList.length > 0 ? (
+              <span className="font-mono text-[11px] text-slate-500">
+                {artifactList.length} 个产物
+              </span>
+            ) : undefined
+          }
+          bodyClassName="min-h-0"
+        >
+          <PreviewPane
+            runId={activeRunId}
+            artifacts={artifactList}
+            selected={selectedArtifact}
+            onSelect={setSelectedArtifact}
+          />
+        </Panel>
+      )}
     </div>
   );
 }
