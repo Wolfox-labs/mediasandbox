@@ -12,11 +12,28 @@
 # 写 `alpine:3.20` 会去 registry-1.docker.io 直连并超时。
 FROM docker.m.daocloud.io/library/alpine:3.20
 
-# chromium —— 渲染；
+# apk 换国内源。默认的 dl-cdn.alpinelinux.org 在本机实测慢到拉不动
+# （一次构建挂了二十分钟还停在下载阶段）。
+#
+# 这里用**清华**而不是阿里云，是量出来的结论：同一个 51MB 的 llvm17-libs
+# （chromium 依赖 mesa，mesa 依赖 llvm），
+#   阿里云 25 秒只下来 2.3MB（约 93 KB/s，实际是挂住），
+#   清华同一条文件跑满 10 MB/s。
+# 换源前两次构建都**恰好卡在这个包**上，不是巧合。
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.tuna.tsinghua.edu.cn#g' /etc/apk/repositories
+
+# chromium —— 渲染。
+#
+# 为什么和字体**分两层**：这层要拉 170 个包（含 mesa / llvm，几百 MB），
+# 分层的意义是——一层卡住时，已经装好的那层留在缓存里，重试不用从头再来。
+# `--timeout 60` 让卡死的连接自己断掉报错，而不是无声地挂着。
+RUN apk add --no-cache --timeout 60 chromium
+
 # font-noto-cjk —— **中文必须要有字体**，否则整页中文会渲染成一排方框，
 #                  而这种"截图成功了、但全是豆腐块"最难被发现。
-RUN apk add --no-cache chromium font-noto-cjk ttf-freefont \
- && mkdir -p /workspace \
+RUN apk add --no-cache --timeout 60 font-noto-cjk
+
+RUN mkdir -p /workspace \
  && adduser -D -u 1000 shooter \
  && chown -R shooter:shooter /workspace
 
