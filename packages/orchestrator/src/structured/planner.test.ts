@@ -570,14 +570,96 @@ describe('结构规划器：继续/停止的判定', () => {
       rounds: 99,
       continueAnswer: () => ({ value: true, prob: 0.99 }),
     });
-    // hero 与 footer 都不可重复，用完就没了。
+    // hero 与 form 都不可重复，用完就没了；两者都不带位置约束。
+    //
+    // 这里**刻意不用 footer**：它声明了 `placement: 'last'`，会在放下它的那一刻
+    // 直接收尾（那是另一条路径，另有专门用例覆盖），走不到"候选集用尽"这一支。
     const result = await new StructurePlanner(createBlockRegistry(), decision).plan({
       ...REQUEST,
-      candidateBlockIds: ['hero', 'footer'],
+      candidateBlockIds: ['hero', 'form'],
       maxBlocks: 10,
     });
     assert.equal(result.page.blocks.length, 2);
     assert.ok(result.rationale.some((r) => r.includes('已用尽')));
+  });
+});
+
+describe('结构规划器：末尾块收尾与版式规范化', () => {
+  it('放下末尾块（footer）之后立即收尾，不再问"要不要继续"', async () => {
+    // 模型第 2 轮就挑了 footer，第 3 轮本来还想再放一块 features。
+    const decision = picker(['hero', 'footer', 'features']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: CANDIDATES });
+
+    // 页脚之后不该还有正文。`canLead` 只挡得住"第一块放 footer"，
+    // 挡不住"第二块放 footer"——所以必须有这条。
+    assert.deepEqual(blockTypeSequence(result.page), ['hero', 'footer']);
+    assert.ok(
+      result.rationale.some((r) => r.includes('末尾块')),
+      '收尾原因要留痕，否则看不出"为什么只有两块"',
+    );
+  });
+
+  it('nav 被排到中间时挪回最前，且修正记录出现在 fixes 与 rationale 里', async () => {
+    const candidates = ['hero', 'nav', 'features'] as const;
+    const decision = picker(['hero', 'features', 'nav']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: candidates });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['nav', 'hero', 'features']);
+    assert.equal(result.fixes.length, 1);
+    assert.equal(result.fixes[0]?.kind, 'moved');
+    assert.match(result.fixes[0]!.detail, /placement='first'/);
+    assert.ok(
+      result.rationale.some((r) => r.includes('版式规范化')),
+      '规范化不能是悄悄发生的——界面上要看得见结构被动过',
+    );
+  });
+
+  it('模型排出来本来就合规时，fixes 为空（不制造无意义的修正记录）', async () => {
+    // 候选里多留一个 features：否则最后一轮只剩 cta 一个可选项时，
+    // 规划器不提问、直接采用，测试游标就不会前进。
+    const candidates = ['nav', 'hero', 'cta', 'features'] as const;
+    const decision = picker(['nav', 'hero', 'cta']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: candidates });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['nav', 'hero', 'cta']);
+    assert.equal(result.fixes.length, 0);
+  });
+
+  it('规范化发生在评分之前——score 看到的结构里 nav 已经在最前', async () => {
+    const candidates = ['hero', 'nav', 'features'] as const;
+    const picks = ['hero', 'features', 'nav'];
+    let cursor = 0;
+    let qualityInstructions = '';
+    const decision = new ScriptedDecision((id, question) => {
+      if (id === STRUCTURE_QUESTIONS.nextBlock && question.type === 'choice') {
+        const available = Object.keys(question.criteria);
+        while (cursor < picks.length && !available.includes(picks[cursor]!)) cursor += 1;
+        const next = picks[cursor] ?? available[0]!;
+        cursor += 1;
+        return { type: 'choice', value: next, probabilities: spread(available, next) };
+      }
+      if (id === STRUCTURE_QUESTIONS.continueStruct) {
+        return { type: 'noul', value: cursor < picks.length, yesProbability: 0.9 };
+      }
+      if (id.startsWith(`${STRUCTURE_QUESTIONS.slotCount}:`) && question.type === 'numeric') {
+        return { type: 'numeric', value: question.range?.min ?? 2 };
+      }
+      if (id === STRUCTURE_QUESTIONS.structureQuality && question.type === 'score') {
+        qualityInstructions = question.instructions;
+        return { type: 'score', value: 0.75 };
+      }
+      return { type: 'noul', value: false, yesProbability: 0.1 };
+    });
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({ ...REQUEST, candidateBlockIds: candidates });
+
+    assert.deepEqual(blockTypeSequence(result.page), ['nav', 'hero', 'features']);
+    // 评分那一次请求的 instructions 里嵌了结构摘要；第一个块应当是 nav。
+    // 若规范化排在评分之后，这里看到的还是 hero 开头 —— 评的就是一个要被改掉的中途状态。
+    assert.match(qualityInstructions, /结构：1\. nav/);
   });
 });
 

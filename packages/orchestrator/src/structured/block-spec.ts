@@ -61,6 +61,24 @@ export const BLOCK_GROUP_LABELS: Readonly<Record<BlockGroup, string>> = {
   interactive: '交互块',
 };
 
+/**
+ * 版式位置约束。
+ *
+ * 与 `canLead` **分工不同，两者都要**：
+ *
+ * | 字段 | 作用时机 | 管什么 |
+ * |---|---|---|
+ * | `canLead` | 规划**前** | 候选集过滤：首轮根本不给 `footer` 这种选项 |
+ * | `placement` | 定稿**后** | 规范化：把跑偏的 `nav` / `footer` 挪回该在的位置 |
+ *
+ * 为什么两个都需要：`canLead` 只能挡住"第一块"，挡不住"第二块放 footer"。
+ * 实测确实排得出 `hero → footer → features` —— 页脚后面还有正文，页面是错的，
+ * 而每一块单独看都合法、测试也不会报。
+ *
+ * **只约束两端，不管中间**：中间位置属于版式偏好，交给决策模型判断。
+ */
+export type BlockPlacement = 'any' | 'first' | 'last';
+
 /** 一个具名 slot 的声明。 */
 export interface SlotSpec {
   readonly name: string;
@@ -95,6 +113,13 @@ export interface BlockSpec {
   readonly canLead: boolean;
   /** 同一页面上是否允许多次出现。`hero` 出现两次是错，`text` 出现两次很正常。 */
   readonly repeatable: boolean;
+  /**
+   * 版式位置约束。省略即 `'any'`。
+   *
+   * 只有语义上**定义在两端**的块才该设：`nav` 是"顶部导航"，`footer` 是页脚。
+   * 其余一律不设——把 `gallery` 钉死在某个位置会夺走决策模型的判断空间。
+   */
+  readonly placement?: BlockPlacement | undefined;
   /** 实现成本提示，供决策模型权衡。 */
   readonly costHint: 'fast' | 'medium' | 'slow';
 }
@@ -198,6 +223,15 @@ function validateSpec(spec: BlockSpec): void {
   }
   if (spec.slots.length === 0) {
     throw new BlockError(`block ${spec.id} 未声明任何 slot`, 'BAD_SPEC', spec.id);
+  }
+  // `placement: 'first'` 与 `canLead: false` 是自相矛盾的声明：
+  // 一个块"必须在最前"却又"不能作为首块"，规范化和候选过滤会打架。
+  if (spec.placement === 'first' && !spec.canLead) {
+    throw new BlockError(
+      `block ${spec.id} 声明了 placement='first' 却 canLead=false，两者矛盾`,
+      'BAD_SPEC',
+      spec.id,
+    );
   }
   const names = new Set<string>();
   for (const slot of spec.slots) {
@@ -420,6 +454,7 @@ const BLOCKS: readonly BlockSpec[] = [
     ],
     canLead: false,
     repeatable: false,
+    placement: 'last',
     costHint: 'fast',
   },
   {
@@ -433,6 +468,7 @@ const BLOCKS: readonly BlockSpec[] = [
     ],
     canLead: true,
     repeatable: false,
+    placement: 'first',
     costHint: 'fast',
   },
 

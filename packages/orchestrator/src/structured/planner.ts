@@ -46,11 +46,13 @@ import {
   createPageSpec,
   describePageSpec,
   nextBlockId,
+  normalizePageSpec,
   validatePageSpec,
   type BlockInstance,
   type BlockStatus,
   type PageSpec,
   type SlotValue,
+  type StructureFix,
 } from './page-spec.js';
 
 /** 逐块规划用的问题 id。集中定义，避免散落的字符串。 */
@@ -148,6 +150,13 @@ export interface PlanStructureResult {
   readonly decisionCalls: number;
   /** 决策层用量累计。`outputTokens` 应当恒为 0——模型不生成文本。 */
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
+  /**
+   * 版式规范化做过的修正。空数组表示模型排出来就是合规的。
+   *
+   * 单独带出来而不是只写进 `rationale`：这是给测试与界面用的**结构化**事实，
+   * 从一句中文里正则抠出来不算接口。
+   */
+  readonly fixes: readonly StructureFix[];
 }
 
 export class StructurePlanner {
@@ -410,10 +419,37 @@ export class StructurePlanner {
         });
         rationale.push(`　└ ${countResult.rationale}`);
       }
+
+      // ── 末尾块之后不再排 ──────────────────────────────────────────
+      //
+      // 不指望模型自己判断"该停了"：它完全可以在第 2 轮就挑 `footer`，
+      // 然后再挑一块，排出 `hero → footer → features` —— 页脚后面还有正文。
+      // 每一块单独看都合法（类型在池子里、slot 齐全、不可重复的没重复），
+      // 所以只能靠"放下末尾块即收尾"这条结构事实来挡。
+      if (isTerminal(picked)) {
+        rationale.push(
+          `第 ${round + 1} 轮：放下 ${picked.id}（声明为页面末尾块），结构自然收尾`,
+        );
+        break;
+      }
     }
 
     if (page.blocks.length === 0) {
       throw new StructureError('逐块决策没有产出任何 block', 'INVALID_PAGE');
+    }
+
+    // ── 版式规范化：把跑偏的两端块挪回去 ──────────────────────────────
+    //
+    // 放在**评分之前**：`structure_quality` 要评的应该是最终会渲染出来的那个结构，
+    // 而不是一个马上要被改掉的中途状态。
+    //
+    // 也放在**校验之前**：规范化只处理"合法但不合语义"的顺序问题，
+    // 真正非法的结构（未知类型、slot 不合规）留给 `validatePageSpec` 报，
+    // 它报得比这里准。
+    const normalized = normalizePageSpec(page, this.blocks);
+    page = normalized.page;
+    for (const fix of normalized.fixes) {
+      rationale.push(`版式规范化：${fix.detail}`);
     }
 
     // ── 结构定稿后评一次分（`score` 原语的落点） ──────────────────────
@@ -447,7 +483,15 @@ export class StructurePlanner {
       rationale.push(`结构定稿：${page.blocks.length} 块，末块 ${lastBlockId}`);
     }
 
-    return { page, steps, rationale, decisionLatencyMs, decisionCalls, usage };
+    return {
+      page,
+      steps,
+      rationale,
+      decisionLatencyMs,
+      decisionCalls,
+      usage,
+      fixes: normalized.fixes,
+    };
   }
 
   /** 候选集里当前还能用的 block（排除已用过且不可重复的）。 */
@@ -787,4 +831,14 @@ export function blockTypeSequence(page: PageSpec): string[] {
 /** 判断某个 block 是否已经填好。 */
 export function isFilled(block: BlockInstance): boolean {
   return block.status === ('filled' satisfies BlockStatus);
+}
+
+/**
+ * 该 block 是不是"页面末尾块"——放下它之后不可能再有内容。
+ *
+ * 判据取自 `placement`，而不是硬编码 `'footer'`：将来再加一个
+ * "订阅栏"之类的末尾块，只要声明 `placement: 'last'` 就自动获得同样的行为。
+ */
+function isTerminal(spec: BlockSpec): boolean {
+  return spec.placement === 'last';
 }

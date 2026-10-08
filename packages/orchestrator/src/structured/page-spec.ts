@@ -107,7 +107,9 @@ export type PageSpecErrorCode =
   /** 列表长度超出 countRange。 */
   | 'COUNT_OUT_OF_RANGE'
   /** 必需 slot 未填。 */
-  | 'MISSING_REQUIRED_SLOT';
+  | 'MISSING_REQUIRED_SLOT'
+  /** 插入 / 移动的目标位置越界。 */
+  | 'INDEX_OUT_OF_RANGE';
 
 /** 判断某种 slot 类型在取值层面对应哪种 `SlotValue.kind`。 */
 export function valueKindFor(slotType: SlotType): SlotValue['kind'] {
@@ -261,6 +263,156 @@ export function replaceBlock(spec: PageSpec, blockId: string, next: BlockInstanc
   const blocks = [...spec.blocks];
   blocks[index] = next;
   return { ...spec, blocks };
+}
+
+// ── 位置操作 ────────────────────────────────────────────────────────────
+//
+// 结构既然是数据，就该能被**定点改**，而不只是"往后追加"。
+// 这一组是「增删改某个 block / 调整顺序」的落点（设计稿 §6.2 的干预点），
+// 也是 `normalizePageSpec` 的实现手段 —— 有真实调用方，不是储备 API。
+//
+// 三条共同的取舍：
+//   1. **纯函数**，返回新 `PageSpec`，不改原对象（与 `appendBlock` 一致）
+//   2. **越界抛错，不夹取**：夹取会让"插到第 3 位"和"插到最后"看起来一样
+//   3. **找不到就抛错**：静默忽略会让定点干预失效却看不出来（理由同 `replaceBlock`）
+
+/**
+ * 在指定位置插入一个 block。
+ *
+ * `index` 允许等于 `blocks.length`（等价于追加），不要用 `splice` 的负索引语义——
+ * "从后往前数"在这里只会让调用方算错位置。
+ */
+export function insertBlock(spec: PageSpec, index: number, block: BlockInstance): PageSpec {
+  if (!Number.isInteger(index) || index < 0 || index > spec.blocks.length) {
+    throw new PageSpecError(
+      `插入位置越界: ${index}（当前 ${spec.blocks.length} 块，合法范围 0..${spec.blocks.length}）`,
+      'INDEX_OUT_OF_RANGE',
+    );
+  }
+  const blocks = [...spec.blocks];
+  blocks.splice(index, 0, block);
+  return { ...spec, blocks };
+}
+
+/** 删除指定 block。 */
+export function removeBlock(spec: PageSpec, blockId: string): PageSpec {
+  const index = spec.blocks.findIndex((b) => b.id === blockId);
+  if (index < 0) {
+    throw new PageSpecError(`找不到要删除的 block: ${blockId}`, 'UNKNOWN_BLOCK');
+  }
+  const blocks = [...spec.blocks];
+  blocks.splice(index, 1);
+  return { ...spec, blocks };
+}
+
+/**
+ * 把某个 block 移到指定位置（`toIndex` 是**移动完成后**它所在的下标）。
+ *
+ * 位置不变时返回原对象：调用方常用它做"归位"判断，
+ * 没变就不该产生一次无意义的复制（也便于上方用 `===` 判断有没有动过）。
+ */
+export function moveBlock(spec: PageSpec, blockId: string, toIndex: number): PageSpec {
+  const from = spec.blocks.findIndex((b) => b.id === blockId);
+  if (from < 0) {
+    throw new PageSpecError(`找不到要移动的 block: ${blockId}`, 'UNKNOWN_BLOCK');
+  }
+  if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex >= spec.blocks.length) {
+    throw new PageSpecError(
+      `移动目标位置越界: ${toIndex}（合法范围 0..${spec.blocks.length - 1}）`,
+      'INDEX_OUT_OF_RANGE',
+    );
+  }
+  if (from === toIndex) return spec;
+  const blocks = [...spec.blocks];
+  const moved = blocks.splice(from, 1)[0]!;
+  blocks.splice(toIndex, 0, moved);
+  return { ...spec, blocks };
+}
+
+/** 一次版式修正的记录。规范化不静默——改了什么必须能被读出来。 */
+export interface StructureFix {
+  readonly kind: 'moved' | 'removed';
+  readonly blockId: string;
+  readonly detail: string;
+}
+
+/**
+ * 版式规范化：把**定义在两端**的块挪回该在的位置，并去掉重复的非可重复块。
+ *
+ * ## 为什么需要它（这不是洁癖，是真实缺陷的补丁）
+ *
+ * `canLead` 只能挡住"第一块放 footer"，**挡不住"第二块放 footer"**。
+ * 于是模型完全排得出：
+ *
+ * ```
+ * hero → footer → features      页脚后面还有正文，页面是错的
+ * hero → features → nav → cta   导航栏跑到了页面中段
+ * ```
+ *
+ * 每一块单独看都合法：类型在池子里、slot 齐全、不可重复的没重复。
+ * `validatePageSpec` 查的是**自洽性**，查不出"顺序不合语义"——那是版式事实，
+ * 不在结构校验的职责里。所以需要这一道。
+ *
+ * ## 为什么是"规范化"而不是"候选过滤"
+ *
+ * 过滤只能管住规划器自己排出来的结构。**模板给的起手结构、用户的手工编辑、
+ * 将来 P7 的暂停指导，都会绕过规划器**——它们同样必须被兜住。
+ * 规范化放在定稿之后，所有这些入口都经过它。
+ *
+ * ## 边界
+ *
+ * - **只动两端**：中间顺序是决策模型的判断，规范化不碰
+ * - 未知类型跳过（交给 `validatePageSpec` 报错，不在这里抢着报）
+ * - 非可重复块重复时**保留第一个**：第一次出现更可能是模型的本意，
+ *   后面的更可能是它忘了自己放过
+ */
+export function normalizePageSpec(
+  spec: PageSpec,
+  registry: BlockRegistry,
+): { readonly page: PageSpec; readonly fixes: readonly StructureFix[] } {
+  const fixes: StructureFix[] = [];
+  let page = spec;
+
+  // ── 1. 非可重复块去重（保留第一个） ──────────────────────────────────
+  const seen = new Set<string>();
+  for (const block of [...page.blocks]) {
+    if (!registry.has(block.type)) continue;
+    if (registry.get(block.type).repeatable) continue;
+    if (!seen.has(block.type)) {
+      seen.add(block.type);
+      continue;
+    }
+    page = removeBlock(page, block.id);
+    fixes.push({
+      kind: 'removed',
+      blockId: block.id,
+      detail: `${block.type} 声明为不可重复，重复出现，已删除后一个`,
+    });
+  }
+
+  // ── 2. 位置约束 ──────────────────────────────────────────────────────
+  // 先归位 `placement: 'first'` 的，再归位 `'last'` 的。
+  // 顺序有意义：两者可能同时存在，先定头再定尾，结果与直觉一致。
+  for (const placement of ['first', 'last'] as const) {
+    for (const spec_ of registry.specs()) {
+      if (spec_.placement !== placement) continue;
+      const index = page.blocks.findIndex((b) => b.type === spec_.id);
+      if (index < 0) continue;
+      const target = placement === 'first' ? 0 : page.blocks.length - 1;
+      if (index === target) continue;
+      const before = index;
+      page = moveBlock(page, page.blocks[index]!.id, target);
+      fixes.push({
+        kind: 'moved',
+        blockId: page.blocks[target]!.id,
+        detail:
+          `${spec_.id} 声明了 placement='${placement}'，` +
+          `从第 ${before + 1} 位移到第 ${target + 1} 位`,
+      });
+    }
+  }
+
+  return { page, fixes };
 }
 
 /** 结构摘要，用于日志、事件与决策层的 evidence。保持简短。 */

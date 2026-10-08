@@ -23,7 +23,11 @@ import {
   createPageSpec,
   describePageSpec,
   nextBlockId,
+  normalizePageSpec,
   PageSpecError,
+  insertBlock,
+  moveBlock,
+  removeBlock,
   replaceBlock,
   validatePageSpec,
   valueKindFor,
@@ -182,6 +186,28 @@ describe('block 池：注册与校验', () => {
 
   it('不合法的提议进不了池子', () => {
     assert.throws(() => createBlockRegistry([{ ...ok, id: 'UPPER' }]), BlockError);
+  });
+
+  it('placement 与 canLead 矛盾时拒绝注册——"必须在最前"和"不能当首块"不能同时成立', () => {
+    assert.throws(
+      () => createBlockRegistry([{ ...ok, id: 'weird', placement: 'first', canLead: false }]),
+      (e: unknown) => e instanceof BlockError && e.code === 'BAD_SPEC',
+    );
+    // 反过来是合法的：nav 就是 canLead=true + placement='first'。
+    const reg = createBlockRegistry([{ ...ok, id: 'banner', placement: 'first', canLead: true }]);
+    assert.ok(reg.has('banner'));
+  });
+
+  it('内置词表里只有 nav 与 footer 声明了位置约束，其余一律 any', () => {
+    const constrained = BUILTIN_BLOCKS.filter((b) => b.placement !== undefined);
+    assert.deepEqual(
+      constrained.map((b) => [b.id, b.placement]),
+      [
+        ['footer', 'last'],
+        ['nav', 'first'],
+      ],
+      '把中间位置钉死会夺走决策模型的判断空间',
+    );
   });
 });
 
@@ -356,5 +382,138 @@ describe('结构化中间表示：操作', () => {
   it('blockTypesOf 按首次出现顺序去重', () => {
     const p = page([block('b1', 'text'), block('b2', 'hero'), block('b3', 'text')]);
     assert.deepEqual(blockTypesOf(p), ['text', 'hero']);
+  });
+});
+
+describe('结构化中间表示：位置操作', () => {
+  const three = (): PageSpec => page([block('b1', 'hero'), block('b2', 'text'), block('b3', 'cta')]);
+
+  it('insertBlock 能插到中间，且不改原对象', () => {
+    const p0 = three();
+    const p1 = insertBlock(p0, 1, block('b9', 'quote'));
+    assert.deepEqual(p1.blocks.map((b) => b.id), ['b1', 'b9', 'b2', 'b3']);
+    assert.deepEqual(p0.blocks.map((b) => b.id), ['b1', 'b2', 'b3'], '原对象不该被动到');
+  });
+
+  it('insertBlock 允许 index 等于长度（等价于追加）', () => {
+    const p1 = insertBlock(three(), 3, block('b9', 'quote'));
+    assert.deepEqual(p1.blocks.map((b) => b.id), ['b1', 'b2', 'b3', 'b9']);
+  });
+
+  it('insertBlock 越界抛错，不静默夹取——夹取会让"插到第 3 位"与"插到最后"看起来一样', () => {
+    for (const bad of [-1, 4, 1.5, Number.NaN]) {
+      assert.throws(
+        () => insertBlock(three(), bad, block('b9', 'quote')),
+        (e: unknown) => e instanceof PageSpecError && e.code === 'INDEX_OUT_OF_RANGE',
+        `index=${String(bad)} 应该被拒绝`,
+      );
+    }
+  });
+
+  it('removeBlock 删掉指定块，其余顺序不变', () => {
+    const p1 = removeBlock(three(), 'b2');
+    assert.deepEqual(p1.blocks.map((b) => b.id), ['b1', 'b3']);
+  });
+
+  it('removeBlock 找不到目标时抛错，不静默返回原结构', () => {
+    assert.throws(
+      () => removeBlock(three(), 'nope'),
+      (e: unknown) => e instanceof PageSpecError && e.code === 'UNKNOWN_BLOCK',
+    );
+  });
+
+  it('moveBlock 的 toIndex 是"移动完成后"所在的下标（向后移）', () => {
+    const p1 = moveBlock(three(), 'b1', 2);
+    assert.deepEqual(p1.blocks.map((b) => b.id), ['b2', 'b3', 'b1']);
+  });
+
+  it('moveBlock 向前移同样成立', () => {
+    const p1 = moveBlock(three(), 'b3', 0);
+    assert.deepEqual(p1.blocks.map((b) => b.id), ['b3', 'b1', 'b2']);
+  });
+
+  it('moveBlock 位置没变时返回原对象——调用方靠它判断"有没有动过"', () => {
+    const p = three();
+    assert.equal(moveBlock(p, 'b2', 1), p);
+  });
+
+  it('moveBlock 越界抛错（下标不能等于长度，那里没有位置可占）', () => {
+    for (const bad of [-1, 3, 0.5]) {
+      assert.throws(
+        () => moveBlock(three(), 'b1', bad),
+        (e: unknown) => e instanceof PageSpecError && e.code === 'INDEX_OUT_OF_RANGE',
+      );
+    }
+  });
+
+  it('moveBlock 找不到目标时抛错', () => {
+    assert.throws(() => moveBlock(three(), 'nope', 0));
+  });
+});
+
+describe('版式规范化：把两端块挪回该在的位置', () => {
+  const registry = createBlockRegistry();
+
+  it('footer 排在中间时被移到最后——页脚后面不该还有正文', () => {
+    const p = page([block('b1', 'hero'), block('b2', 'footer'), block('b3', 'features')]);
+    const { page: fixed, fixes } = normalizePageSpec(p, registry);
+    assert.deepEqual(fixed.blocks.map((b) => b.type), ['hero', 'features', 'footer']);
+    assert.equal(fixes.length, 1);
+    assert.equal(fixes[0]?.kind, 'moved');
+    assert.match(fixes[0]!.detail, /placement='last'/);
+  });
+
+  it('nav 不在最前时被移到最前——它是"顶部导航"', () => {
+    const p = page([block('b1', 'hero'), block('b2', 'features'), block('b3', 'nav')]);
+    const { page: fixed, fixes } = normalizePageSpec(p, registry);
+    assert.deepEqual(fixed.blocks.map((b) => b.type), ['nav', 'hero', 'features']);
+    assert.equal(fixes.length, 1);
+    assert.match(fixes[0]!.detail, /placement='first'/);
+  });
+
+  it('nav 与 footer 同时跑偏时，一头一尾都归位', () => {
+    const p = page([
+      block('b1', 'hero'),
+      block('b2', 'footer'),
+      block('b3', 'features'),
+      block('b4', 'nav'),
+    ]);
+    const { page: fixed, fixes } = normalizePageSpec(p, registry);
+    assert.deepEqual(fixed.blocks.map((b) => b.type), ['nav', 'hero', 'features', 'footer']);
+    assert.equal(fixes.length, 2);
+  });
+
+  it('不可重复的块重复出现时保留第一个——后面那个更可能是模型忘了自己放过', () => {
+    const p = page([block('b1', 'hero'), block('b2', 'text'), block('b3', 'hero')]);
+    const { page: fixed, fixes } = normalizePageSpec(p, registry);
+    assert.deepEqual(fixed.blocks.map((b) => b.id), ['b1', 'b2']);
+    assert.equal(fixes[0]?.kind, 'removed');
+  });
+
+  it('可重复的块重复出现不动它——text 出现两次很正常', () => {
+    const p = page([block('b1', 'text'), block('b2', 'text'), block('b3', 'text')]);
+    const { page: fixed, fixes } = normalizePageSpec(p, registry);
+    assert.equal(fixed.blocks.length, 3);
+    assert.equal(fixes.length, 0);
+  });
+
+  it('本来就合规的结构一个字节都不动，且返回原对象', () => {
+    const p = page([block('b1', 'nav'), block('b2', 'hero'), block('b3', 'footer')]);
+    const { page: fixed, fixes } = normalizePageSpec(p, registry);
+    assert.equal(fixed, p, '没修正时不该产生无意义的复制');
+    assert.equal(fixes.length, 0);
+  });
+
+  it('未注册的类型跳过，不在这里抢着报错——那是 validatePageSpec 的活', () => {
+    const p = page([block('b1', 'hero'), block('b2', 'no-such-block')]);
+    const { page: fixed } = normalizePageSpec(p, registry);
+    assert.equal(fixed.blocks.length, 2);
+  });
+
+  it('规范化之后，不可重复重复的结构能通过校验（它是校验的前置补丁）', () => {
+    const p = page([block('b1', 'hero'), block('b2', 'hero')]);
+    assert.throws(() => validatePageSpec(p, registry), /不可重复/);
+    const { page: fixed } = normalizePageSpec(p, registry);
+    validatePageSpec(fixed, registry); // 不该抛
   });
 });

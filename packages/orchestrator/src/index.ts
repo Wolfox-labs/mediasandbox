@@ -35,6 +35,7 @@ export {
   type BlockErrorCode,
   type BlockGroup,
   type BlockOption,
+  type BlockPlacement,
   type BlockQuery,
   type BlockSpec,
   type SlotSpec,
@@ -45,8 +46,12 @@ export {
   blockTypesOf,
   createPageSpec,
   describePageSpec,
+  insertBlock,
+  moveBlock,
   nextBlockId,
+  normalizePageSpec,
   PageSpecError,
+  removeBlock,
   replaceBlock,
   validatePageSpec,
   valueKindFor,
@@ -57,6 +62,7 @@ export {
   type PageSpecErrorCode,
   type SlotSource,
   type SlotValue,
+  type StructureFix,
 } from './structured/page-spec.js';
 export {
   blockTypeSequence,
