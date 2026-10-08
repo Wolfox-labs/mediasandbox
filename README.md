@@ -37,7 +37,7 @@
 ```bash
 pnpm install
 pnpm -r build
-pnpm -r test          # 204 项测试
+pnpm -r test          # 375 项测试
 ```
 
 ### 起服务
@@ -266,4 +266,6 @@ pnpm -r test
 - [docs/系统说明.md](docs/系统说明.md) —— **面向评审**：它是什么、怎么用、怎么做的、怎么验证的
 - [架构说明.md](架构说明.md) —— 详细的实现说明与踩坑记录
 - [架构与业务逻辑.md](架构与业务逻辑.md) —— 与设计蓝图的逐条对照，含偏差清单
+- [docs/结构化制作链路设计.md](docs/结构化制作链路设计.md) —— block 级制作链路的设计与实现状态
+- [docs/用户要求与协作经验.md](docs/用户要求与协作经验.md) —— **接手前必读**：用户的硬性约束、架构主张、协作纠正
 - [docs/screenshots/](docs/screenshots) —— 界面截图
