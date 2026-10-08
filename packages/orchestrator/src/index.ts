@@ -111,6 +111,39 @@ export {
   type BrowserDocker,
   type ChromiumDriverOptions,
 } from './render/chromium.js';
+// 模拟点击：可点元素发现 + 判定 + 真驱动。判定完全不依赖浏览器，真驱动才需要。
+export {
+  cssAttrValue,
+  describeClickTargets,
+  findClickTarget,
+  parseClickTargets,
+  type ClickKind,
+  type ClickTarget,
+} from './render/click-targets.js';
+export {
+  buildClickScript,
+  CLICK_VIEWPORT,
+  defaultClickDriver,
+  judgeClick,
+  parseClickScriptResult,
+  PlaceholderClickDriver,
+  type ClickDriver,
+  type ClickObservation,
+  type ClickRequest,
+  type ClickResult,
+} from './render/click.js';
+export {
+  ChromiumClickDriver,
+  chromiumClickDriverFor,
+  type ChromiumClickDriverOptions,
+  type ClickContainer,
+  type ClickDocker,
+} from './render/chromium-click.js';
+export {
+  verifyInteraction,
+  type InteractionVerification,
+  type VerifyInteractionRequest,
+} from './structured/interaction.js';
 export {
   applyTemplate,
   builtinTemplates,
