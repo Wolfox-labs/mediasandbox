@@ -113,6 +113,13 @@ export {
   STRUCTURED_TOOLS,
 } from './structured/tools.js';
 export { assembleStructured } from './structured/assembler.js';
+export {
+  candidateEnvs,
+  classifyEnvType,
+  ENV_QUESTION_ID,
+  ENV_TYPE_LABELS,
+  type EnvClassification,
+} from './env-classify.js';
 
 // ── 计划层 ────────────────────────────────────────────────────────────────
 export * from './plan/types.js';

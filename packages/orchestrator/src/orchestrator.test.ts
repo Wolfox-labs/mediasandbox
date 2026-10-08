@@ -40,6 +40,100 @@ function registry(): ToolRegistry {
 /** 不含退避等待的策略，让测试跑得快。 */
 const FAST_POLICY = { ...DEFAULT_POLICY, backoffBaseMs: 0, backoffCapMs: 0 };
 
+describe('编排端到端：目标分类', () => {
+  it('envType=auto 时由决策层判定，并发出 env_classified 事件', async () => {
+    const events: OrchestrationEvent[] = [];
+    const decision = new StubDecisionClient()
+      .onChoice('env_type', 'copy')
+      .onChoice('primary_tool', 'draft-copy')
+      .onNoul('needs_refine', false)
+      .onChoice('finalize', 'write-file')
+      .onNoul('needs_verify', false);
+
+    const result = await new Orchestrator().run(
+      { projectId: keep(`e2e${process.pid}auto`), goal: '写一段产品介绍', envType: 'auto' },
+      {
+        registry: registry(),
+        decision,
+        sandbox,
+        llm: new MockLlmClient({ defaultText: '文案。' }),
+        policy: FAST_POLICY,
+        onEvent: (e) => events.push(e),
+      },
+    );
+
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    // 判出来的环境要出现在**结果**上：服务层拿它去填运行记录。
+    assert.equal(result.envType, 'copy');
+
+    const classified = events.find((e) => e.type === 'env_classified');
+    assert.ok(classified !== undefined, '没发出 env_classified 事件');
+    assert.equal(classified.envType, 'copy');
+    assert.equal(classified.source, 'decision');
+    assert.match(classified.detail, /决策层判定/);
+
+    // 环境一定要在**建沙盒之前**定下来：沙盒是按环境选预设的。
+    const classifyAt = events.findIndex((e) => e.type === 'env_classified');
+    const startedAt = events.findIndex((e) => e.type === 'run_started');
+    assert.ok(startedAt >= 0 && classifyAt === startedAt + 1, '分类应当紧跟 run_started');
+  });
+
+  it('显式给环境时跳过分类，但事件照发——事件流里"环境怎么定的"永远可查', async () => {
+    const events: OrchestrationEvent[] = [];
+    const decision = new StubDecisionClient()
+      .onChoice('primary_tool', 'draft-copy')
+      .onNoul('needs_refine', false)
+      .onChoice('finalize', 'write-file')
+      .onNoul('needs_verify', false);
+
+    const result = await new Orchestrator().run(
+      { projectId: keep(`e2e${process.pid}exp`), goal: '写一段产品介绍', envType: 'copy' },
+      {
+        registry: registry(),
+        decision,
+        sandbox,
+        llm: new MockLlmClient({ defaultText: '文案。' }),
+        policy: FAST_POLICY,
+        onEvent: (e) => events.push(e),
+      },
+    );
+
+    assert.equal(result.envType, 'copy');
+    const classified = events.find((e) => e.type === 'env_classified');
+    assert.ok(classified !== undefined);
+    assert.equal(classified.source, 'explicit');
+    assert.match(classified.detail, /跳过分类/);
+  });
+
+  it('决策层不可达时回落到 copy，链路照样跑完', async () => {
+    // 分类是第一步，它失败等于整个目标做不了——所以必须能回落。
+    const down = new StubDecisionClient();
+    down.decide = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+    const events: OrchestrationEvent[] = [];
+
+    const result = await new Orchestrator().run(
+      { projectId: keep(`e2e${process.pid}down`), goal: '随便做点什么', envType: 'auto' },
+      {
+        registry: registry(),
+        decision: down,
+        sandbox,
+        policy: FAST_POLICY,
+        onEvent: (e) => events.push(e),
+      },
+    );
+
+    const classified = events.find((e) => e.type === 'env_classified');
+    assert.ok(classified !== undefined);
+    assert.equal(classified.envType, 'copy');
+    assert.equal(classified.source, 'fallback');
+    // 环境定了、沙盒建了，后面因为决策层不可达而熔断——这是**预期**的，
+    // 这里要证的是"分类没把链路拦死"。
+    assert.ok(result.status !== 'succeeded' || result.attempts.length > 0);
+  });
+});
+
 describe('编排端到端', () => {
   it('文案环境：目标 → 决策 → 组装 → 执行 → 产物落盘', async () => {
     const decision = new StubDecisionClient()

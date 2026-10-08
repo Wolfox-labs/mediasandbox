@@ -301,6 +301,9 @@ const renderImage: ToolRegistration = {
     envTypes: ['image', 'frontend'],
     role: 'generate',
     category: 'image',
+    // 生图**逐张计费**，且用户明确要求"实测生图要经过我的许可"。
+    // 标上它之后，默认不进候选——要跑必须显式传 `allowPaidGeneration: true`。
+    requiresPermission: true,
     inputs: [
       { name: 'prompt', type: 'text', required: true, description: '图像提示词' },
       { name: 'size', type: 'text', required: false, description: '尺寸，如 1024x1024' },

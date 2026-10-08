@@ -127,12 +127,13 @@ export interface CreateServerResult {
 }
 
 /**
- * 解析环境类型。
+ * 解析环境类型。`'auto'` 是合法值——交给决策层判断"这是什么类型的任务"。
  *
  * 从 `ENV_TYPES` 派生，不写死字面量列表——加一个环境却漏改这里，
  * 表现是"前端能选，提交时被 400 拒绝"，而错误信息还写着旧的三种。
  */
-function parseEnvType(value: unknown): EnvType | undefined {
+function parseEnvType(value: unknown): EnvType | 'auto' | undefined {
+  if (value === 'auto') return 'auto';
   return typeof value === 'string' && (ENV_TYPES as readonly string[]).includes(value)
     ? (value as EnvType)
     : undefined;
@@ -140,7 +141,7 @@ function parseEnvType(value: unknown): EnvType | undefined {
 
 /** 受支持环境的可读列表，供错误信息与流水线提示用。 */
 function envTypeList(): string {
-  return ENV_TYPES.join(' / ');
+  return `${ENV_TYPES.join(' / ')} / auto`;
 }
 
 /** 校验分组名。 */
@@ -331,7 +332,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     record: RunRecord;
     provider: SandboxProvider;
     goal: string;
-    envType: EnvType;
+    envType: EnvType | 'auto';
+    /** 是否放行按次计费的生成工具（目前是生图）。默认 false。 */
+    allowPaidGeneration?: boolean | undefined;
     tone?: string | undefined;
     minArtifacts?: number | undefined;
     /** 结构化链路（webpage 环境）专用参数。 */
@@ -360,6 +363,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           // block 池**必须**是服务层那一个：结构化链路若自己新建一个内置池，
           // 外部来源（模型提议/手打/导入）的 block 就永远进不了候选集。
           ...(deps.blocks !== undefined ? { blocks: deps.blocks } : {}),
+          ...(args.allowPaidGeneration !== undefined
+            ? { allowPaidGeneration: args.allowPaidGeneration }
+            : {}),
           ...(args.tone !== undefined ? { tone: args.tone } : {}),
           ...(args.minArtifacts !== undefined ? { minArtifacts: args.minArtifacts } : {}),
           ...(args.structured ?? {}),
@@ -391,6 +397,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           : result.status === 'succeeded'
             ? 'succeeded'
             : result.status,
+        // 环境可能是决策层判出来的（请求里传的是 `auto`）。记下**实际**用的那个，
+        // 否则运行记录里永远写着 "auto"，事后没法回答"这次到底走的哪条链路"。
+        envType: result.envType,
         finishedAt: Date.now(),
         // 执行结果里的 artifacts 是 readonly，复制一份存进可变记录。
         artifacts: [...(result.execution?.artifacts ?? [])],
@@ -469,7 +478,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
 
-    const envType = parseEnvType(body['envType'] ?? 'copy');
+    // **不传就是 `auto`**：让决策层判断"这是什么类型的任务"（设计稿 §3.2 第一问）。
+    // 从前缺省是 `copy`，一个图像需求会被静默当成文案任务处理。
+    const envType = parseEnvType(body['envType'] ?? 'auto');
     if (envType === undefined) {
       errorResponse(res, 400, `envType 必须是 ${envTypeList()} 之一`);
       return;
@@ -536,6 +547,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       goal,
       envType,
       ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
+      // **缺省是 false**：不放行按次计费的生成工具。
+      // "实测生图要经过我的许可"这条纪律写进代码，而不是靠人记着。
+      ...(typeof body['allowPaidGeneration'] === 'boolean'
+        ? { allowPaidGeneration: body['allowPaidGeneration'] }
+        : {}),
       ...(typeof body['minArtifacts'] === 'number'
         ? { minArtifacts: body['minArtifacts'] }
         : {}),
@@ -757,7 +773,10 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   /** 工具目录：前端据此展示"可以排布什么"。 */
   app.get('/api/tools', (req: Request, res: Response) => {
     const envType = parseEnvType(req.query['envType']);
-    const specs = deps.registry.filter(envType !== undefined ? { envType } : {});
+    // `envType=auto` 表示"我还没定环境"——那时该列出**全部**工具，
+    // 而不是拿 auto 去过滤（过滤不出任何东西，前端会以为一个工具都没有）。
+    const specs =
+      envType === undefined || envType === 'auto' ? deps.registry.specs() : deps.registry.filter({ envType });
     res.json({
       tools: specs.map((s) => ({
         id: s.id,

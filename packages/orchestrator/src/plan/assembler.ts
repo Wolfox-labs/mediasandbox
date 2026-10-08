@@ -69,6 +69,13 @@ export interface AssembleRequest {
   readonly blocks?: BlockRegistry | undefined;
   /** 套用的模板。由调用方从模板池解析后传入（模板池在服务层）。 */
   readonly template?: TemplateSpec | undefined;
+  /**
+   * 是否放行"需要逐次许可"的工具（目前是生图 `render-image`）。**默认 false**。
+   *
+   * 默认关闭意味着 image 环境退到零成本的 `solid-image`；两个都没有就如实失败。
+   * 这是刻意的：**失败比悄悄花掉一次生图好**。
+   */
+  readonly allowPaidGeneration?: boolean | undefined;
 }
 
 export interface AssembleResult {
@@ -101,6 +108,17 @@ const Q = {
 } as const;
 
 /**
+ * 需要"逐次许可"的工具 id，在没被放行时排除掉。
+ *
+ * 判据是 `ToolSpec.requiresPermission` 而不是写死 id 列表：加一个按次计费的工具时，
+ * 在它的声明上标一下就够了，不用回来改这里（漏改就是悄悄花钱）。
+ */
+function paidToolsToExclude(registry: ToolRegistry, allowed: boolean): string[] {
+  if (allowed) return [];
+  return registry.specs().filter((s) => s.requiresPermission === true).map((s) => s.id);
+}
+
+/**
  * 各环境下的"收尾工具"。主产出之后要把东西落进 artifacts/ 并校验。
  *
  * `webpage` **刻意不在这里**：它走结构化链路，收尾由 `assemble-page` 自己完成
@@ -117,22 +135,39 @@ const FINALIZE_BY_ENV: Readonly<Partial<Record<EnvType, string>>> = {
  * 该环境下**可以当主产出**的工具（角色为 generate）。
  * 收尾与校验类不参与主工具选择，否则模型可能选个"校验"当第一步，计划就废了。
  *
- * `excludeTools` 用于"换方案"：把已失败的工具排除，逼决策层改选别的。
- * 排除后若一个候选都不剩，会回落到"不排除"（宁可重试同一工具，也不能无工具可用）。
+ * ## 两类排除，语义相反，绝不能混成一条通道
+ *
+ * | 通道 | 语义 | 全落空时 |
+ * |---|---|---|
+ * | `excludeTools`（软） | "换方案"：这个工具刚失败过，换一个 | **退回剩余全集**——有工具可用比严格遵守排除更重要 |
+ * | `forbidden`（硬） | 成本闸门：这个工具要花钱，没有许可就不许碰 | **就是不许**，一个都不剩也认 |
+ *
+ * 这两条一旦共用一个列表就会出人命：软排除的"全落空就退回全集"兜底
+ * 会把硬闸门放回来的工具一起复活。**实测踩到过**——`solid-image` 失败四次后
+ * 软排除吃掉了仅剩的候选，兜底把被闸门挡住的 `render-image` 放了回来，
+ * 于是**在未获许可的情况下真的调了一次生图**。
+ *
+ * 所以硬禁在**最前面**无条件过滤，软排除的兜底只在"还没被硬禁的"里面退回。
  */
 function primaryCandidates(
   registry: ToolRegistry,
   envType: EnvType,
   excludeTools: readonly string[] = [],
+  forbidden: readonly string[] = [],
 ): ToolSpec[] {
-  const all = registry.filter({ envType, role: 'generate' }).filter((spec) => {
-    // 图像后处理需要已有源图，不能作为第一步。
-    return spec.id !== 'process-image';
-  });
+  const all = registry
+    .filter({ envType, role: 'generate' })
+    .filter((spec) => {
+      // 图像后处理需要已有源图，不能作为第一步。
+      return spec.id !== 'process-image';
+    })
+    // 硬禁：先于一切排除，且**任何兜底都不会把它放回来**。
+    .filter((spec) => !forbidden.includes(spec.id));
   if (excludeTools.length === 0) return all;
   // 换方案时排除已失败的工具，逼决策层改选别的。
   const filtered = all.filter((spec) => !excludeTools.includes(spec.id));
-  // 全被排除时退回全集：有工具可用比"严格遵守排除"更重要。
+  // 全被软排除时退回全集：有工具可用比"严格遵守排除"更重要。
+  // 注意退的是 `all`（已经去掉硬禁的），不是原始全集。
   return filtered.length > 0 ? filtered : all;
 }
 
@@ -175,24 +210,46 @@ export class PlanAssembler {
     const { registry, decision } = this;
     const { context, envType } = request;
 
+    // ── 成本闸门：默认不碰"要逐次许可"的工具 ──────────────────────────
+    //
+    // 把用户那条纪律（"实测生图要经过我的许可"）写进代码，而不是靠人记着：
+    // 一次疏忽就是真金白银。默认关闭时，`render-image` 不进候选，
+    // image 环境会退到零成本的 `solid-image`；两个都没有就**如实失败**，
+    // 而不是悄悄花掉一次生图。
+    //
+    // **硬禁与软排除分两条通道**（见 `primaryCandidates` 的说明）：
+    // 合成一个列表的话，软排除的"全落空就退回全集"兜底会把闸门放回来的工具复活。
+    const forbidden = paidToolsToExclude(registry, request.allowPaidGeneration === true);
+    const softExcludes = this.options.excludeTools ?? [];
+
     // `webpage` 走**结构化链路**：结构由决策模型逐块决定，计划是"每块一个节点
     // + 一个组装节点"的扇入 DAG。它与下面那条单链路径不是同一个形状，
     // 所以在这里分流，而不是把两套逻辑缠在一个函数里。
     if (envType === 'webpage') {
+      const structuredExcludes = [...new Set([...softExcludes, ...forbidden])];
       return await assembleStructured({
         registry,
         decision,
         request,
-        ...(this.options.excludeTools !== undefined
-          ? { excludeTools: this.options.excludeTools }
-          : {}),
+        ...(structuredExcludes.length > 0 ? { excludeTools: structuredExcludes } : {}),
       });
     }
 
-    const candidates = primaryCandidates(registry, envType, this.options.excludeTools ?? []);
+    const candidates = primaryCandidates(registry, envType, softExcludes, forbidden);
     if (candidates.length === 0) {
+      // 说清"为什么一个候选都没有"。笼统地说"没有主产出工具"会让人去翻注册表，
+      // 而真实原因往往是成本闸门把它挡住了——那句话应当直接写在这里。
+      const blocked = paidToolsToExclude(registry, false);
+      const blockedHere = registry
+        .filter({ envType, role: 'generate' })
+        .filter((spec) => blocked.includes(spec.id))
+        .map((spec) => spec.id);
       throw new PlanError(
-        `环境 ${envType} 下没有任何可作为主产出的工具（角色为 generate）`,
+        `环境 ${envType} 下没有任何可作为主产出的工具（角色为 generate）` +
+          (blockedHere.length > 0
+            ? `。被成本闸门挡住的：${blockedHere.join(', ')}` +
+              `（要放行请显式传 allowPaidGeneration: true）`
+            : ''),
         'UNKNOWN_TOOL',
       );
     }

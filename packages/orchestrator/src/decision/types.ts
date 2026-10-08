@@ -27,8 +27,14 @@ export type AbstentionStatus = string;
 export interface DecisionContext {
   /** 用户目标原文。 */
   readonly goal: string;
-  /** 沙盒环境类型。 */
-  readonly envType: EnvType;
+  /**
+   * 沙盒环境类型。
+   *
+   * **可以缺席**：只有"目标分类"那一次提问发生在环境定下来之前。
+   * 那时硬填一个值会污染模型的判断依据——问"这是哪类任务"却又告诉它
+   * "环境是 copy"，等于先给了答案。
+   */
+  readonly envType?: EnvType | undefined;
   /** 硬约束，逐条列出。 */
   readonly constraints?: readonly string[];
   /** 已知事实键值对，例如 { 交付格式: '网页' }。 */
@@ -319,7 +325,11 @@ export function argmaxDeterministic(
 
 /** 把上下文序列化成 state 文本。确定性输出，同样的输入永远得到同样的字符串。 */
 export function serializeContext(context: DecisionContext): string {
-  const lines: string[] = [`目标: ${context.goal}`, `环境: ${context.envType}`];
+  const lines: string[] = [
+    `目标: ${context.goal}`,
+    // 环境未定时如实写"待判定"，而不是编一个：这一行正是分类那一问要回答的东西。
+    `环境: ${context.envType ?? '待判定'}`,
+  ];
   if (context.constraints !== undefined && context.constraints.length > 0) {
     lines.push('硬性约束:');
     for (const c of context.constraints) lines.push(`  - ${c}`);

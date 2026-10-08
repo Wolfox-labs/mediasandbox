@@ -65,6 +65,17 @@ export interface ToolSpec {
   readonly requiresCommands?: readonly string[] | undefined;
   /** 耗时量级提示。组装器可用它做并发调度。 */
   readonly costHint?: 'fast' | 'medium' | 'slow' | undefined;
+  /**
+   * 该工具会产生**按次计费的外部调用**，且属于用户要求"逐次申请"的那一类。
+   *
+   * 标上它的工具**默认不进候选**：`RunRequest.allowPaidGeneration` 为 `true`
+   * 时才放行。这是把"生图要经过许可"这条纪律**写进代码**，而不是靠人记着——
+   * 一次疏忽就是真金白银。
+   *
+   * 目前只标了图像生成（`render-image`）。文本生成工具同样计费，
+   * 但用户已授权那个模型，所以暂不在此列；要用同一道闸门时标上即可。
+   */
+  readonly requiresPermission?: boolean | undefined;
 }
 
 /** 工具执行时能拿到的一切。 */

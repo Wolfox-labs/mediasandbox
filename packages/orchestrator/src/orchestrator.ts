@@ -31,6 +31,7 @@ import {
   type NodeErrorInfo,
 } from './plan/executor.js';
 import { PlanError, type ExecutionPlan } from './plan/types.js';
+import { classifyEnvType } from './env-classify.js';
 import {
   DEFAULT_POLICY,
   FallbackStateMachine,
@@ -43,7 +44,16 @@ export interface RunRequest {
   readonly projectId: string;
   /** 用户目标原文。 */
   readonly goal: string;
-  readonly envType: EnvType;
+  /**
+   * 环境类型。
+   *
+   * 传 `'auto'` 表示**让决策层判断"这是什么类型的任务"**——设计稿 §3.2 的
+   * 排布流程第一问。判断结果会以 `env_classified` 事件带出来，
+   * 也出现在 `RunResult.envType` 上。
+   *
+   * 显式给一个环境就跳过分类：调用方更清楚自己要什么时，不该多花一次往返。
+   */
+  readonly envType: EnvType | 'auto';
   /** 语气等自由文本参数。 */
   readonly tone?: string | undefined;
   /** 交付前至少要有几个产物。 */
@@ -80,6 +90,13 @@ export interface RunRequest {
    * 否则那些 block 在 `/api/blocks` 里列得出来、却永远进不了候选集。
    */
   readonly blocks?: BlockRegistry | undefined;
+  /**
+   * 是否放行"需要逐次许可"的工具（目前是生图 `render-image`）。**默认 false**。
+   *
+   * 用户的硬规矩是「实测生图要经过我的许可」。把它写进代码而不是靠人记着：
+   * 关闭时 image 环境退到零成本的 `solid-image`，两个都没有就如实失败。
+   */
+  readonly allowPaidGeneration?: boolean | undefined;
 }
 
 export interface RunOptions {
@@ -99,6 +116,20 @@ export interface RunOptions {
 export type OrchestrationEvent =
   | { readonly type: 'run_started'; readonly projectId: string; readonly goal: string; readonly at: number }
   | { readonly type: 'attempt_started'; readonly attempt: number; readonly switches: number; readonly at: number }
+  | {
+      /**
+       * 目标分类有结果了：这次该用哪套环境。
+       *
+       * 单列一个事件而不是塞进 `run_started`：它可能是一次**决策层往返**
+       * （也可能因为候选唯一而没问），界面上要能看见"系统把它判成了网页任务"，
+       * 而不是让用户对着一个莫名其妙的结果猜。
+       */
+      readonly type: 'env_classified';
+      readonly envType: EnvType;
+      readonly source: 'explicit' | 'decision' | 'fallback';
+      readonly detail: string;
+      readonly at: number;
+    }
   | {
       readonly type: 'plan_assembled';
       readonly plan: ExecutionPlan;
@@ -126,6 +157,13 @@ export type OrchestrationEvent =
 
 export interface RunResult {
   readonly status: 'succeeded' | 'failed' | 'escalated';
+  /**
+   * **实际使用的环境**。
+   *
+   * 调用方传 `'auto'` 时，这里才是决策层判出来的那个——不给出来的话，
+   * 服务层只能从事件里反推，而它要拿这个值去填运行记录。
+   */
+  readonly envType: EnvType;
   /** 最终生效的执行结果。熔断且从未跑通时为 undefined。 */
   readonly execution?: ExecutionResult | undefined;
   /** 最终使用的计划。 */
@@ -250,7 +288,46 @@ export class Orchestrator {
       at: startedAt,
     });
 
-    const handle: SandboxHandle = await sandbox.create(request.projectId, request.envType);
+    // ── 目标分类：环境可能由决策层判断 ──────────────────────────────────
+    //
+    // 设计稿 §3.2 的排布流程第一问就是"目标类型"。此前它根本没实现：
+    // `envType` 直接从请求体读，不传就默认 `copy`——一个图像需求会被
+    // 静默当成文案任务处理。
+    //
+    // **只问一次**，而且发生在建沙盒之前：环境决定用哪套预设，
+    // 沙盒是按环境建的，顺序不能反。
+    let envType: EnvType;
+    if (request.envType === 'auto') {
+      const classifiedEnv = await classifyEnvType({
+        goal: request.goal,
+        registry,
+        decision,
+        ...(request.constraints !== undefined ? { constraints: request.constraints } : {}),
+        ...(decisionTimeoutMs !== undefined ? { timeoutMs: decisionTimeoutMs } : {}),
+      });
+      envType = classifiedEnv.envType;
+      emit({
+        type: 'env_classified',
+        envType,
+        source: classifiedEnv.source,
+        detail: classifiedEnv.rationale,
+        at: Date.now(),
+      });
+    } else {
+      // 调用方指定了就跳过分类：它更清楚自己要什么，不该多花一次往返。
+      // 但仍然发同一个事件——事件流里"环境是怎么定的"永远有一处可查，
+      // 而不是"有时有、有时没有"。
+      envType = request.envType;
+      emit({
+        type: 'env_classified',
+        envType,
+        source: 'explicit',
+        detail: '调用方指定了环境，跳过分类',
+        at: Date.now(),
+      });
+    }
+
+    const handle: SandboxHandle = await sandbox.create(request.projectId, envType);
     const fallback = new FallbackStateMachine(policy);
     const attempts: AttemptRecord[] = [];
 
@@ -272,7 +349,7 @@ export class Orchestrator {
     try {
       for (;;) {
         if (signal?.aborted === true) {
-          return this.finish('failed', lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, '调用方已取消', emit);
+          return this.finish('failed', envType, lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, '调用方已取消', emit);
         }
 
         attemptNumber += 1;
@@ -286,7 +363,7 @@ export class Orchestrator {
         // ── 1. 组装计划 ────────────────────────────────────────────────
         const context: DecisionContext = {
           goal: request.goal,
-          envType: request.envType,
+          envType,
           ...(request.constraints !== undefined ? { constraints: request.constraints } : {}),
           ...(request.facts !== undefined ? { facts: request.facts } : {}),
         };
@@ -299,7 +376,7 @@ export class Orchestrator {
           });
           const assembled = await assembler.assemble({
             context,
-            envType: request.envType,
+            envType,
             goal: request.goal,
             projectId: request.projectId,
             ...(request.tone !== undefined ? { tone: request.tone } : {}),
@@ -313,6 +390,9 @@ export class Orchestrator {
             ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
             ...(request.template !== undefined ? { template: request.template } : {}),
             ...(request.blocks !== undefined ? { blocks: request.blocks } : {}),
+            ...(request.allowPaidGeneration !== undefined
+              ? { allowPaidGeneration: request.allowPaidGeneration }
+              : {}),
             ...(decisionTimeoutMs !== undefined ? { decisionTimeoutMs } : {}),
           });
           plan = assembled.plan;
@@ -351,7 +431,7 @@ export class Orchestrator {
             });
             continue;
           }
-          return this.finish('escalated', lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, decisionResult.detail, emit);
+          return this.finish('escalated', envType, lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, decisionResult.detail, emit);
         }
 
         lastPlan = plan;
@@ -389,7 +469,7 @@ export class Orchestrator {
             status: 'succeeded',
             detail: `产出 ${execution.artifacts.length} 个产物`,
           });
-          return this.finish('succeeded', execution, plan, structure, handle, attempts, startedAt, undefined, emit);
+          return this.finish('succeeded', envType, execution, plan, structure, handle, attempts, startedAt, undefined, emit);
         }
 
         // ── 3. 失败 → 兜底 ────────────────────────────────────────────
@@ -438,6 +518,7 @@ export class Orchestrator {
         }
         return this.finish(
           'escalated',
+          envType,
           execution,
           plan,
           structure,
@@ -456,6 +537,7 @@ export class Orchestrator {
 
   private finish(
     status: 'succeeded' | 'failed' | 'escalated',
+    envType: EnvType,
     execution: ExecutionResult | undefined,
     plan: ExecutionPlan | undefined,
     structure: AssembleResult['structure'],
@@ -477,6 +559,7 @@ export class Orchestrator {
     const finalStructure = mergeBlockStatuses(structure, plan, execution);
     return {
       status,
+      envType,
       ...(execution !== undefined ? { execution } : {}),
       ...(plan !== undefined ? { plan } : {}),
       ...(finalStructure !== undefined ? { structure: finalStructure } : {}),

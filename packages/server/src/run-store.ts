@@ -240,6 +240,14 @@ export function toWireEvent(runId: string, event: OrchestrationEvent): Record<st
       };
     case 'attempt_failed':
       return { ...base, type: 'attempt_failed', detail: event.detail, kind: event.kind };
+    case 'env_classified':
+      return {
+        ...base,
+        type: 'env_classified',
+        envType: event.envType,
+        source: event.source,
+        detail: event.detail,
+      };
     case 'action_taken':
       return { ...base, type: 'action_taken', action: event.action, detail: event.detail };
     case 'run_finished':

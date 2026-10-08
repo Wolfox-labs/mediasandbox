@@ -358,6 +358,131 @@ describe('PlanAssembler', () => {
  *
  * 下面这个用例**穷举整个笛卡尔积**，任何一条组合出现非法端口引用都会失败。
  */
+describe('成本闸门：需要逐次许可的工具默认不进候选', () => {
+  it('闸门靠工具声明上的标记，不靠写死 id 列表', () => {
+    const registry = makeRegistry();
+    // 加一个按次计费的工具时，在它的声明上标一下就够了——
+    // 漏标的表现是"闸门悄悄失效"，所以这条断言是有意义的。
+    assert.equal(registry.getSpec('render-image').requiresPermission, true);
+    assert.notEqual(registry.getSpec('solid-image').requiresPermission, true);
+    assert.notEqual(registry.getSpec('draft-copy').requiresPermission, true);
+  });
+
+  it('默认不放行时，它**不在候选集里**——有人硬选也会被明确拒绝', async () => {
+    const registry = makeRegistry();
+    // `frontend` 环境还有别的产出候选，所以这里会真的去问模型；
+    // 画像环境则只剩 `solid-image` 一个候选，压根不问。
+    const client = new StubDecisionClient()
+      .onChoice('primary_tool', 'render-image')
+      .onNoul('needs_refine', false)
+      .onNoul('needs_verify', false);
+
+    await assert.rejects(
+      () =>
+        new PlanAssembler(registry, client).assemble({
+          context: { goal: '做一个带主视觉的页面', envType: 'frontend' },
+          envType: 'frontend',
+          goal: '做一个带主视觉的页面',
+        }),
+      /不在环境 frontend 的主产出候选集内/,
+    );
+  });
+
+  it('不放行时 image 环境退到零成本的 solid-image，且不必问模型', async () => {
+    const registry = makeRegistry();
+    let decisionCalls = 0;
+    const client = new StubDecisionClient();
+    const spy = {
+      kind: 'stub' as const,
+      health: async () => ({ ok: true, detail: 'spy' }),
+      decide: async (
+        ...args: Parameters<typeof client.decide>
+      ): ReturnType<typeof client.decide> => {
+        decisionCalls += 1;
+        return await client.decide(...args);
+      },
+    };
+
+    const { plan } = await new PlanAssembler(registry, spy).assemble({
+      context: { goal: '生成一张图', envType: 'image' },
+      envType: 'image',
+      goal: '生成一张图',
+      minArtifacts: 1,
+    });
+
+    // 候选唯一 → 直接采用，不问模型。这也说明确实只剩零成本那一条路。
+    assert.equal(plan.nodes[0]?.toolId, 'solid-image');
+    assert.ok(
+      plan.rationale.some((r) => r.includes('唯一') || r.includes('solid-image')),
+      `理由里应说明为什么选它：${plan.rationale.join(' | ')}`,
+    );
+    assert.ok(decisionCalls <= 1, '主产出唯一时不该为它多问一轮');
+  });
+
+  it('软排除落空时**不会**把硬闸门放回来的工具复活（实测踩过的坑）', async () => {
+    const registry = makeRegistry();
+    const client = new StubDecisionClient()
+      .onChoice('primary_tool', 'render-image')
+      .onNoul('needs_refine', false)
+      .onNoul('needs_verify', false);
+
+    // 复现真实事故的条件：image 环境只有两个主产出候选，
+    // `solid-image` 因为失败进了**软排除**（换方案），`render-image` 被**硬闸门**挡住。
+    //
+    // 两类排除从前共用一个列表，而软排除有一条"全落空就退回全集"的兜底——
+    // 它把被闸门挡住的 `render-image` 一并复活了，于是**在未获许可的情况下
+    // 真的调了一次生图**（1.3 MB PNG，81 秒）。
+    //
+    // 现在硬禁先于一切过滤，且任何兜底都只在"还没被硬禁的"里面退回。
+    const { plan } = await new PlanAssembler(registry, client, {
+      excludeTools: ['solid-image'],
+    }).assemble({
+      context: { goal: '生成一张图', envType: 'image' },
+      envType: 'image',
+      goal: '生成一张图',
+    });
+
+    assert.equal(plan.nodes[0]?.toolId, 'solid-image', '软排除落空时只该退回没被硬禁的');
+    assert.ok(
+      !plan.nodes.some((n) => n.toolId === 'render-image'),
+      '被闸门挡住的工具一个都不该出现',
+    );
+  });
+
+  it('闸门让候选空掉时，报错要说清"是谁挡的、怎么放行"', async () => {
+    // 只留 render-image 的注册表：闸门一关就一个候选都没有。
+    const onlyPaid = new ToolRegistry().register(
+      makeRegistry().getSpec('render-image'),
+      async () => ({ outputs: {}, artifacts: [], summary: '' }),
+    );
+    await assert.rejects(
+      () =>
+        new PlanAssembler(onlyPaid, new StubDecisionClient()).assemble({
+          context: { goal: '生成一张图', envType: 'image' },
+          envType: 'image',
+          goal: '生成一张图',
+        }),
+      /成本闸门挡住/,
+    );
+  });
+
+  it('放行之后它才进候选', async () => {
+    const registry = makeRegistry();
+    const client = new StubDecisionClient()
+      .onChoice('primary_tool', 'render-image')
+      .onNoul('needs_refine', false)
+      .onNoul('needs_verify', false);
+
+    const { plan } = await new PlanAssembler(registry, client).assemble({
+      context: { goal: '生成一张图', envType: 'image' },
+      envType: 'image',
+      goal: '生成一张图',
+      allowPaidGeneration: true,
+    });
+    assert.equal(plan.nodes[0]?.toolId, 'render-image');
+  });
+});
+
 describe('端口引用回归：穷举 envType × 主产出 × 打磨 × 收尾', () => {
   const FINALIZE_CHOICES = ['write-file', 'build-frontend', 'process-image'] as const;
 
@@ -386,6 +511,9 @@ describe('端口引用回归：穷举 envType × 主产出 × 打磨 × 收尾',
               envType,
               goal: '回归用例',
               minArtifacts: 1,
+              // 这条回归查的是**端口接线**，不是成本闸门，所以放行按次计费的工具。
+              // 闸门本身另有专门用例覆盖（见下面"成本闸门"那组）。
+              allowPaidGeneration: true,
             });
 
             // 组装器自己会带上 registry 校验一遍，这里再独立验一次：

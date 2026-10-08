@@ -622,6 +622,78 @@ describe('交付物落定：产物不随沙盒回收消失', () => {
   }
 }
 
+describe('目标分类（envType=auto）', () => {
+  it('不传 envType 时默认 auto，运行记录里写的是**判出来的那个**', async () => {
+    const ctx = await startServer({ decision: makeDecision().onChoice('env_type', 'copy') });
+    try {
+      const created = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // **刻意不传 envType**：从前这里会默认成 copy，
+        // 一个图像需求会被静默当成文案任务处理。
+        body: JSON.stringify({ goal: '写一段产品介绍' }),
+      });
+      assert.equal(created.status, 202);
+      const { runId } = (await created.json()) as { runId: string };
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+
+      const detail = (await (await fetch(`${ctx.origin}/api/runs/${runId}`)).json()) as {
+        status: string;
+        envType: string;
+      };
+      assert.equal(detail.status, 'succeeded');
+      // 记的必须是实际用的环境。停在 "auto" 的话，事后没法回答"这次走的哪条链路"。
+      assert.equal(detail.envType, 'copy');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('显式传 auto 也认，效果与不传一致', async () => {
+    const ctx = await startServer({ decision: makeDecision().onChoice('env_type', 'copy') });
+    try {
+      const created = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ goal: '写一段产品介绍', envType: 'auto' }),
+      });
+      assert.equal(created.status, 202);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('非法 envType 返回 400，并列出可用项（含 auto）', async () => {
+    const ctx = await startServer();
+    try {
+      const response = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ goal: 'g', envType: 'video' }),
+      });
+      assert.equal(response.status, 400);
+      const body = (await response.json()) as { error?: string };
+      assert.match(body.error ?? '', /auto/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('GET /api/tools?envType=auto 返回全部工具，而不是被 auto 过滤成空', async () => {
+    const ctx = await startServer();
+    try {
+      const all = (await (await fetch(`${ctx.origin}/api/tools`)).json()) as { tools: unknown[] };
+      const auto = (await (await fetch(`${ctx.origin}/api/tools?envType=auto`)).json()) as {
+        tools: unknown[];
+      };
+      assert.equal(auto.tools.length, all.tools.length);
+      assert.ok(auto.tools.length > 0);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
 describe('模板目录与 templateId 参数', () => {
   it('GET /api/templates 列出内置模板，含起手结构与限定范围', async () => {
     const ctx = await startServer({ structured: true });
