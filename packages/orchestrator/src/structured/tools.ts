@@ -38,6 +38,7 @@
  */
 import { ToolError, type ToolRegistration, type ToolResult, type ToolRuntime } from '../tools/types.js';
 import type { LlmClient } from '../llm/types.js';
+import { DEFAULT_VIEWPORT, defaultScreenshotDriver, type ScreenshotDriver } from '../render/screenshot.js';
 import { createBlockRegistry, type BlockRegistry } from './block-spec.js';
 import { deriveBrand, fillBlock } from './filler.js';
 import { validatePageSpec, type BlockInstance, type PageSpec } from './page-spec.js';
@@ -325,23 +326,104 @@ export function createAssemblePageTool(blocks: BlockRegistry): ToolRegistration 
 }
 
 /**
+ * 截图：**把已经落到沙盒里的页面拍成一张 PNG**。
+ *
+ * 与"装配页面"分开成一个节点，是因为它是**可选的**：默认不跑（零成本、零依赖），
+ * 显式要求时才挂在组装节点后面。真浏览器接入前后，这个节点的位置与语义都不变。
+ *
+ * 入参 `file` 默认取 `artifacts/index.html`——即装配节点刚写下的那一份。
+ * 截图驱动决定"怎么拍"：占位驱动产出确定性的示意图，真实驱动要浏览器。
+ */
+export function createScreenshotPageTool(driver: ScreenshotDriver): ToolRegistration {
+  return {
+    spec: {
+      id: 'screenshot-page',
+      label: '页面截图',
+      description: '把页面渲染成一张 PNG 图片，写入 artifacts/screenshot.png',
+      envTypes: ['webpage'],
+      role: 'transform',
+      category: 'structured',
+      inputs: [
+        { name: 'file', type: 'text', required: false, description: '要截图的页面路径' },
+        { name: 'width', type: 'number', required: false, description: '视口宽度' },
+        { name: 'height', type: 'number', required: false, description: '视口高度' },
+      ],
+      outputs: [
+        { name: 'file', type: 'text', required: true, description: '截图产物相对路径' },
+        { name: 'driver', type: 'text', required: true, description: '产出它的驱动名' },
+        { name: 'placeholder', type: 'boolean', required: true, description: '是否是占位图' },
+      ],
+      costHint: 'fast',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      const source =
+        typeof runtime.inputs['file'] === 'string' && runtime.inputs['file'] !== ''
+          ? (runtime.inputs['file'] as string)
+          : 'artifacts/index.html';
+
+      const html = await runtime.sandbox
+        .readFile(runtime.handle, source)
+        .then((bytes) => new TextDecoder().decode(bytes))
+        .catch(() => undefined);
+      if (html === undefined) {
+        throw new ToolError(
+          `工具 screenshot-page 找不到要截图的页面: ${source}`,
+          'EXECUTION_FAILED',
+          'screenshot-page',
+        );
+      }
+
+      const width =
+        typeof runtime.inputs['width'] === 'number' ? runtime.inputs['width'] : DEFAULT_VIEWPORT.width;
+      const height =
+        typeof runtime.inputs['height'] === 'number'
+          ? runtime.inputs['height']
+          : DEFAULT_VIEWPORT.height;
+
+      const shot = await driver.capture({ html, width, height });
+      const file = 'artifacts/screenshot.png';
+      await runtime.sandbox.writeFile(runtime.handle, file, shot.bytes);
+
+      return {
+        outputs: { file, driver: shot.driver, placeholder: shot.placeholder },
+        artifacts: await runtime.sandbox.collectArtifacts(runtime.handle),
+        // 占位这件事要写在摘要里：一张占位图和一张真截图在文件列表里长得一样，
+        // 不说明的话，事后没人能判断"当时到底有没有真渲染"。
+        summary:
+          `截图 ${file}（${shot.width}×${shot.height}，${shot.bytes.byteLength} 字节，` +
+          (shot.placeholder ? `占位驱动 ${shot.driver}：未接入真实浏览器` : `驱动 ${shot.driver}`) +
+          `）`,
+      };
+    },
+  };
+}
+
+/**
  * 结构化制作链路的工具全集。与 `BUILTIN_TOOLS` 分开，只在 webpage 环境装配。
  *
  * 传进来的 `blocks` 必须是**这一次运行真正在用的那个池子** ——
  * 包括服务层装了外部来源 block 的那个。传错了就会重现"选得到、填不了"的断链。
  */
-export function createStructuredTools(blocks: BlockRegistry): readonly ToolRegistration[] {
-  return [createFillBlockTool(blocks), createAssemblePageTool(blocks)].sort((a, b) =>
-    a.spec.id < b.spec.id ? -1 : 1,
-  );
+export function createStructuredTools(
+  blocks: BlockRegistry,
+  // 缺省用占位驱动：既有调用方（测试、单机脚本）不必被迫提供一个驱动，
+  // 而"什么都配不了也能跑通"这条底线保持不变。
+  screenshotDriver: ScreenshotDriver = defaultScreenshotDriver(),
+): readonly ToolRegistration[] {
+  return [
+    createFillBlockTool(blocks),
+    createAssemblePageTool(blocks),
+    createScreenshotPageTool(screenshotDriver),
+  ].sort((a, b) => (a.spec.id < b.spec.id ? -1 : 1));
 }
 
 /**
- * 默认工具集：装在**内置 block 池**上。
+ * 默认工具集：装在**内置 block 池**上，截图走占位驱动。
  *
  * 给不注入池子的调用方（测试、单机脚本）用。服务层应当改用
- * `createStructuredTools(它自己的 blocks)`。
+ * `createStructuredTools(它自己的 blocks, 它选的驱动)`。
  */
 export const STRUCTURED_TOOLS: readonly ToolRegistration[] = createStructuredTools(
   createBlockRegistry(),
+  defaultScreenshotDriver(),
 );

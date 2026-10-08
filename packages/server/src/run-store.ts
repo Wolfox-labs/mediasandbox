@@ -31,6 +31,14 @@ export interface RunRecord {
   readonly events: OrchestrationEvent[];
   /** 最终执行的产物清单。 */
   artifacts: Artifact[];
+  /**
+   * 这次运行用的沙盒 id。
+   *
+   * **必须落盘**：句柄在内存里，重启就没了，而沙盒本身（容器 / 工作区目录）比
+   * 服务进程活得久。不记下来的话，重启后"接着用那个沙盒"就无从谈起——
+   * 只能靠猜前缀，而本地实现的 id 带随机后缀，猜不出来。
+   */
+  sandboxId?: string | undefined;
   attempts: readonly AttemptRecord[];
   reason?: string | undefined;
   /** 计划摘要，便于前端展示"排布了什么"。 */

@@ -59,6 +59,13 @@ export interface AssembleRequest {
   /** 页面上是否标注每块的来源，便于演示与排查。 */
   readonly annotate?: boolean | undefined;
   /**
+   * 是否在组装完成后**截一张图**（写入 `artifacts/screenshot.png`）。默认 **false**。
+   *
+   * 默认关闭的理由与"默认不调生成层"一致：截图不是交付必需品，而它要么花浏览器的
+   * 钱、要么多一个产物。要求了才挂节点。
+   */
+  readonly screenshot?: boolean | undefined;
+  /**
    * **既定结构**：给了它就照它跑，结构不再由决策模型决定。
    *
    * 这是"带指定 PageSpec 重跑"的入口（用户改完结构再执行、或换目标补跑一次）。

@@ -71,10 +71,25 @@ export interface PersistedRunMeta {
   readonly finishedAt?: number | undefined;
   readonly artifacts: RunRecord['artifacts'];
   readonly attempts: RunRecord['attempts'];
+  readonly sandboxId?: string | undefined;
   readonly planSummary?: RunRecord['planSummary'];
   readonly structure?: RunRecord['structure'];
   readonly reason?: string | undefined;
   readonly error?: string | undefined;
+}
+
+/** 装载回来的一条运行记录。 */
+export interface LoadedRun {
+  readonly record: RunRecord;
+  readonly events: OrchestrationEvent[];
+  /**
+   * 装载时状态停在 `running`/`queued`（进程被杀，不是正常结束）。
+   *
+   * 单列一个标记而不是靠 `status` 判断：装载会把它如实改成 `failed`，
+   * 改完之后"它曾经在跑"这个事实就再也读不出来了——而那正是
+   * "要不要接管它留下的沙盒"的唯一依据。
+   */
+  interrupted?: boolean;
 }
 
 /**
@@ -147,7 +162,7 @@ export class JsonPersist implements RunPersist {
    * 正是这次要修掉的东西之一。单个文件读不动就跳过那一条并报错，
    * 不让一份坏数据把整个服务拖得起不来。
    */
-  async loadRuns(): Promise<{ record: RunRecord; events: OrchestrationEvent[] }[]> {
+  async loadRuns(): Promise<LoadedRun[]> {
     let entries: string[];
     try {
       entries = await readdir(this.runsDir);
@@ -155,7 +170,7 @@ export class JsonPersist implements RunPersist {
       return []; // 目录还不存在 = 第一次跑
     }
 
-    const out: { record: RunRecord; events: OrchestrationEvent[] }[] = [];
+    const out: LoadedRun[] = [];
     for (const entry of entries) {
       const dir = path.join(this.runsDir, entry);
       try {
@@ -177,6 +192,9 @@ export class JsonPersist implements RunPersist {
         item.record.status = 'failed';
         item.record.error = '服务重启，该运行已中断';
         item.record.finishedAt ??= Date.now();
+        // "被中断"要单独带出去：状态改成 failed 之后，"它留下的沙盒可能还活着"
+        // 这条线索就没了，而启动时的接管只认它。
+        item.interrupted = true;
       }
     }
 
@@ -265,6 +283,7 @@ function toMeta(record: RunRecord): PersistedRunMeta {
     ...(record.finishedAt !== undefined ? { finishedAt: record.finishedAt } : {}),
     artifacts: record.artifacts,
     attempts: record.attempts,
+    ...(record.sandboxId !== undefined ? { sandboxId: record.sandboxId } : {}),
     ...(record.planSummary !== undefined ? { planSummary: record.planSummary } : {}),
     ...(record.structure !== undefined ? { structure: record.structure } : {}),
     ...(record.reason !== undefined ? { reason: record.reason } : {}),
@@ -285,6 +304,7 @@ function fromMeta(meta: PersistedRunMeta): RunRecord {
     events: [],
     artifacts: Array.isArray(meta.artifacts) ? [...meta.artifacts] : [],
     attempts: Array.isArray(meta.attempts) ? meta.attempts : [],
+    ...(meta.sandboxId !== undefined ? { sandboxId: meta.sandboxId } : {}),
     ...(meta.planSummary !== undefined ? { planSummary: meta.planSummary } : {}),
     ...(meta.structure !== undefined ? { structure: meta.structure } : {}),
     ...(meta.reason !== undefined ? { reason: meta.reason } : {}),

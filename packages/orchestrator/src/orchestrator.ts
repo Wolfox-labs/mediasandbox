@@ -79,6 +79,12 @@ export interface RunRequest {
   /** 页面上是否标注每块的来源（生成式/确定性/用户），便于演示与排查。 */
   readonly annotate?: boolean | undefined;
   /**
+   * 是否在组装完成后截一张图（`artifacts/screenshot.png`）。默认 **false**。
+   *
+   * 与 `useGenerative` 同一条纪律：不做"顺手多做一件"的事，要求了才做。
+   */
+  readonly screenshot?: boolean | undefined;
+  /**
    * **既定结构**：照它跑，结构不再由决策模型决定。
    *
    * "带指定 PageSpec 重跑"的入口——用户改完结构再执行时，模型不该把结构
@@ -395,6 +401,7 @@ export class Orchestrator {
             ...(request.brand !== undefined ? { brand: request.brand } : {}),
             ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
             ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
+            ...(request.screenshot !== undefined ? { screenshot: request.screenshot } : {}),
             ...(request.pageSpec !== undefined ? { pageSpec: request.pageSpec } : {}),
             ...(request.template !== undefined ? { template: request.template } : {}),
             ...(request.blocks !== undefined ? { blocks: request.blocks } : {}),

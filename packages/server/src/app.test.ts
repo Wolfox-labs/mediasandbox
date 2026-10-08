@@ -5,6 +5,7 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { WebSocket } from 'ws';
 import { LocalSandbox } from '@mediasandbox/sandbox';
+import type { SandboxProvider } from '@mediasandbox/sandbox';
 import {
   BUILTIN_TOOLS,
   createBlockRegistry,
@@ -56,6 +57,10 @@ async function startServer(overrides: {
   pools?: LoadedPools;
   /** 交付物落定目录。给了之后产物不随沙盒回收消失。 */
   projectsDir?: string;
+  /** 覆盖沙盒 provider（"重启后接管沙盒"这类用例要指定自己的工作区根目录）。 */
+  providers?: Record<string, SandboxProvider>;
+  /** 收集服务端日志，用于断言"接管沙盒"这类只留日志的动作。 */
+  onLog?: (message: string) => void;
 } = {}): Promise<{
   origin: string;
   close: () => Promise<void>;
@@ -94,7 +99,8 @@ async function startServer(overrides: {
     ...(overrides.projectsDir !== undefined ? { projectsDir: overrides.projectsDir } : {}),
     decision: overrides.decision ?? makeDecision(),
     ...(overrides.llm !== undefined ? { llm: overrides.llm } : {}),
-    providers: { local: localSandbox },
+    ...(overrides.onLog !== undefined ? { onLog: overrides.onLog } : {}),
+    providers: overrides.providers ?? { local: localSandbox },
     defaultProvider: 'local',
     policy: FAST_POLICY,
     ...(overrides.maxRuns !== undefined
@@ -1069,6 +1075,86 @@ describe('持久化：重启之后东西还在', () => {
       await ctx.close();
     }
   });
+
+  it('重启后接管"被中断的运行"留下的沙盒；历史运行不接管', async () => {
+    const dir = path.join(dataRoot, 'adopt');
+    const workspaces = path.join(dataRoot, 'adopt-workspaces');
+    const fsp = await import('node:fs/promises');
+
+    // 造两个**真实存在**的沙盒工作区，模拟上一次进程留下的东西。
+    const liveId = `resume${process.pid}-webpage-deadbeef`;
+    const doneId = `finished${process.pid}-copy-cafebabe`;
+    const files: [string, string, string][] = [
+      [liveId, 'half.html', '<html>半成品</html>'],
+      [doneId, 'final.md', '# 已交付'],
+    ];
+    for (const [id, file, content] of files) {
+      await fsp.mkdir(path.join(workspaces, id, 'artifacts'), { recursive: true });
+      await fsp.writeFile(path.join(workspaces, id, 'artifacts', file), content, 'utf8');
+    }
+
+    const persist = new JsonPersist({ rootDir: dir });
+    const base = {
+      goal: '目标',
+      provider: 'local',
+      startedAt: Date.now() - 1000,
+      events: [],
+      attempts: [],
+    };
+    // 进程被杀时留在盘上的就是 running + 一个沙盒 id。
+    await persist.saveMeta({
+      ...base,
+      id: 'run-interrupted',
+      projectId: `resume${process.pid}`,
+      envType: 'webpage',
+      status: 'running',
+      sandboxId: liveId,
+      artifacts: [{ path: 'artifacts/half.html', size: 20, mimeHint: 'text/html' }],
+    });
+    // 正常结束的运行：产物在结束时就落定过一份，不需要接管它的沙盒。
+    await persist.saveMeta({
+      ...base,
+      id: 'run-finished',
+      projectId: `finished${process.pid}`,
+      envType: 'copy',
+      status: 'succeeded',
+      sandboxId: doneId,
+      artifacts: [{ path: 'artifacts/final.md', size: 12, mimeHint: 'text/markdown' }],
+    });
+    await persist.flush();
+
+    const logs: string[] = [];
+    const ctx = await startServer({
+      dataDir: dir,
+      // 没配 projectsDir：没有落定副本，产物只能从沙盒里读——
+      // 于是"有没有接管成功"这件事直接体现在能不能下载。
+      providers: { local: new LocalSandbox({ rootDir: workspaces }) },
+      onLog: (message) => logs.push(message),
+    });
+    try {
+      const detail = (await (await fetch(`${ctx.origin}/api/runs/run-interrupted`)).json()) as {
+        status: string;
+        error?: string;
+      };
+      // 状态如实标成中断（既有行为，别被接管这件事改掉）。
+      assert.equal(detail.status, 'failed');
+      assert.match(detail.error ?? '', /中断/);
+
+      const resumed = await fetch(`${ctx.origin}/api/runs/run-interrupted/artifacts/half.html`);
+      assert.equal(resumed.status, 200, '沙盒没被接管，产物读不出来');
+      assert.match(await resumed.text(), /半成品/);
+      assert.ok(
+        logs.some((line) => /已接管被中断运行/.test(line)),
+        `接管没留下日志：${logs.join(' | ')}`,
+      );
+
+      // 历史运行不接管 → 读不到（410）。这就是"只接管被中断的"的对照证据。
+      const historical = await fetch(`${ctx.origin}/api/runs/run-finished/artifacts/final.md`);
+      assert.equal(historical.status, 410);
+    } finally {
+      await ctx.close();
+    }
+  });
 });
 
 /**
@@ -1372,6 +1458,74 @@ describe('结构：带指定 PageSpec 重跑与定点编辑', () => {
       assert.deepEqual(types(await structureOf(second, runId)), ['hero', 'features']);
     } finally {
       await second.close();
+    }
+  });
+});
+
+/**
+ * 截图：**要求了才做**。
+ *
+ * 默认关闭与"默认不调生成层"是同一条纪律。这里两头都验——只验"要求了有"的话，
+ * 把默认值写反了照样绿；只验"默认没有"的话，功能其实没接上也照样绿。
+ */
+describe('截图：要求了才做', () => {
+  async function submit(
+    ctx: Awaited<ReturnType<typeof startServer>>,
+    extra: Record<string, unknown>,
+  ): Promise<string> {
+    const created = await fetch(`${ctx.origin}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        goal: '做一个产品介绍落地页',
+        envType: 'webpage',
+        candidateBlockIds: ['hero', 'cta'],
+        maxBlocks: 2,
+        ...extra,
+      }),
+    });
+    assert.equal(created.status, 202);
+    const { runId } = (await created.json()) as { runId: string };
+    await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+    return runId;
+  }
+
+  it('默认不产出截图，要求了产物里就有一张真 PNG', async () => {
+    const ctx = await startServer({ structured: true });
+    try {
+      const without = await submit(ctx, {});
+      const plain = (await (await fetch(`${ctx.origin}/api/runs/${without}`)).json()) as {
+        status: string;
+        artifacts: { path: string }[];
+      };
+      assert.equal(plain.status, 'succeeded');
+      assert.ok(
+        !plain.artifacts.some((a) => a.path === 'artifacts/screenshot.png'),
+        '没要求截图却产出了截图',
+      );
+
+      const asked = await submit(ctx, { screenshot: true });
+      const withShot = (await (await fetch(`${ctx.origin}/api/runs/${asked}`)).json()) as {
+        status: string;
+        artifacts: { path: string }[];
+      };
+      assert.equal(withShot.status, 'succeeded', JSON.stringify(withShot).slice(0, 300));
+      assert.ok(
+        withShot.artifacts.some((a) => a.path === 'artifacts/screenshot.png'),
+        '要求了截图却没有这个产物',
+      );
+
+      // 走产物下载通道拿一遍：确认它是真 PNG，而不是空文件或一段文本。
+      const download = await fetch(`${ctx.origin}/api/runs/${asked}/artifacts/screenshot.png`);
+      assert.equal(download.status, 200);
+      const bytes = new Uint8Array(await download.arrayBuffer());
+      assert.deepEqual(
+        [...bytes.subarray(0, 8)],
+        [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+        '下载到的不是 PNG',
+      );
+    } finally {
+      await ctx.close();
     }
   });
 });

@@ -131,7 +131,7 @@ describe('落盘：运行记录', () => {
     assert.deepEqual(at, [0, 1, 2, 3, 4], '顺序必须保持，补发历史靠的就是它');
   });
 
-  it('进程被杀留下的 running 记录，装载后如实标成 failed', async () => {
+  it('进程被杀留下的 running 记录，装载后如实标成 failed，并带上 interrupted 标记', async () => {
     const dir = dataDir();
     const persist = new JsonPersist({ rootDir: dir });
     new RunStore(persist).create({
@@ -148,6 +148,34 @@ describe('落盘：运行记录', () => {
     const loaded = await new JsonPersist({ rootDir: dir }).loadRuns();
     assert.equal(loaded[0]!.record.status, 'failed');
     assert.match(loaded[0]!.record.error ?? '', /重启/);
+    // `interrupted` 单独带出来：状态被改成 failed 之后，"它留下的沙盒可能还活着"
+    // 这条线索只能靠它——启动时的沙盒接管就认这一个标记。
+    assert.equal(loaded[0]!.interrupted, true);
+  });
+
+  it('正常结束的记录不带 interrupted 标记', async () => {
+    const dir = dataDir();
+    const persist = new JsonPersist({ rootDir: dir });
+    const store = new RunStore(persist);
+    store.create({ id: 'run-ok', projectId: 'p', goal: 'g', envType: 'copy', provider: 'local' });
+    store.update('run-ok', { status: 'succeeded' });
+    await persist.flush();
+
+    const loaded = await new JsonPersist({ rootDir: dir }).loadRuns();
+    assert.equal(loaded[0]!.record.status, 'succeeded');
+    assert.equal(loaded[0]!.interrupted, undefined);
+  });
+
+  it('sandboxId 往返一致——重启后要靠它找回句柄', async () => {
+    const dir = dataDir();
+    const persist = new JsonPersist({ rootDir: dir });
+    const store = new RunStore(persist);
+    store.create({ id: 'run-sbx', projectId: 'p', goal: 'g', envType: 'copy', provider: 'local' });
+    store.update('run-sbx', { status: 'succeeded', sandboxId: 'p-copy-deadbeef' });
+    await persist.flush();
+
+    const loaded = await new JsonPersist({ rootDir: dir }).loadRuns();
+    assert.equal(loaded[0]!.record.sandboxId, 'p-copy-deadbeef');
   });
 
   it('事件文件里坏了一行，只丢那一行', async () => {

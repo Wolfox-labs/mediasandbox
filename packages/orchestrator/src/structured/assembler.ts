@@ -30,6 +30,7 @@ const T = {
   fillBlock: 'fill-block',
   assemblePage: 'assemble-page',
   verify: 'verify-artifact',
+  screenshot: 'screenshot-page',
 } as const;
 
 /** 生成节点 id：按序号 + 工具 id，稳定可读。 */
@@ -45,6 +46,7 @@ function nodeId(index: number, toolId: string): string {
  *   2. 每块一个 `fill-block` 节点，彼此**无依赖** → 执行器会并发跑
  *   3. 一个 `assemble-page` 节点，用 `refs` 扇入全部块的产出
  *   4. 决策层要校验就追加 `verify-artifact`
+ *   5. **显式要求**才追加 `screenshot-page`（默认不跑：截图不是必需品）
  *
  * 第 2 步的"彼此无依赖"是有意的：同一层的节点在 `PlanExecutor` 里并发执行。
  * 若把它们串起来，就等于回到了"一个块失败了后面全不做"，
@@ -165,6 +167,24 @@ export async function assembleStructured(args: {
       note: '校验产物非空',
     });
     rationale.push('追加 verify-artifact：确认 artifacts/ 下有非空产物');
+    cursor += 1;
+  }
+
+  // ── 5. 截图（**显式要求才挂**） ──────────────────────────────────────
+  //
+  // 默认不挂：截图要么花浏览器的钱（真驱动），要么多一个产物（占位驱动），
+  // 而"默认零成本"是这个项目一贯的默认值。要求了就接在组装之后——
+  // 它截的必须是**组装完成的那一页**。
+  if (request.screenshot === true && registry.has(T.screenshot)) {
+    nodes.push({
+      id: nodeId(cursor, T.screenshot),
+      toolId: T.screenshot,
+      inputs: { file: { kind: 'literal', value: 'artifacts/index.html' } },
+      dependsOn: [assembleNodeId],
+      retryable: false,
+      note: '把组装好的页面截成一张图',
+    });
+    rationale.push('追加 screenshot-page：按要求把页面截图写入 artifacts/');
     cursor += 1;
   }
 

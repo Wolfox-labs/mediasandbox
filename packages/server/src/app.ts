@@ -177,8 +177,9 @@ function errorResponse(res: Response, status: number, message: string, detail?: 
 export function createServer(deps: ServerDeps): CreateServerResult {
   const store = new RunStore(deps.persist);
 
-  /** runId → 沙盒 id。产物下载时用来找回句柄。 */
-  const sandboxIdByRun = new Map<string, string>();
+  // 沙盒 id 记在**运行记录**上（`record.sandboxId`），不再单独维护一张内存表。
+  // 两张表就意味着两处真相：重启后内存表空了、产物明明还在那个沙盒里，
+  // 却再也找不到它。记在记录上，落盘与读回都跟着记录走。
   /** 在途运行的 promise，用于优雅关闭。 */
   const inFlight = new Set<Promise<void>>();
   /** WebSocket 订阅者。显式记录 socket，便于断开时精确移除。 */
@@ -199,10 +200,10 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     while (finishedRuns.length > retention) {
       const oldest = finishedRuns.shift();
       if (oldest === undefined) break;
-      const sandboxId = sandboxIdByRun.get(oldest.runId);
-      if (sandboxId === undefined) continue;
       const record = store.get(oldest.runId);
-      const provider = record === undefined ? undefined : deps.providers[record.provider];
+      const sandboxId = record?.sandboxId;
+      if (record === undefined || sandboxId === undefined) continue;
+      const provider = deps.providers[record.provider];
       try {
         if (provider !== undefined) {
           const handle = await provider.get(sandboxId);
@@ -211,7 +212,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       } catch {
         // 销毁失败不该影响新运行的提交：最坏结果是多留一个工作区。
       } finally {
-        sandboxIdByRun.delete(oldest.runId);
+        // 沙盒没了，id 也就过期了：留着它会让"重启后接管"去认一个已经不存在的沙盒。
+        store.update(oldest.runId, { sandboxId: undefined });
       }
     }
   }
@@ -305,13 +307,47 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
     const provider = deps.providers[record.provider];
     if (provider === undefined) return { error: 'NO_SANDBOX' };
-    const sandboxId = sandboxIdByRun.get(record.id);
-    const handle = sandboxId === undefined ? undefined : await provider.get(sandboxId);
+    const handle =
+      record.sandboxId === undefined ? undefined : await provider.get(record.sandboxId);
     if (handle === undefined) return { error: 'NO_SANDBOX' };
     try {
       return { bytes: await provider.readFile(handle, artifact.path) };
     } catch (error) {
       return { error: 'READ_FAILED', detail: String(error) };
+    }
+  }
+
+  /**
+   * 启动时把**被中断的运行**留下的沙盒接回来。
+   *
+   * 只接管这一类：它们的沙盒八成还活着，而历史运行的沙盒要么已被按额度回收、
+   * 要么根本不需要——产物在运行结束时就落定过一份。每次 `adopt` 都要 list + inspect
+   * （容器实现），对一堆历史运行做这件事只会拖慢启动。
+   *
+   * 失败**只记日志**：接管不上不影响启动，也不改变任何运行记录的状态。
+   */
+  async function adoptInterruptedSandboxes(
+    items: readonly { readonly record: RunRecord; readonly interrupted?: boolean | undefined }[],
+  ): Promise<void> {
+    for (const { record, interrupted } of items) {
+      if (interrupted !== true || record.sandboxId === undefined) continue;
+      const provider = deps.providers[record.provider];
+      if (provider === undefined) continue;
+      const envType = (ENV_TYPES as readonly string[]).includes(record.envType)
+        ? (record.envType as EnvType)
+        : undefined;
+      try {
+        await provider.adopt(record.sandboxId, {
+          projectId: record.projectId,
+          ...(envType !== undefined ? { envType } : {}),
+        });
+        deps.onLog?.(`已接管被中断运行 ${record.id} 的沙盒 ${record.sandboxId}`);
+      } catch (error) {
+        deps.onLog?.(
+          `接管沙盒失败（${record.id} / ${record.sandboxId}）：` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -357,6 +393,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       readonly template?: TemplateSpec | undefined;
       /** 既定结构：照它跑，结构不再由决策模型决定（"带指定 PageSpec 重跑"）。 */
       readonly pageSpec?: PageSpec | undefined;
+      /** 是否在组装完成后截图（`artifacts/screenshot.png`）。默认 false。 */
+      readonly screenshot?: boolean | undefined;
     };
   }): Promise<void> {
     const { record, provider, goal, envType } = args;
@@ -400,9 +438,10 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         },
       );
 
-      sandboxIdByRun.set(record.id, result.handle.id);
-
       store.update(record.id, {
+        // 沙盒 id 跟着记录落盘：重启之后还能找回这个句柄（容器实现靠容器名接管，
+        // 本地实现靠目录名）。不记的话，重启就等于把这个沙盒丢了。
+        sandboxId: result.handle.id,
         status: controller.signal.aborted
           ? 'cancelled'
           : result.status === 'succeeded'
@@ -624,6 +663,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           ? { useGenerative: body['useGenerative'] }
           : {}),
         ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
+        // 截图默认关：要求了才挂节点（与 useGenerative 同一条纪律）。
+        ...(typeof body['screenshot'] === 'boolean' ? { screenshot: body['screenshot'] } : {}),
         // 既定结构：带上它，结构**不再由决策模型决定**（templateId / candidateBlockIds /
         // maxBlocks 也就一并被盖过）。projectId 与 goal 取本次运行的：
         // 结构是上一次的产出，而这次要按这次的目标填、写进这次的沙盒。
@@ -1228,6 +1269,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       if (deps.persist === undefined) return 0;
       const items = await deps.persist.loadRuns();
       for (const item of items) store.adopt(item.record, item.events);
+      await adoptInterruptedSandboxes(items);
       return items.length;
     },
     async flushPersist(): Promise<void> {

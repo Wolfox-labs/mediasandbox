@@ -94,6 +94,16 @@ export {
   type GenerateSlotResult,
 } from './structured/filler.js';
 export { escapeHtml, pageStyles, renderPage, type RenderOptions } from './structured/renderer.js';
+// 截图：接口 + 确定性占位实现。真浏览器驱动将来作为另一个实现接进来。
+export {
+  DEFAULT_VIEWPORT,
+  PlaceholderScreenshotDriver,
+  defaultScreenshotDriver,
+  encodePng,
+  type Screenshot,
+  type ScreenshotDriver,
+  type ScreenshotRequest,
+} from './render/screenshot.js';
 export {
   applyTemplate,
   builtinTemplates,
@@ -110,6 +120,7 @@ export {
 export {
   createAssemblePageTool,
   createFillBlockTool,
+  createScreenshotPageTool,
   createStructuredTools,
   STRUCTURED_TOOLS,
 } from './structured/tools.js';

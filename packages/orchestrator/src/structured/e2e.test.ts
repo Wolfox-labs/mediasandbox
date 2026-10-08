@@ -81,6 +81,8 @@ async function runStructured(args: {
   readonly candidateBlockIds?: readonly string[];
   readonly maxBlocks?: number;
   readonly annotate?: boolean;
+  /** 是否要求截图。省略即不要求（默认零成本）。 */
+  readonly screenshot?: boolean;
   /** 注入自定义 block 池；省略即内置池。 */
   readonly blocks?: BlockRegistry;
   /** 套用的模板。 */
@@ -106,6 +108,7 @@ async function runStructured(args: {
         : {}),
       ...(args.maxBlocks !== undefined ? { maxBlocks: args.maxBlocks } : {}),
       ...(args.annotate !== undefined ? { annotate: args.annotate } : {}),
+      ...(args.screenshot !== undefined ? { screenshot: args.screenshot } : {}),
     },
     {
       registry: registry(pool),
@@ -700,6 +703,63 @@ describe('结构化链路：带指定结构重跑', () => {
       result.plan?.rationale.some((line) => line.includes('结构由调用方给定')),
       `计划依据里没说明结构来源：${(result.plan?.rationale ?? []).join(' | ')}`,
     );
+    await sandbox.destroy(result.handle);
+  });
+});
+
+/**
+ * 「按要求截图」：默认不截，要求了才挂节点。
+ *
+ * 与"默认不调生成层"是同一条纪律——不做顺手多做的事，要求了就做到位。
+ */
+describe('结构化链路：按要求截图', () => {
+  it('默认不截图——零成本是默认值', async () => {
+    const result = await runStructured({
+      projectId: 'e2e-shot-off',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'cta'],
+      maxBlocks: 2,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    assert.ok(
+      !(result.plan?.nodes ?? []).some((n) => n.toolId === 'screenshot-page'),
+      '没要求截图却挂了截图节点',
+    );
+    const paths = (result.execution?.artifacts ?? []).map((a) => a.path);
+    assert.ok(!paths.includes('artifacts/screenshot.png'));
+    await sandbox.destroy(result.handle);
+  });
+
+  it('要求了就截图，产物是一张真 PNG', async () => {
+    const result = await runStructured({
+      projectId: 'e2e-shot-on',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'cta'],
+      maxBlocks: 2,
+      screenshot: true,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+    assert.ok(
+      (result.plan?.nodes ?? []).some((n) => n.toolId === 'screenshot-page'),
+      '要求了截图却没挂节点',
+    );
+
+    const outcome = (result.execution?.outcomes ?? []).find((o) => o.toolId === 'screenshot-page');
+    assert.equal(outcome?.status, 'succeeded', outcome?.error ?? '截图节点没跑成');
+
+    const bytes = await sandbox.readFile(result.handle, 'artifacts/screenshot.png');
+    assert.deepEqual(
+      [...bytes.subarray(0, 8)],
+      [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+      '产物不是 PNG',
+    );
+    // 尺寸写在 IHDR 里（签名 8 + 长度 4 + "IHDR" 4 → 宽在高 16 字节处）。
+    const buf = Buffer.from(bytes);
+    assert.equal(buf.readUInt32BE(16), 1280, '宽度不是默认视口');
+    assert.equal(buf.readUInt32BE(20), 800, '高度不是默认视口');
+
+    const paths = (result.execution?.artifacts ?? []).map((a) => a.path);
+    assert.ok(paths.includes('artifacts/screenshot.png'), '截图没进产物清单');
     await sandbox.destroy(result.handle);
   });
 });
