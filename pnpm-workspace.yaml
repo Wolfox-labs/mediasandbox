@@ -11,7 +11,12 @@ packages:
 #
 # esbuild 相反，**必须允许**：它的 postinstall 负责放置平台原生二进制，
 # 不跑就没有可执行的 esbuild，Vite 起不来。
+# @parcel/watcher 也设为 false：它是 **sass 的可选依赖**，而 sass 的 install
+# 脚本是 `node scripts/build-from-source.js`（真的去编译）。我们只用 sass 的库
+# API，不用它的 watch 模式，且平台预编译绑定（@parcel/watcher-win32-x64）
+# 本来就随包装好了 —— 没有任何理由在本机跑一次 node-gyp。
 allowBuilds:
+  '@parcel/watcher': false
   cpu-features: false
   esbuild: true
   protobufjs: false

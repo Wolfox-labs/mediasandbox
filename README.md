@@ -79,9 +79,16 @@ curl http://127.0.0.1:8787/api/runs/<runId>
 改前端时用 Vite 热更新（`/api` 与 `/ws` 自动代理到后端）：
 
 ```bash
-pnpm start   # 终端 1：后端
-pnpm dev     # 终端 2：前端 → http://127.0.0.1:5173/
+pnpm start     # 终端 1：后端 → http://127.0.0.1:8787/
+pnpm dev       # 终端 2：React 工作台 → http://127.0.0.1:5173/
+pnpm dev:admin # 终端 2 的另一选择：Vue 管理端 → http://127.0.0.1:8848/
 ```
+
+**两套前端并存**（设计稿的"先并存后切换"）：`packages/web`（React）是后端托管的那套；
+`packages/admin`（Vue 3 + Element Plus，由 pure-admin-thin 模板落成）是新的管理端，
+结构化制作这批新交互只在它上面做。管理端目前**只跑在开发服务器上**，尚未由后端托管；
+它访问的后端地址由 Vite 代理给 `http://127.0.0.1:8787`（可用 `MEDIASANDBOX_BACKEND` 覆盖）。
+详见 [packages/admin/README.md](packages/admin/README.md)。
 
 ### Docker 沙盒
 
@@ -111,6 +118,12 @@ packages/
 │   ├── features/preview/      实时预览（网页 / 图片 / 文本）
 │   ├── features/sandbox/      沙盒环境管理
 │   └── features/tools/        工具链（候选集可视化）
+│
+├── admin/           管理端（Vue 3 + Element Plus，由 pure-admin-thin 模板落成，与 web 并存）
+│   ├── api/mediasandbox/      REST 客户端 + 与后端对齐的类型 + 事件流折叠（纯函数）
+│   ├── composables/           useRunStream（WebSocket 订阅 + 断线重连）
+│   ├── router/modules/        六个页面的路由与菜单（自动导入）
+│   └── views/mediasandbox/    创作工作台 / 结构画布 / 素材管理 / 运行与产物 / 工具目录 / 沙盒
 │
 ├── sandbox/         沙盒抽象 + 两个实现
 │   ├── types.ts               ★ SandboxProvider 接口
@@ -273,7 +286,9 @@ pnpm -r test
 
 | 项 | 说明 |
 |---|---|
-| **目标分类未实现** | `envType` 由调用方指定，决策层没参与"这是什么类型的任务"的判断 |
+| **目标分类：能力已实现，旧界面无入口** | 决策层会判定任务类型并在流水里留痕（`env_classified`，含判定依据与来源）；Vue 管理端可选「自动判定」并显示留痕。旧的 React 工作台仍需手动指定环境 |
+| **管理端只跑在开发服务器上** | `packages/admin` 目前不随后端一起托管（后端托管的是 React 产物），要 `pnpm dev:admin` 另起。设计稿的"覆盖完再下线旧前端"这一步没做 |
+| **改完结构不能重新生成** | 结构编辑（增删移）会立刻落库、重启后仍在，但 `POST /api/runs` 还没读取 `pageSpec`，所以改动暂时体现不到产物上；结构画布页已据实标注 |
 | 自定义 block 的渲染 | 填充与结构决策完全可用，但**没有专属渲染器**，页面上落成占位块——`POST /api/blocks` 的响应里也写明了这一点 |
 | 沙盒句柄不跨重启 | 运行记录已落盘（重启后还在、产物也下载得到），但 `DockerSandbox.adopt()` 不在接口里，重启后无法接管旧容器 |
 | 模板与 block 无版本管理 | 改了模板，已有项目不会跟着变（也不该变，但"怎么办"还没定） |

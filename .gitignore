@@ -5,6 +5,12 @@ dist/
 .env
 .env.*
 !.env.example
+# 例外：`packages/admin` 是 vendored 的 pure-admin-thin 模板，它的 `.env*`
+# 是**必须入库**的运行配置（Vite 靠它取端口与路由历史模式），缺了就起不来。
+# 上面这两条没有目录锚定，会匹配任意深度 —— 所以必须逐条救回来，
+# 否则文件静默不进仓库，和当初 `projects/` 吞掉源码目录是同一个坑。
+!packages/admin/.env
+!packages/admin/.env.*
 
 # 运行期数据。
 #
