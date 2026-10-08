@@ -22,11 +22,13 @@ function keep(projectId: string): string {
 }
 
 after(async () => {
-  // LocalSandbox 的 id 带随机后缀，这里按已知前缀逐个尝试销毁。
+  // LocalSandbox 的 id 带随机后缀，凭 projectId 前缀**猜不出**完整 id，
+  // 所以这一轮清理实际上一直找不到东西（历史行为如此）。保留它是 best-effort：
+  // 真正需要接管时，id 来自运行记录里的 sandboxId，不靠猜。
   for (const projectId of created) {
     for (const envType of ['copy', 'frontend', 'image'] as const) {
       const found = await sandbox
-        .adopt(`${projectId}-${envType}`, projectId, envType)
+        .adopt(`${projectId}-${envType}`, { projectId, envType })
         .catch(() => undefined);
       if (found !== undefined) await sandbox.destroy(found);
     }

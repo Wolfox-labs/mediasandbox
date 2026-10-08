@@ -56,3 +56,50 @@ describe('产物判定', () => {
     }
   });
 });
+
+describe('LocalSandbox · 接管已有沙盒', () => {
+  it('不给 hint 时从目录名反推身份，带短横线的 projectId 也切得对', async () => {
+    const sandbox = new LocalSandbox({ rootDir: path.join(rootDir, 'adopt') });
+    // projectId 里有短横线：从左往右切会把 "my-project" 切成两段。
+    const created = await sandbox.create(`my-project-v2${process.pid}`, 'webpage');
+    try {
+      // 模拟进程重启：换一个实例、清空内存记录，只能靠目录名认回来。
+      const fresh = new LocalSandbox({ rootDir: path.join(rootDir, 'adopt') });
+      assert.equal(await fresh.get(created.id), undefined, '新实例本来就不该有内存记录');
+
+      const adopted = await fresh.adopt(created.id);
+      assert.equal(adopted.id, created.id);
+      assert.equal(adopted.projectId, `my-project-v2${process.pid}`);
+      assert.equal(adopted.envType, 'webpage');
+      assert.equal(adopted.workDir, created.workDir);
+
+      // 接管后能真的执行，而不是只有个句柄。
+      const result = await fresh.exec(adopted, 'node -e "process.stdout.write(\'ok\')"');
+      assert.equal(result.stdout, 'ok');
+    } finally {
+      await sandbox.destroy(created);
+    }
+  });
+
+  it('目录名认不出来又不给 hint 时抛错，不编一个身份', async () => {
+    const sandbox = new LocalSandbox({ rootDir: path.join(rootDir, 'adopt-unknown') });
+    // 手工造一个不符合 <projectId>-<envType>-<随机> 的目录（例如历史遗留或人工创建）。
+    const fsp = await import('node:fs/promises');
+    await fsp.mkdir(path.join(rootDir, 'adopt-unknown', 'legacy-dir'), { recursive: true });
+
+    await assert.rejects(
+      () => sandbox.adopt('legacy-dir'),
+      (error: unknown) =>
+        error instanceof Error && /无法确定沙盒/.test(error.message) && 'code' in error
+          ? (error as { code?: string }).code === 'NO_SUCH_SANDBOX'
+          : false,
+    );
+
+    // 给了 hint 就能接管：hint 存在的意义就是这个。
+    const adopted = await sandbox.adopt('legacy-dir', {
+      projectId: `legacy${process.pid}`,
+      envType: 'copy',
+    });
+    assert.equal(adopted.envType, 'copy');
+  });
+});

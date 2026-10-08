@@ -1,19 +1,26 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
+  ENV_TYPES,
   SandboxError,
+  type AdoptHint,
   type Artifact,
   type EnvType,
   type ExecOptions,
   type ExecResult,
   type FileEntry,
+  type ProcessOutput,
+  type ProcessStatus,
   type ResourceStats,
   type SandboxHandle,
+  type SandboxProcess,
   type SandboxProvider,
+  type StartProcessOptions,
 } from '../types.js';
 import { getPreset } from '../env-presets.js';
-import { runCommand } from '../util/proc.js';
+import { OutputBuffer, defaultShell, killTree, runCommand } from '../util/proc.js';
 import { assertValidProjectId, resolveInside, toPosixRelative } from '../util/paths.js';
 import { matchesGlob } from '../util/glob.js';
 import { mimeHintFor } from '../util/mime.js';
@@ -33,6 +40,25 @@ interface LocalRecord {
 const SKIP_DIRS = new Set(['node_modules', '.git']);
 
 /**
+ * 从目录名反推项目与环境。
+ *
+ * 名字形如 `<projectId>-<envType>-<8位随机>`（见 `create`），而 projectId
+ * **允许包含短横线**（`PROJECT_ID_RE` 放行 `-`），所以从左往右切会切错。
+ * 只能从右往左：末段是随机后缀，倒数第二段必须是已知环境名，剩下的全归 projectId。
+ */
+function identityFromDirName(
+  sandboxId: string,
+): { readonly projectId: string; readonly envType: EnvType } | undefined {
+  const parts = sandboxId.split('-');
+  if (parts.length < 3) return undefined;
+  const envRaw = parts[parts.length - 2];
+  if (envRaw === undefined || !(ENV_TYPES as readonly string[]).includes(envRaw)) return undefined;
+  const projectId = parts.slice(0, -2).join('-');
+  if (projectId === '') return undefined;
+  return { projectId, envType: envRaw as EnvType };
+}
+
+/**
  * 本地沙盒：以独立目录作为工作区边界。
  *
  * 边界强度说明（诚实声明）：这是**路径级**隔离，不是安全边界。进程仍以当前用户身份
@@ -42,6 +68,8 @@ export class LocalSandbox implements SandboxProvider {
   readonly kind = 'local' as const;
   private readonly rootDir: string;
   private readonly records = new Map<string, LocalRecord>();
+  /** 活着的长驻进程，按 sandboxId 归组——销毁沙盒时要把它们一起带走。 */
+  private readonly processes = new Map<string, LocalProcessRecord[]>();
 
   constructor(options: LocalSandboxOptions) {
     this.rootDir = path.resolve(options.rootDir);
@@ -86,13 +114,28 @@ export class LocalSandbox implements SandboxProvider {
   }
 
   /** 让同一进程重启后也能复用已有目录。 */
-  async adopt(sandboxId: string, projectId: string, envType: EnvType): Promise<SandboxHandle> {
-    assertValidProjectId(projectId);
+  async adopt(sandboxId: string, hint: AdoptHint = {}): Promise<SandboxHandle> {
     const workDir = path.join(this.rootDir, sandboxId);
     const stat = await fs.stat(workDir).catch(() => undefined);
     if (stat === undefined || !stat.isDirectory()) {
       throw new SandboxError(`沙盒目录不存在: ${workDir}`, 'NO_SUCH_SANDBOX');
     }
+
+    // 身份优先用调用方给的；没给才从目录名反推。两处都推不出来就抛错——
+    // 拿一个 projectId='unknown' 的句柄继续跑，会把假项目名写进
+    // SANDBOX_PROJECT_ID 与派生文案里，那种错比"找不到"难查得多。
+    const derived = identityFromDirName(sandboxId);
+    const projectId = hint.projectId ?? derived?.projectId;
+    const envType = hint.envType ?? derived?.envType;
+    if (projectId === undefined || envType === undefined) {
+      throw new SandboxError(
+        `无法确定沙盒 ${sandboxId} 的项目与环境，请显式给出：` +
+          `adopt(id, { projectId, envType })`,
+        'NO_SUCH_SANDBOX',
+      );
+    }
+    assertValidProjectId(projectId);
+
     const handle: SandboxHandle = {
       id: sandboxId,
       projectId,
@@ -174,6 +217,143 @@ export class LocalSandbox implements SandboxProvider {
     });
   }
 
+  /**
+   * 起一个长驻进程（本地实现）。
+   *
+   * `tty` 在本地被忽略：这里两个流本来就是两条独立的管道，
+   * 没有"合并成一条"这回事，也没有终端要分配（容器侧才有）。
+   */
+  async start(
+    handle: SandboxHandle,
+    command: string,
+    options: StartProcessOptions = {},
+  ): Promise<SandboxProcess> {
+    const live = this.require(handle.id);
+    const preset = getPreset(live.envType);
+    const cwd =
+      options.cwd === undefined || options.cwd === ''
+        ? live.workDir
+        : await this.safePath(live, options.cwd);
+
+    const cwdStat = await fs.stat(cwd).catch(() => undefined);
+    if (cwdStat === undefined || !cwdStat.isDirectory()) {
+      // 目录不存在时 spawn 报的是 ENOENT，很容易被误读成"命令找不到"。
+      throw new SandboxError(`工作目录不存在: ${options.cwd ?? '.'}`, 'NO_SUCH_FILE');
+    }
+
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      ...preset.baselineEnv,
+      ...options.env,
+      SANDBOX_WORKDIR: live.workDir,
+      SANDBOX_ENV_TYPE: live.envType,
+      SANDBOX_PROJECT_ID: live.projectId,
+    };
+
+    const limit = options.maxOutputBytes ?? 1024 * 1024;
+    const isWindows = process.platform === 'win32';
+    const shell = defaultShell();
+    const child = spawn(shell.file, [...shell.prefixArgs, command], {
+      cwd,
+      env: env as NodeJS.ProcessEnv,
+      windowsHide: true,
+      windowsVerbatimArguments: isWindows,
+      detached: !isWindows,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // 起不来的要**当场如实失败**：给一个永远不动的句柄，调用方会一直等它出输出。
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', () => resolve());
+      child.once('error', (error) =>
+        reject(
+          new SandboxError(`启动长驻进程失败: ${error.message}`, 'UNSUPPORTED', { cause: error }),
+        ),
+      );
+    });
+
+    const out = new OutputBuffer(limit);
+    const err = new OutputBuffer(limit);
+    const state: { running: boolean; exitCode: number | null } = { running: true, exitCode: null };
+
+    // 进程自己退出是常态（命令行工具跑完就退）：只记状态，不抛错。
+    child.on('close', (code) => {
+      state.running = false;
+      state.exitCode = code ?? -1;
+    });
+    child.on('error', () => {
+      state.running = false;
+    });
+    child.stdout?.on('data', (chunk: Buffer) => out.push(chunk));
+    child.stderr?.on('data', (chunk: Buffer) => err.push(chunk));
+
+    const id = `${live.id}-p${randomUUID().slice(0, 8)}`;
+    const record: LocalProcessRecord = {
+      id,
+      command,
+      startedAt: Date.now(),
+      child,
+      out,
+      err,
+      state,
+      stop: async (): Promise<void> => {
+        child.stdin?.end();
+        if (state.running) {
+          const pid = child.pid;
+          if (pid !== undefined) {
+            // taskkill 返回 ≠ 子进程的 'close' 已经派发。kill() 的语义是
+            // "回来的时候它已经死了"，所以这里等事件真的到达（有宽限，不能死等）。
+            const closed = new Promise<void>((resolve) => {
+              child.once('close', () => resolve());
+              const timer = setTimeout(resolve, 5_000);
+              timer.unref();
+            });
+            await killTree(pid);
+            if (state.running) await closed;
+          }
+        }
+        state.running = false;
+      },
+    };
+    const list = this.processes.get(live.id) ?? [];
+    list.push(record);
+    this.processes.set(live.id, list);
+
+    return {
+      id,
+      command,
+      startedAt: record.startedAt,
+      write: async (data: string): Promise<boolean> => {
+        if (!state.running || child.stdin === null || child.stdin.destroyed) return false;
+        child.stdin.write(data);
+        // 返回 false 只表示内核缓冲满了，不是失败：数据仍会在排水后送出。
+        return true;
+      },
+      read: async (): Promise<ProcessOutput> => {
+        const takenOut = out.take();
+        const takenErr = err.take();
+        return {
+          stdout: takenOut.text,
+          stderr: takenErr.text,
+          truncated: takenOut.truncated || takenErr.truncated,
+        };
+      },
+      status: async (): Promise<ProcessStatus> => ({
+        running: state.running,
+        exitCode: state.exitCode,
+      }),
+      kill: async (): Promise<void> => {
+        const current = this.processes.get(live.id);
+        if (current !== undefined) {
+          const index = current.indexOf(record);
+          if (index >= 0) current.splice(index, 1);
+          if (current.length === 0) this.processes.delete(live.id);
+        }
+        await record.stop();
+      },
+    };
+  }
+
   async writeFile(handle: SandboxHandle, relPath: string, content: string | Uint8Array): Promise<void> {
     const live = this.require(handle.id);
     const target = await this.safePath(live, relPath);
@@ -253,6 +433,31 @@ export class LocalSandbox implements SandboxProvider {
     const record = this.records.get(handle.id);
     if (record === undefined) return;
     this.records.delete(handle.id);
+    // **先把长驻进程带走，再删目录**：反过来的话，进程还在写一个已经被删掉的
+    // 工作区，而且它会一直活着——"沙盒没了、进程还在"是最难查的一类残留。
+    await this.killProcessesOf(handle.id);
     await fs.rm(record.handle.workDir, { recursive: true, force: true }).catch(() => undefined);
   }
+
+  /** 杀掉某个沙盒留下的全部长驻进程。幂等。 */
+  private async killProcessesOf(sandboxId: string): Promise<void> {
+    const list = this.processes.get(sandboxId) ?? [];
+    this.processes.delete(sandboxId);
+    for (const proc of list) {
+      await proc.stop().catch(() => undefined);
+    }
+  }
+}
+
+/** 一个活着的长驻进程。 */
+interface LocalProcessRecord {
+  readonly id: string;
+  readonly command: string;
+  readonly startedAt: number;
+  readonly child: ChildProcess;
+  readonly out: OutputBuffer;
+  readonly err: OutputBuffer;
+  readonly state: { running: boolean; exitCode: number | null };
+  /** 终止并释放；幂等。 */
+  stop(): Promise<void>;
 }

@@ -19,16 +19,22 @@ import { randomUUID } from 'node:crypto';
 import {
   ENV_TYPES,
   SandboxError,
+  type AdoptHint,
   type Artifact,
   type EnvType,
   type ExecOptions,
   type ExecResult,
   type FileEntry,
+  type ProcessOutput,
+  type ProcessStatus,
   type ResourceStats,
   type SandboxHandle,
+  type SandboxProcess,
   type SandboxProvider,
+  type StartProcessOptions,
 } from '../types.js';
 import { getPreset } from '../env-presets.js';
+import { OutputBuffer } from '../util/proc.js';
 import { assertValidProjectId, resolveInside, toPosixRelative } from '../util/paths.js';
 import { matchesGlob } from '../util/glob.js';
 import { mimeHintFor } from '../util/mime.js';
@@ -42,6 +48,7 @@ import {
   type DockerLimits,
   type ResolvedDockerLimits,
 } from './docker-api.js';
+import { createDemuxer } from './stream-frames.js';
 
 /** 容器内的工作区挂载点，与 Dockerfile 里的 WORKDIR 一致。 */
 const CONTAINER_WORKDIR = '/workspace';
@@ -71,48 +78,6 @@ export interface DockerSandboxOptions {
 interface DockerRecord {
   readonly handle: SandboxHandle;
   readonly container: DockerContainer;
-}
-
-/**
- * 解出 Docker 多路复用流。
- *
- * 非 TTY 模式下，Docker 把 stdout 与 stderr 复用在一条流里，每帧带 8 字节头：
- *   [streamType(1)][0][0][0][size(4, big-endian)]
- * streamType: 0=stdin, 1=stdout, 2=stderr
- *
- * 必须按这个格式解帧才能把两个流分开——否则 stderr 会混进 stdout，
- * 而 provider 测试明确要求二者分离。
- */
-function createDemuxer(onStdout: (chunk: Buffer) => void, onStderr: (chunk: Buffer) => void) {
-  // 显式标注为 Buffer（默认泛型参数），否则 Buffer.alloc 的收窄类型
-  // 与 data 事件给的 Buffer 不兼容。
-  let buffer: Buffer = Buffer.alloc(0);
-
-  return {
-    push(chunk: Buffer): void {
-      buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
-
-      // 只要还剩完整的头 + 载荷，就继续解帧。
-      while (buffer.length >= 8) {
-        const streamType = buffer[0];
-        const size = buffer.readUInt32BE(4);
-        if (buffer.length < 8 + size) break; // 载荷未到齐，等下一块
-
-        const payload = buffer.subarray(8, 8 + size);
-        if (streamType === 2) onStderr(payload);
-        else if (streamType === 1) onStdout(payload);
-        // streamType 0（stdin 回显）与 3 忽略
-
-        buffer = buffer.subarray(8 + size);
-      }
-    },    /** 流结束时把残留当 stdout 处理，避免丢内容。 */
-    flush(): void {
-      if (buffer.length > 0) {
-        onStdout(buffer);
-        buffer = Buffer.alloc(0);
-      }
-    },
-  };
 }
 
 export class DockerSandbox implements SandboxProvider {
@@ -268,8 +233,12 @@ export class DockerSandbox implements SandboxProvider {
    *
    * 这里刻意**不做模糊匹配**：容器名必须与 sandboxId 精确相等，否则返回 NO_SUCH_SANDBOX。
    * 用标签做 fallback 会把别的项目的容器认成自己的，那种错误比找不到更难查。
+   *
+   * 身份取法：容器标签 → 调用方给的 hint → **抛错**。
+   * 从前这里认不出来就填 `projectId='unknown'` / `envType='copy'`，
+   * 那是把"认不出"伪装成"认出来了"：句柄会带着假项目名继续跑。
    */
-  async adopt(sandboxId: string): Promise<SandboxHandle> {
+  async adopt(sandboxId: string, hint: AdoptHint = {}): Promise<SandboxHandle> {
     const listed = await this.docker.listContainers({ all: true });
     const found = listed.find((c) => c.Names.some((n) => n.replace(/^\//, '') === sandboxId));
     if (found === undefined) {
@@ -282,13 +251,22 @@ export class DockerSandbox implements SandboxProvider {
       await container.start();
     }
 
-    const projectId = info.Config.Labels?.['mediasandbox.project'] ?? 'unknown';
-    const envTypeRaw = info.Config.Labels?.['mediasandbox.env'] ?? 'copy';
+    const projectId = info.Config.Labels?.['mediasandbox.project'] ?? hint.projectId;
+    const envTypeRaw = info.Config.Labels?.['mediasandbox.env'] ?? hint.envType;
     // 从 ENV_TYPES 派生，不写死字面量列表——加一个环境却漏改这里，
     // 表现是"容器在跑，但句柄上的 envType 悄悄变成 copy"，很难查。
-    const envType: EnvType = (ENV_TYPES as readonly string[]).includes(envTypeRaw)
-      ? (envTypeRaw as EnvType)
-      : 'copy';
+    const envType: EnvType | undefined =
+      envTypeRaw !== undefined && (ENV_TYPES as readonly string[]).includes(envTypeRaw)
+        ? (envTypeRaw as EnvType)
+        : undefined;
+
+    if (projectId === undefined || envType === undefined) {
+      throw new SandboxError(
+        `容器 ${sandboxId} 存在，但认不出它属于哪个项目/环境` +
+          `（标签缺失时请用 adopt(id, { projectId, envType }) 明确给出）`,
+        'NO_SUCH_SANDBOX',
+      );
+    }
 
     const handle: SandboxHandle = {
       id: sandboxId,
@@ -333,6 +311,9 @@ export class DockerSandbox implements SandboxProvider {
     };
 
     const startedAt = Date.now();
+    // TTY 模式下 Docker 给的是**裸流**（没有 8 字节帧头），且 stdout/stderr
+    // 在容器侧就合并了。用错格式不会报错，只会让输出从第 9 个字节开始错位。
+    const tty = options.tty === true;
 
     let execution: Awaited<ReturnType<DockerContainer['exec']>>;
     try {
@@ -344,6 +325,7 @@ export class DockerSandbox implements SandboxProvider {
         AttachStdout: true,
         AttachStderr: true,
         AttachStdin: false,
+        Tty: tty,
         User: '1000:1000',
       });
     } catch (error) {
@@ -381,6 +363,9 @@ export class DockerSandbox implements SandboxProvider {
     const demux = createDemuxer(
       (chunk) => append(chunk, 'out'),
       (chunk) => append(chunk, 'err'),
+      // TTY 下没有帧可解：整段都算 stdout。此时 `stderr` 会是空串，
+      // 这是**如实**的——容器侧已经把两个流合并成一条了，假装还分得开才是假的。
+      { framed: !tty },
     );
 
     const stream = await execution.start({ hijack: true, stdin: false });
@@ -395,7 +380,11 @@ export class DockerSandbox implements SandboxProvider {
           Cmd: ['/bin/sh', '-c', 'pkill -TERM -u 1000 >/dev/null 2>&1 || true'],
           AttachStdout: false,
           AttachStderr: false,
-          User: 'root',
+          // **不能以 root 身份发信号**：容器建的时候 `CapDrop: ['ALL']`，root 在里面
+          // 连 CAP_KILL 都没有，于是"root 去杀 uid 1000 的进程"是一次静默空转
+          // （实测：pkill 返回后目标进程还在，而这条清理路径看上去"跑了"）。
+          // 以沙盒用户自己的身份发信号不需要任何 capability——杀自己的进程本就允许。
+          User: '1000:1000',
         });
         const killStream = await killExec.start({ hijack: true, stdin: false });
         killStream.on('data', () => undefined);
@@ -449,6 +438,141 @@ export class DockerSandbox implements SandboxProvider {
       timedOut,
       truncated,
       durationMs: Date.now() - startedAt,
+    };
+  }
+
+  /**
+   * 起一个长驻进程（容器实现）。
+   *
+   * ## 为什么开 TTY
+   *
+   * 不开 TTY 时两个流是多路复用的：读要解帧，写 stdin 还要自己加帧
+   * （见 `stream-frames.ts`）。长驻进程是交互式用法，"写进去、读回来"是主路径，
+   * 所以这里走 TTY 的裸流：字节直接进出，少一层容易接错的封装。
+   * 代价是 **stderr 与 stdout 合并**（`read()` 的 `stderr` 恒为空串）——
+   * 这是容器侧的事实，不是这里丢的。
+   *
+   * ## 怎么杀
+   *
+   * `Docker exec` 没有 kill API。用 `pkill -u 1000` 会连别的运行的进程一起杀，
+   * 所以起进程时先把自己的 pid 写进 `/tmp` 的标记文件（`exec` 之前记，记的就是
+   * 真正那个进程），kill 时按标记文件精确杀。标记文件在容器里，随容器一起消失。
+   * 发信号的**身份必须是沙盒用户**：容器 CapDrop 了 ALL，root 没有 CAP_KILL。
+   */
+  async start(
+    handle: SandboxHandle,
+    command: string,
+    options: StartProcessOptions = {},
+  ): Promise<SandboxProcess> {
+    const record = this.require(handle.id);
+    const preset = getPreset(handle.envType);
+
+    let workingDir = CONTAINER_WORKDIR;
+    if (options.cwd !== undefined && options.cwd !== '') {
+      const resolved = resolveInside(handle.workDir, options.cwd);
+      const rel = toPosixRelative(handle.workDir, resolved);
+      workingDir = rel === '' ? CONTAINER_WORKDIR : `${CONTAINER_WORKDIR}/${rel}`;
+    }
+
+    const env: Record<string, string> = {
+      ...preset.baselineEnv,
+      ...options.env,
+      SANDBOX_WORKDIR: CONTAINER_WORKDIR,
+      SANDBOX_ENV_TYPE: handle.envType,
+      SANDBOX_PROJECT_ID: handle.projectId,
+    };
+
+    const id = `p${randomUUID().slice(0, 8)}`;
+    const pidFile = `/tmp/ms-${id}.pid`;
+    const limit = options.maxOutputBytes ?? 1024 * 1024;
+    const out = new OutputBuffer(limit);
+    const startedAt = Date.now();
+
+    const execution = await record.container.exec({
+      // 先记 pid 再 exec：`exec` 之后 shell 被目标进程替换，$$ 就是目标进程。
+      Cmd: ['/bin/sh', '-c', `echo $$ > ${pidFile}; exec ${command}`],
+      WorkingDir: workingDir,
+      Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+      AttachStdout: true,
+      AttachStderr: true,
+      AttachStdin: true,
+      Tty: true,
+      User: '1000:1000',
+    });
+
+    const stream = await execution.start({ hijack: true, stdin: true });
+
+    // TTY 的裸流：不做任何解帧，整段都算 stdout。
+    const demux = createDemuxer((chunk) => out.push(chunk), () => undefined, { framed: false });
+    stream.on('data', (chunk: Buffer) => demux.push(chunk));
+    stream.on('end', () => demux.flush());
+    stream.on('close', () => demux.flush());
+    // 只读不写会让流卡住；错误只影响交互，不影响已经读到的输出。
+    stream.on('error', () => undefined);
+
+    /** 按标记文件里的 pid 精确杀，尽量不影响容器里别的进程。 */
+    const killByPidFile = async (signal: string): Promise<void> => {
+      try {
+        const killExec = await record.container.exec({
+          Cmd: ['/bin/sh', '-c', `kill -${signal} "$(cat ${pidFile})" 2>/dev/null || true`],
+          AttachStdout: false,
+          AttachStderr: false,
+          // 同上：**不能以 root 身份发信号**（容器 CapDrop 了 ALL，root 没有 CAP_KILL）。
+          User: '1000:1000',
+        });
+        const killStream = await killExec.start({ hijack: true, stdin: false });
+        killStream.on('data', () => undefined);
+        killStream.on('error', () => undefined);
+        killStream.resume();
+      } catch {
+        // 容器已经没了，或 exec 起不来：进程随容器消失，不必再管。
+      }
+    };
+
+    /** 等 exec 真的结束。inspect 的状态更新是异步的，发完信号立刻查会读到"还在跑"。 */
+    const waitGone = async (timeoutMs: number): Promise<boolean> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const info = await execution.inspect().catch(() => undefined);
+        if (info === undefined || !info.Running) return true;
+        if (Date.now() > deadline) return false;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+
+    return {
+      id,
+      command,
+      startedAt,
+      write: async (data: string): Promise<boolean> => {
+        if (stream.writableEnded || stream.destroyed) return false;
+        stream.write(data);
+        return true;
+      },
+      read: async (): Promise<ProcessOutput> => {
+        const taken = out.take();
+        return {
+          stdout: taken.text,
+          // TTY 下两个流在容器侧已经合并：如实给空串，而不是把合并流再塞进来一遍。
+          stderr: '',
+          truncated: taken.truncated,
+        };
+      },
+      status: async (): Promise<ProcessStatus> => {
+        const info = await execution.inspect().catch(() => undefined);
+        if (info === undefined) return { running: false, exitCode: null };
+        return { running: info.Running, exitCode: info.ExitCode };
+      },
+      kill: async (): Promise<void> => {
+        await killByPidFile('TERM');
+        // 发完信号要**等它真的退出**：不等的话 kill() 回来时 status() 还可能报 running，
+        // 调用方只能靠轮询去猜——而 kill 的语义就是"回来的时候它已经死了"。
+        if (!(await waitGone(2_000))) {
+          await killByPidFile('KILL');
+          await waitGone(3_000);
+        }
+        stream.end();
+      },
     };
   }
 

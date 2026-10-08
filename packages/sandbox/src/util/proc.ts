@@ -5,6 +5,55 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 const TRUNCATION_MARKER = '\n...[输出被截断]...\n';
 
+/** 默认 shell。长驻进程也要用同一套，否则两条路径下的命令语义会不一样。 */
+export function defaultShell(): { file: string; prefixArgs: readonly string[] } {
+  if (process.platform === 'win32') {
+    // /d 跳过 AutoRun，/s 保留引号语义，/c 执行后退出。
+    return { file: process.env['COMSPEC'] ?? 'cmd.exe', prefixArgs: ['/d', '/s', '/c'] };
+  }
+  return { file: '/bin/sh', prefixArgs: ['-c'] };
+}
+
+/**
+ * 增量输出缓冲。
+ *
+ * `exec` 用它攒完整输出；长驻进程用它攒"还没人读走的那部分"——
+ * 两者是同一件事，所以是同一个实现：**没人读的输出不能丢，也不能无限涨**。
+ */
+export class OutputBuffer {
+  private chunks: Buffer[] = [];
+  private bytes = 0;
+  private dropped = false;
+
+  constructor(private readonly limit: number) {}
+
+  push(chunk: Buffer): void {
+    const remaining = this.limit - this.bytes;
+    if (remaining <= 0) {
+      this.dropped = true;
+      return;
+    }
+    if (chunk.length <= remaining) {
+      this.chunks.push(chunk);
+      this.bytes += chunk.length;
+      return;
+    }
+    this.chunks.push(chunk.subarray(0, remaining));
+    this.bytes += remaining;
+    this.dropped = true;
+  }
+
+  /** 取走并清空。`truncated` 表示"自上次取走以来丢过内容"。 */
+  take(): { readonly text: string; readonly truncated: boolean } {
+    const text = Buffer.concat(this.chunks).toString('utf8') + (this.dropped ? TRUNCATION_MARKER : '');
+    const truncated = this.dropped;
+    this.chunks = [];
+    this.bytes = 0;
+    this.dropped = false;
+    return { text, truncated };
+  }
+}
+
 export interface RunCommandOptions {
   readonly command: string;
   readonly cwd: string;
@@ -16,16 +65,8 @@ export interface RunCommandOptions {
   readonly shell?: { readonly file: string; readonly prefixArgs: readonly string[] } | undefined;
 }
 
-function defaultShell(): { file: string; prefixArgs: readonly string[] } {
-  if (process.platform === 'win32') {
-    // /d 跳过 AutoRun，/s 保留引号语义，/c 执行后退出。
-    return { file: process.env['COMSPEC'] ?? 'cmd.exe', prefixArgs: ['/d', '/s', '/c'] };
-  }
-  return { file: '/bin/sh', prefixArgs: ['-c'] };
-}
-
 /** 强制终止进程树。Windows 上 child.kill() 只杀直接子进程，孙进程会残留。 */
-async function killTree(pid: number): Promise<void> {
+export async function killTree(pid: number): Promise<void> {
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
       const killer = spawn('taskkill', ['/F', '/T', '/PID', String(pid)], {
@@ -46,28 +87,6 @@ async function killTree(pid: number): Promise<void> {
       /* 已退出 */
     }
   }
-}
-
-interface StreamBuffer {
-  chunks: Buffer[];
-  bytes: number;
-  truncated: boolean;
-}
-
-function appendChunk(state: StreamBuffer, chunk: Buffer, limit: number): void {
-  const remaining = limit - state.bytes;
-  if (remaining <= 0) {
-    state.truncated = true;
-    return;
-  }
-  if (chunk.length <= remaining) {
-    state.chunks.push(chunk);
-    state.bytes += chunk.length;
-    return;
-  }
-  state.chunks.push(chunk.subarray(0, remaining));
-  state.bytes += remaining;
-  state.truncated = true;
 }
 
 export async function runCommand(options: RunCommandOptions): Promise<ExecResult> {
@@ -91,32 +110,31 @@ export async function runCommand(options: RunCommandOptions): Promise<ExecResult
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    const out: StreamBuffer = { chunks: [], bytes: 0, truncated: false };
-    const err: StreamBuffer = { chunks: [], bytes: 0, truncated: false };
+    const out = new OutputBuffer(maxOutputBytes);
+    const err = new OutputBuffer(maxOutputBytes);
     let timedOut = false;
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
-
-    const decode = (state: StreamBuffer): string =>
-      Buffer.concat(state.chunks).toString('utf8') + (state.truncated ? TRUNCATION_MARKER : '');
 
     const settle = (exitCode: number): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutTimer);
       if (killTimer !== undefined) clearTimeout(killTimer);
+      const outTaken = out.take();
+      const errTaken = err.take();
       resolve({
         exitCode,
-        stdout: decode(out),
-        stderr: decode(err),
+        stdout: outTaken.text,
+        stderr: errTaken.text,
         timedOut,
-        truncated: out.truncated || err.truncated,
+        truncated: outTaken.truncated || errTaken.truncated,
         durationMs: Date.now() - startedAt,
       });
     };
 
-    child.stdout.on('data', (chunk: Buffer) => appendChunk(out, chunk, maxOutputBytes));
-    child.stderr.on('data', (chunk: Buffer) => appendChunk(err, chunk, maxOutputBytes));
+    child.stdout.on('data', (chunk: Buffer) => out.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => err.push(chunk));
 
     const timeoutTimer = setTimeout(() => {
       timedOut = true;

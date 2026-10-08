@@ -13,7 +13,7 @@
  * 容器生命周期比沙盒句柄长：create() 起容器，destroy() 停并删。
  * 句柄 id 与容器名一一对应，因此进程重启后可以通过容器名重新接管。
  */
-import { PassThrough } from 'node:stream';
+import { PassThrough, type Duplex } from 'node:stream';
 import { SandboxError, type ExecResult } from '../types.js';
 
 /**
@@ -38,9 +38,17 @@ export interface DockerContainer {
     AttachStdout: boolean;
     AttachStderr: boolean;
     AttachStdin?: boolean;
+    /** 分配 TTY。打开后输出变成裸流（无帧头），且两个流在容器侧合并。 */
+    Tty?: boolean;
     User?: string;
   }): Promise<{
-    start(options: { hijack?: boolean; stdin?: boolean }): Promise<NodeJS.ReadableStream>;
+    /**
+     * 附着到 exec。
+     *
+     * `stdin: true` 时返回的是**双向**流（dockerode 的 hijack 流就是 Duplex），
+     * 所以类型是 Duplex：只写不读、或只读不写，在这里都是真实用法。
+     */
+    start(options: { hijack?: boolean; stdin?: boolean }): Promise<Duplex>;
     inspect(): Promise<{ ExitCode: number | null; Running: boolean }>;
   }>;
   putArchive(data: NodeJS.ReadableStream, options: { path: string }): Promise<void>;
