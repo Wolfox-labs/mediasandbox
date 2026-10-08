@@ -610,6 +610,27 @@ describe('结构化链路：自定义 block 能真正参与制作', () => {
     }
     await sandbox.destroy(result.handle);
   });
+
+  it('自定义 block 在产物里真的渲染出内容，而不是占位块', async () => {
+    const pool = createBlockRegistry([promoBanner]);
+    const result = await runStructured({
+      projectId: 'e2e-custom-render',
+      goal: '做一个产品介绍落地页',
+      candidateBlockIds: ['hero', 'promo-banner'],
+      blocks: pool,
+    });
+    assert.equal(result.status, 'succeeded', result.reason ?? '');
+
+    const html = await readIndexHtml(result);
+    // 这一条是这次修复的正面断言：以前它会命中"未支持的 block 类型"。
+    assert.ok(!html.includes('未支持的 block 类型'), '自定义 block 落成了"未支持的 block 类型"占位');
+    assert.ok(html.includes('ms-block--promo-banner'), '这个块没进页面');
+    assert.ok(
+      html.includes('ms-generic__title'),
+      '通用渲染器没被调用——title slot 没出小标题，说明内容填了却没画出来',
+    );
+    await sandbox.destroy(result.handle);
+  });
 });
 
 describe('结构化链路：模板', () => {

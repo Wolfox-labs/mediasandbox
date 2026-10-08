@@ -307,7 +307,10 @@ export function createAssemblePageTool(blocks: BlockRegistry): ToolRegistration 
           : page.goal;
       const annotate = boolInput(runtime.inputs, 'annotate', false);
 
-      const html = renderPage(page, { title, annotate });
+      // 把池子交给渲染器：池子里查得到、但没有专属渲染器的 block（自定义 block）
+      // 走通用渲染。不传的话它们会落成"未支持的 block 类型"占位——
+      // 于是"选得到、填得了、页面上却什么都没有"。
+      const html = renderPage(page, { title, annotate, blocks });
       const file = 'artifacts/index.html';
       await runtime.sandbox.writeFile(runtime.handle, file, html);
 

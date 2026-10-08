@@ -896,9 +896,12 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
     res.status(201).json({
       block: { id: spec.id, label: spec.label, group: spec.group },
-      // 说清一件已知限制，而不是让用户自己发现：
-      // 自定义 block 目前没有专属渲染器，页面上会落成一个带类型名的占位块。
-      note: '已入池。自定义 block 暂无专属渲染器，页面上会渲染为占位块；填充与结构决策已完全可用。',
+      // 说清它会被怎么渲染，而不是让用户自己发现：
+      // 自定义 block 没有专属渲染器，但会**按 slot 声明走通用渲染**，不是占位块。
+      note:
+        '已入池。自定义 block 按声明的 slot 类型走通用渲染（title 出小标题、text 出段落、' +
+        'code 出代码块、link 出链接、image 出图、list-* 出列表与图集）；' +
+        '要专属版式需要内置渲染器。填充与结构决策已完全可用。',
     });
   });
 

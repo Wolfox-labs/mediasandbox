@@ -23,6 +23,7 @@
  * `form` 的提交被内联脚本拦下并给一句提示，**绝不发网络请求**。
  * 每个可点元素都带 `data-ms-*` 属性作为定位锚点。
  */
+import type { BlockRegistry, BlockSpec, SlotSpec } from './block-spec.js';
 import type { BlockInstance, PageSpec, SlotValue } from './page-spec.js';
 
 export interface RenderOptions {
@@ -30,6 +31,14 @@ export interface RenderOptions {
   readonly title?: string | undefined;
   /** 是否在页面上标注每块的来源与状态（演示与排查用）。默认 false。 */
   readonly annotate?: boolean | undefined;
+  /**
+   * block 池。给了它，**池子里查得到、但没有专属渲染器**的 block（自定义 block）
+   * 走通用渲染，而不是落成"未支持的 block 类型"占位。
+   *
+   * 不给就维持原行为：没有专属渲染器的一律占位。这样既有调用方与测试
+   * 不必被迫提供一个池子——"能渲染自定义 block"是增强，不是新前提。
+   */
+  readonly blocks?: BlockRegistry | undefined;
 }
 
 // ── 转义 ────────────────────────────────────────────────────────────────
@@ -148,6 +157,8 @@ function imageHtml(ref: string, alt: string, className = 'ms-img'): string {
 
 interface RenderContext {
   readonly annotate: boolean;
+  /** block 池：用来分辨"这是自定义 block"还是"结构里的类型对不上词表"。 */
+  readonly blocks: BlockRegistry | undefined;
 }
 
 type BlockRenderer = (block: BlockInstance, ctx: RenderContext) => string;
@@ -393,6 +404,92 @@ function section(heading: string, body: string, className: string): string {
   );
 }
 
+// ── 自定义 block 的通用渲染 ──────────────────────────────────────────────
+
+/**
+ * 链接白名单：只放行 `http(s)`、站内相对路径与锚点。
+ *
+ * `link` slot 的取值会进 `href`，而它来自用户目标或填充器——不校验就等于
+ * 把 `javascript:` / `data:` 这类可执行 URL 交给页面。收藏夹里的书签可以随便写，
+ * 但**渲染出来的页面不该执行外部输入**。
+ */
+function safeHref(raw: string): string | undefined {
+  const href = raw.trim();
+  if (href === '') return undefined;
+  return /^(https?:\/\/|\/|\.\/|\.\.\/|#)/i.test(href) ? href : undefined;
+}
+
+/**
+ * 一个 slot 取值 → 通用元素。
+ *
+ * 判据以**取值形态**为主、声明类型为辅：`title` / `code` / `link` / `literal`
+ * 的取值形态都是 `text`，只能靠声明区分；其余按形态走。
+ * 形态与声明不符的结构到不了这里——`validatePageSpec` 已经拦下了。
+ */
+function slotHtml(declared: SlotSpec, value: SlotValue): string {
+  if (value.kind === 'list') {
+    const items = value.items.map((t) => `<li>${inline(t)}</li>`).join('');
+    return items === '' ? '' : `<ul class="ms-generic__list">${items}</ul>`;
+  }
+  if (value.kind === 'list-image') {
+    const figures = value.refs
+      .map((img, i) => `<li class="ms-gallery__item" data-ms-index="${i}">${imageHtml(img.ref, img.alt)}</li>`)
+      .join('');
+    return figures === '' ? '' : `<ul class="ms-gallery">${figures}</ul>`;
+  }
+  if (value.kind === 'image') return imageHtml(value.ref, value.alt);
+
+  if (declared.type === 'title') {
+    return `<h3 class="ms-generic__title">${inline(value.text)}</h3>`;
+  }
+  if (declared.type === 'code') {
+    return `<pre class="ms-code"><code class="ms-code__body">${escapeHtml(value.text)}</code></pre>`;
+  }
+  if (declared.type === 'link') {
+    const href = safeHref(value.text);
+    // 不放行的 URL 不当链接用，但**内容照旧显示**：静默丢掉用户给的东西更糟。
+    return href === undefined
+      ? `<p class="ms-generic__link">${inline(value.text)}</p>`
+      : `<p class="ms-generic__link"><a href="${escapeHtml(href)}">${inline(value.text)}</a></p>`;
+  }
+  return paragraphs(value.text);
+}
+
+/**
+ * 自定义 block 的通用渲染：**按 slot 声明推版式**。
+ *
+ * ## 为什么只能这么推
+ *
+ * `BlockSpec` 里没有版式信息（只有 id / label / 分组 / slot 声明 / 位置约束），
+ * 所以可用的依据只有"它声明了哪些 slot、各是什么类型"。
+ * 而这正是"自定义 block 选得到、填得了、却渲染不出东西"的症结：
+ * 填出来的内容本来就带形态（`SlotValue`），只是此前没有渲染器认识它。
+ *
+ * ## 为什么不把 label 印到页面上
+ *
+ * `label` 是给决策模型看的名字（"促销横幅"），不是用户的内容。把它当小节标题
+ * 印出来，页面上就会多一句用户没要过的文字。要看每块的类型与来源请开 `annotate`
+ * ——那是专门的排查通道，不该靠往正文里掺元数据来实现。
+ */
+function renderCustomBlock(block: BlockInstance, spec: BlockSpec): string {
+  const parts: string[] = [];
+  for (const declared of spec.slots) {
+    const value: SlotValue | undefined = block.slots[declared.name];
+    // 未填的 slot 不占位：整块"待填充"的提示由外层统一给，逐 slot 再提示一遍只是噪声。
+    if (value === undefined) continue;
+    const html = slotHtml(declared, value);
+    if (html !== '') parts.push(html);
+  }
+  return `<section class="ms-generic"><div class="ms-generic__body">${parts.join('')}</div></section>`;
+}
+
+/** 池子里查得到这个类型吗？查得到就把声明交出来，供通用渲染用。 */
+function customSpecOf(type: string, ctx: RenderContext): BlockSpec | undefined {
+  const registry = ctx.blocks;
+  if (registry === undefined || !registry.has(type)) return undefined;
+  return registry.get(type);
+}
+
 /** block 类型 → 渲染函数。用表而不是 switch：加类型就是加一行。 */
 const RENDERERS: Readonly<Record<string, BlockRenderer>> = {
   nav: renderNav,
@@ -439,21 +536,31 @@ function renderBlock(block: BlockInstance, ctx: RenderContext): string {
     );
   }
 
+  // 三条走法，**优先级不能换**：
+  //   1. 内置专属渲染器 —— 版式是为它写死的，最好看
+  //   2. 池子里有、但没有专属渲染器 → 通用渲染（自定义 block 的落点）
+  //   3. 池子里根本没有 → `ms-unknown` 占位
+  // 2 与 3 分开是有意的：**"池子里有它、只是没有专属版式"** 和
+  // **"结构里的类型对不上词表"** 是两件事，长得一样就没法定位了。
   const renderer = RENDERERS[block.type];
-  if (renderer === undefined) {
-    parts.push(
-      `<div class="ms-unknown" role="note">未支持的 block 类型: ${escapeHtml(block.type)}</div>`,
-    );
-  } else {
-    try {
+  const custom = renderer === undefined ? customSpecOf(block.type, ctx) : undefined;
+
+  try {
+    if (renderer !== undefined) {
       parts.push(renderer(block, ctx));
-    } catch (error) {
-      // 单个 block 渲染失败不该毁掉整页。把原因留在页面上，便于定点排查。
+    } else if (custom !== undefined) {
+      parts.push(renderCustomBlock(block, custom));
+    } else {
       parts.push(
-        `<div class="ms-block-error" role="note">区块 ${escapeHtml(block.id)} 渲染失败：` +
-          `${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`,
+        `<div class="ms-unknown" role="note">未支持的 block 类型: ${escapeHtml(block.type)}</div>`,
       );
     }
+  } catch (error) {
+    // 单个 block 渲染失败不该毁掉整页。把原因留在页面上，便于定点排查。
+    parts.push(
+      `<div class="ms-block-error" role="note">区块 ${escapeHtml(block.id)} 渲染失败：` +
+        `${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`,
+    );
   }
 
   // `data-ms-block` **无论如何都要有**：它是后续"定点重做"与"模拟点击定位"的锚点。
@@ -565,7 +672,8 @@ ul { margin: 0; padding: 0; list-style: none; }
 .ms-btn--primary:hover { filter: brightness(1.08); }
 
 .ms-features-section, .ms-gallery-section, .ms-text-section, .ms-table-section,
-.ms-code-section, .ms-video-section, .ms-form-section, .ms-accordion-section {
+.ms-code-section, .ms-video-section, .ms-form-section, .ms-accordion-section,
+.ms-generic {
   max-width: var(--ms-max); margin: 0 auto; padding: 2.5rem 1.5rem;
 }
 .ms-features { display: grid; gap: 1rem; grid-template-columns: 1fr; }
@@ -660,6 +768,13 @@ ul { margin: 0; padding: 0; list-style: none; }
 
 .ms-image-block { max-width: var(--ms-max); margin: 0 auto; padding: 1.5rem; }
 
+/* 自定义 block 的通用版式：没有专属样式，只保证排版不塌、与其余内容块同节奏。
+   列表要显式给 list-style 与缩进——全局把 ul 的它们都清掉了。 */
+.ms-generic__body { display: grid; gap: .9rem; }
+.ms-generic__title { font-size: 1.15rem; margin: 0; }
+.ms-generic__list { display: grid; gap: .35rem; padding-left: 1.25rem; list-style: disc; }
+.ms-generic__link { margin: 0; }
+
 /* 中间态与错误提示：可见、但不喧宾夺主 */
 .ms-block-pending, .ms-block-error, .ms-unknown {
   margin: .5rem auto; max-width: var(--ms-max);
@@ -725,7 +840,7 @@ function tabsScript(): string {
  */
 export function renderPage(spec: PageSpec, options: RenderOptions = {}): string {
   const title = options.title ?? spec.goal;
-  const ctx: RenderContext = { annotate: options.annotate === true };
+  const ctx: RenderContext = { annotate: options.annotate === true, blocks: options.blocks };
 
   const body = spec.blocks.map((block) => renderBlock(block, ctx)).join('\n');
   const needsTabsScript = spec.blocks.some((b) => b.type === 'tabs');

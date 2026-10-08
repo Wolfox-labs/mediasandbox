@@ -808,7 +808,7 @@ describe('block 池与模板池的增删', () => {
     costHint: 'fast',
   };
 
-  it('POST /api/blocks 把自定义 block 注册进池子，并明确告知渲染限制', async () => {
+  it('POST /api/blocks 把自定义 block 注册进池子，并说明它会怎么渲染', async () => {
     const ctx = await startServer({ structured: true });
     try {
       const response = await fetch(`${ctx.origin}/api/blocks`, {
@@ -818,7 +818,7 @@ describe('block 池与模板池的增删', () => {
       });
       assert.equal(response.status, 201);
       const body = (await response.json()) as { note?: string };
-      assert.match(body.note ?? '', /占位块/, '已知限制要主动说，而不是让用户自己撞上');
+      assert.match(body.note ?? '', /通用渲染/, '渲染方式要主动说，而不是让用户自己撞上');
       assert.ok(ctx.blocks.has('promo-banner'));
 
       const list = (await (await fetch(`${ctx.origin}/api/blocks`)).json()) as {
