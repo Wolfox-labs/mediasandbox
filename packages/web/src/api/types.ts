@@ -325,3 +325,24 @@ export interface QueueSnapshot {
   readonly maxConcurrent: number;
   readonly limit: number;
 }
+
+/**
+ * 交互验证的结论（`POST /api/runs/:id/verify-interaction`）。
+ *
+ * `passed` 的判据是**确实点成了**：占位驱动、没点到、点了没变化，一律 false，
+ * 由 `detail` 说清原因。
+ */
+export interface InteractionVerdict {
+  readonly runId: string;
+  readonly passed: boolean;
+  readonly driver: string;
+  readonly placeholder: boolean;
+  readonly detail: string;
+  readonly targetCount: number;
+  readonly picked?:
+    | { readonly key: string; readonly label: string; readonly kind: string }
+    | undefined;
+  readonly attempts?: readonly string[] | undefined;
+  /** 点击后截图的产物路径（驱动支持时）。 */
+  readonly screenshotPath?: string | undefined;
+}

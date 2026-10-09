@@ -25,6 +25,7 @@ import { StepFlow } from './StepFlow.js';
 import { StructurePanel } from './StructurePanel.js';
 import { BlockPoolPanel } from './BlockPoolPanel.js';
 import { PreviewPane } from '../preview/PreviewPane.js';
+import { InteractionVerifyPanel } from './InteractionVerifyPanel.js';
 
 /** 示例目标：降低演示门槛，点一下就能跑。 */
 const EXAMPLES: Readonly<Record<EnvType, readonly string[]>> = {
@@ -406,6 +407,16 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
         {showStructure && (
           <Panel title="页面结构" className="min-h-0 flex-[3]" bodyClassName="min-h-0">
             <StructurePanel structure={structure} />
+          </Panel>
+        )}
+
+        {/*
+          交互验证只对**已成功**的结构化运行有意义：还在跑的可能正在重写页面，
+          失败/取消的运行没有落定的页面可点。把它藏起来比给个必然报错的按钮好。
+        */}
+        {showStructure && activeRunId !== undefined && vm.status === 'succeeded' && (
+          <Panel title="交互验证" className="min-h-0 flex-[2]" bodyClassName="min-h-0">
+            <InteractionVerifyPanel runId={activeRunId} />
           </Panel>
         )}
 

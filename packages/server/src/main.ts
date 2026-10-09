@@ -15,6 +15,7 @@ import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_TOOLS,
+  ChromiumClickDriver,
   ChromiumScreenshotDriver,
   createStructuredTools,
   createTemplateRegistry,
@@ -26,7 +27,6 @@ import {
   StubDecisionClient,
   ToolRegistry,
   OpenAiCompatibleClient,
-  type BrowserDocker,
   type DecisionClient,
   type LlmClient,
 } from '@mediasandbox/orchestrator';
@@ -40,7 +40,7 @@ import {
 import { createServer } from './app.js';
 import { JsonPersist } from './persist.js';
 import { loadPersistedPools, type LoadedPools } from './boot.js';
-import { probeBrowserDocker } from './docker-probe.js';
+import { probeBrowserDocker, type DockerClientApi } from './docker-probe.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = path.resolve(HERE, '../../..', 'workspaces');
@@ -192,11 +192,11 @@ async function buildProviders(): Promise<{
   providers: Record<string, SandboxProvider>;
   defaultProvider: string;
   /** Docker 的浏览器能力**已确认可用**时把它交出来；否则 undefined，截图退回占位驱动。 */
-  docker: BrowserDocker | undefined;
+  docker: DockerClientApi | undefined;
 }> {
   const local = new LocalSandbox({ rootDir: path.join(WORKSPACE_ROOT, 'local') });
   const providers: Record<string, SandboxProvider> = { local };
-  let docker: BrowserDocker | undefined;
+  let docker: DockerClientApi | undefined;
 
   // Docker 是可选能力：装不上也要能起来（只有 local 可用）。
   // **光 import 成功不算"有 Docker"**：dockerode 的客户端对象是惰性的，一次往返都不发，
@@ -204,7 +204,7 @@ async function buildProviders(): Promise<{
   // 而不是等到运行到截图那一步才失败（那会把整次运行判成 escalated）。
   try {
     const dockerode = await import('dockerode');
-    const api = new dockerode.default() as unknown as DockerApi;
+    const api = new dockerode.default() as unknown as DockerClientApi & DockerApi;
     providers['docker'] = new DockerSandbox({
       docker: api,
       rootDir: path.join(WORKSPACE_ROOT, 'docker'),
@@ -212,7 +212,7 @@ async function buildProviders(): Promise<{
     });
     const probe = await probeBrowserDocker(api, BROWSER_IMAGE);
     if (probe.ok) {
-      docker = api as unknown as BrowserDocker;
+      docker = api;
       log(`已启用 docker provider（浏览器截图可用：${probe.detail}）`);
     } else {
       log(`docker provider 已装载但浏览器能力不可用：${probe.reason}`);
@@ -265,6 +265,12 @@ async function main(): Promise<void> {
       ? defaultScreenshotDriver()
       : new ChromiumScreenshotDriver({ docker });
 
+  // 点击驱动：同一条纪律。没有 Docker 时**不建占位驱动**——点击验证的结论
+  // ("该发生的变化发生了吗")在占位实现下毫无意义，接口会如实回 503。
+  // 这与截图不同：截图退化成占位图仍然是一张可看的图，而"点一下"退化成
+  // 什么都没点，却报出一个结论，那是在骗人。
+  const clickDriver = docker === undefined ? undefined : new ChromiumClickDriver({ docker });
+
   // 工具注册表：通用工具 + 结构化制作工具。结构化那几条只在 webpage 环境可见
   // （它们声明了 `envTypes: ['webpage']`），所以放进同一个注册表不会污染其它链路。
   //
@@ -303,6 +309,7 @@ async function main(): Promise<void> {
     onLog: (message) => log(`  ${message}`),
     decision,
     ...(llm !== undefined ? { llm } : {}),
+    ...(clickDriver !== undefined ? { clickDriver } : {}),
     providers,
     defaultProvider,
     policy: DEFAULT_POLICY,
@@ -342,6 +349,13 @@ async function main(): Promise<void> {
     }`,
   );
   log(`  模板池    ${templates.size} 套（${templates.specs().map((t) => t.id).join(', ')}）`);
+  log(
+    `  交互验证  ${
+      clickDriver === undefined
+        ? '不可用（需要 Docker 旁挂 chromium；接口会如实回 503，不会报"通过"）'
+        : `chromium 真点击（POST /api/runs/:runId/verify-interaction）`
+    }`,
+  );
   log(
     `  持久化    ${dataDir}（装载 ${restoredRuns} 条运行记录` +
       `、${externalBlocks.length} 个自定义 block、${userTemplates.length} 套模板）`,

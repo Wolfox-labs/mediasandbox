@@ -22,6 +22,7 @@ import {
   StubDecisionClient,
   ToolRegistry,
   type BlockRegistry,
+  type ClickDriver,
   type MockLlmClient,
   type TemplateRegistry,
 } from '@mediasandbox/orchestrator';
@@ -66,6 +67,8 @@ export async function startServer(
     onLog?: (message: string) => void;
     /** 并发上限与队列长度。不传则用 createServer 的默认值（2 / 16）。 */
     concurrency?: { maxConcurrentRuns?: number; queueLimit?: number };
+    /** 交互验证的点击驱动。不传即"这台机器点不了"，端点会如实回 503。 */
+    clickDriver?: ClickDriver;
   } = {},
 ): Promise<{
   origin: string;
@@ -108,6 +111,7 @@ export async function startServer(
       : {}),
     decision: overrides.decision ?? makeDecision(),
     ...(overrides.llm !== undefined ? { llm: overrides.llm } : {}),
+    ...(overrides.clickDriver !== undefined ? { clickDriver: overrides.clickDriver } : {}),
     ...(overrides.onLog !== undefined ? { onLog: overrides.onLog } : {}),
     providers: overrides.providers ?? { local: localSandbox },
     defaultProvider: 'local',

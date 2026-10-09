@@ -28,6 +28,7 @@ import {
   type BlockInstance,
   type BlockRegistry,
   type BlockSpec,
+  type ClickDriver,
   type DecisionClient,
   type FallbackPolicy,
   type LlmClient,
@@ -39,6 +40,7 @@ import {
 } from '@mediasandbox/orchestrator';
 import { RunStore, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
 import { RunQueue, type QueuedRun } from './run-queue.js';
+import { runInteractionVerification } from './interaction.js';
 import { JsonPersist } from './persist.js';
 import { BlockInputError, parseBlockSpec } from './block-input.js';
 import {
@@ -90,6 +92,13 @@ export interface ServerDeps {
   readonly projectsDir?: string | undefined;
   /** 日志出口。落定失败之类"不该让运行失败但必须让人知道"的事走它。 */
   readonly onLog?: ((message: string) => void) | undefined;
+  /**
+   * 交互验证的点击驱动。
+   *
+   * 与 `screenshotDriver` 同一条纪律：**按部署能力选实现**，不是"看运气"。
+   * 省略即这台机器点不了——端点会**如实回 503**，而不是给一个看起来通过的空结论。
+   */
+  readonly clickDriver?: ClickDriver | undefined;
   /** 按 provider 名取实现：'local' 或 'docker'。 */
   readonly providers: Readonly<Record<string, SandboxProvider>>;
   readonly defaultProvider: string;
@@ -1193,6 +1202,56 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
     const cancelled = store.cancel(runId);
     res.json({ runId, cancelled, ...(queued !== undefined ? { wasQueued: true } : {}) });
+  });
+
+  /**
+   * 对一次已完成的运行做**真浏览器交互验证**：挑一个可点元素点一下，
+   * 用代码判定"该发生的变化"有没有发生，并把点击后的截图落到 `artifacts/click.png`。
+   *
+   * 为什么是**按钮触发**而不是随运行自动跑：这一步要起真浏览器，耗时 3–10 秒，
+   * 而大多数运行并不需要它。自动跑等于给每次运行都加上这段开销。
+   *
+   * 三条"不通过"都要能被调用方分辨，所以状态码分开：
+   *   404 没有这次运行 / 409 这次运行没有可验证的页面 / 410 沙盒已被回收 /
+   *   503 本机点不了（没有驱动或没有 provider）。
+   * 共同点是**都不会返回 200**：没验证就说没验证。
+   */
+  app.post('/api/runs/:runId/verify-interaction', async (req: Request, res: Response) => {
+    const record = store.get(paramOf(req, 'runId'));
+    const outcome = await runInteractionVerification({
+      record,
+      provider: record !== undefined ? deps.providers[record.provider] : undefined,
+      decision: deps.decision,
+      ...(deps.clickDriver !== undefined ? { driver: deps.clickDriver } : {}),
+    });
+    if (!outcome.ok) {
+      errorResponse(res, outcome.status, outcome.error, outcome.detail);
+      return;
+    }
+    const { verification } = outcome;
+    res.json({
+      runId: record!.id,
+      // `passed` 的判据是"确实点成了"，而不是"跑完了流程"：
+      // 占位驱动、没点到、点了没变化，一律 false，由 detail 说清原因。
+      passed: verification.result?.changed === true && verification.placeholder === false,
+      driver: verification.driver,
+      placeholder: verification.placeholder,
+      detail: verification.detail,
+      targetCount: verification.targets.length,
+      ...(verification.picked !== undefined
+        ? {
+            picked: {
+              key: verification.picked.key,
+              label: verification.picked.label,
+              kind: verification.picked.kind,
+            },
+          }
+        : {}),
+      ...(verification.attempts !== undefined ? { attempts: verification.attempts } : {}),
+      ...(verification.result?.screenshot !== undefined
+        ? { screenshotPath: verification.result.screenshot.path }
+        : {}),
+    });
   });
 
   // ── 结构：读与改 ────────────────────────────────────────────────────

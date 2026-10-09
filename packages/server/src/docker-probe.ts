@@ -32,6 +32,33 @@ export interface DockerProbeApi {
   getImage(name: string): { inspect(): Promise<unknown> };
 }
 
+/**
+ * 一个 dockerode 客户端**够用的类型**。
+ *
+ * 手上这个对象同时要塞给三处，而三处各要一小块：
+ *   - `DockerSandbox` 要 `DockerApi`（列表、创建、镜像）
+ *   - 截图驱动只要 `createContainer`
+ *   - 点击驱动还要容器上的 `inspect`（它按容器名复用/清理）
+ * 三处各写一次 `as unknown as X` 的话，其中一处写错不会有人发现；
+ * 这里集中声明一次，让"这台对象能干什么"只有一个说法。
+ */
+export interface DockerClientApi extends DockerProbeApi {
+  createContainer(options: Record<string, unknown>): Promise<{
+    start(): Promise<void>;
+    wait(): Promise<{ StatusCode: number }>;
+    remove(options?: { force?: boolean; v?: boolean }): Promise<void>;
+    /** 点击驱动按 `NetworkSettings.Ports` 找 CDP 端口，所以这里要把形状写出来。 */
+    inspect(): Promise<{
+      readonly NetworkSettings?: {
+        readonly Ports?: Record<
+          string,
+          readonly { readonly HostPort?: string | undefined }[] | null
+        > | undefined;
+      } | undefined;
+    }>;
+  }>;
+}
+
 export type DockerProbeResult =
   | { readonly ok: true; readonly detail: string }
   | { readonly ok: false; readonly reason: string };

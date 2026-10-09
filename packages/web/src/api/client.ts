@@ -12,6 +12,7 @@ import type {
   CreateRunResult,
   EnvType,
   HealthResponse,
+  InteractionVerdict,
   ProjectDto,
   QueueSnapshot,
   RunListItem,
@@ -153,6 +154,20 @@ export const api = {
   cancelRun(runId: string): Promise<{ runId: string; cancelled: boolean }> {
     return request<{ runId: string; cancelled: boolean }>(
       `/api/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' },
+    );
+  },
+
+  /**
+   * 对一次已完成的运行做真浏览器交互验证。
+   *
+   * 失败原因要能被界面区分：404 没有这次运行 / 409 没有可验证的页面 /
+   * 410 沙盒已回收 / 503 本机点不了。所以这里**不吞错误**，
+   * 由调用方按 `ApiError.status` 决定怎么说。
+   */
+  verifyInteraction(runId: string): Promise<InteractionVerdict> {
+    return request<InteractionVerdict>(
+      `/api/runs/${encodeURIComponent(runId)}/verify-interaction`,
       { method: 'POST' },
     );
   },
