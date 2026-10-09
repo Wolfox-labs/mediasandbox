@@ -141,7 +141,23 @@ export class RunStore {
     this.controllers.set(runId, controller);
   }
 
-  /** 请求取消。返回 false 表示该 run 已不在执行中。 */
+  /**
+   * 运行结束（跑完、失败、被取消都算），释放取消开关。
+   *
+   * 不释放的话每跑一次就在表里留一个 AbortController——进程活得够久时，
+   * `cancel()` 会去 abort 一个早已结束的运行的开关，看起来"取消成功"，
+   * 实际什么都没发生。
+   */
+  finishRun(runId: string): void {
+    this.controllers.delete(runId);
+  }
+
+  /**
+   * 请求取消。返回 false 表示该 run 已不在执行中（也不在排队中）。
+   *
+   * **状态推进由调用方决定**：排队中的取消要先把任务从队列里摘出来，否则它会
+   * 在名额空出时照常开跑——用户点了取消，运行却开始了。
+   */
   cancel(runId: string): boolean {
     const controller = this.controllers.get(runId);
     if (controller === undefined) return false;
@@ -149,6 +165,8 @@ export class RunStore {
     const record = this.runs.get(runId);
     if (record !== undefined && (record.status === 'running' || record.status === 'queued')) {
       record.status = 'cancelled';
+      record.finishedAt = Date.now();
+      this.persist?.saveMeta(record);
     }
     return true;
   }

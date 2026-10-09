@@ -38,6 +38,7 @@ import {
   type ToolRegistry,
 } from '@mediasandbox/orchestrator';
 import { RunStore, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
+import { RunQueue, type QueuedRun } from './run-queue.js';
 import { JsonPersist } from './persist.js';
 import { BlockInputError, parseBlockSpec } from './block-input.js';
 import {
@@ -110,6 +111,23 @@ export interface ServerDeps {
     | {
         /** 最多保留多少个已结束 run 的沙盒。默认 20。 */
         readonly maxRuns?: number | undefined;
+      }
+    | undefined;
+  /**
+   * 并发上限与排队。
+   *
+   * 此前每来一个 `POST /api/runs` 就直接起一次运行，没有全局上限：批量提交会把
+   * CPU / 内存 / 容器数一起推上去（Docker 下每个运行一个容器）。
+   * 这里给"同时跑几个"一个明确的数字，超出的**排起来**，队列满则明确拒绝（429）。
+   *
+   * 省略即沿用默认值（2 并发 / 16 队列），与 `.env` 里的约定一致。
+   */
+  readonly concurrency?:
+    | {
+        /** 同时可运行的次数。默认 2。小于 1 会被夹到 1。 */
+        readonly maxConcurrentRuns?: number | undefined;
+        /** 等待队列长度。默认 16；0 表示不排队（超出并发直接 429）。 */
+        readonly queueLimit?: number | undefined;
       }
     | undefined;
   /**
@@ -208,6 +226,48 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   const finishedRuns: { runId: string; finishedAt: number }[] = [];
 
   const retention = deps.sandboxRetention?.maxRuns ?? 20;
+  /**
+   * 排队中的任务，按 runId 索引。
+   *
+   * 队列本身只知道"有哪些任务在排"，回答不了"这个 runId 排第几"——
+   * 而位次要报给调用方，所以这里留一张 runId → job 的表。
+   * 任务一旦开跑或结束就从表里摘掉：这张表只代表**还在排队**的那些。
+   */
+  const waiting = new Map<string, QueuedRun>();
+  /**
+   * 并发与排队。
+   *
+   * **默认 2 / 16**：保守值，因为每个运行都会起一个沙盒（Docker 下是一个容器）。
+   * 队列满了回 429 而不是继续收——收进来的尽头是 OOM，而那时已经看不出是谁压垮的。
+   */
+  const queue = new RunQueue<QueuedRun>(
+    async (job) => {
+      // 开跑了就不再是"排队中"。
+      waiting.delete(job.record.id);
+      // 在途登记的**唯一入口**：优雅关闭要等在途的跑完，而"在途"只有这里知道。
+      // 记在队列回调里而不是 POST 处理函数里，排队的任务被放行时才登记得上。
+      const task = job.execute().finally(() => inFlight.delete(task));
+      inFlight.add(task);
+      try {
+        await task;
+      } finally {
+        // 无论跑成什么样都要释放取消开关，否则表里会留下永远不会被 abort 的开关。
+        store.finishRun(job.record.id);
+      }
+    },
+    {
+      maxConcurrent: deps.concurrency?.maxConcurrentRuns ?? 2,
+      limit: deps.concurrency?.queueLimit ?? 16,
+    },
+  );
+
+  /** 排队位次，1 起。不在排队时返回空对象——展开进响应里就是"没有这个字段"。 */
+  function queuePositionOf(runId: string): { queuePosition?: number } {
+    const job = waiting.get(runId);
+    if (job === undefined) return {};
+    const position = queue.positionOf(job);
+    return position === undefined ? {} : { queuePosition: position };
+  }
 
   /**
    * 淘汰超出保留额度的沙盒，从最旧的已结束 run 开始销毁。
@@ -494,6 +554,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
   async function executeRun(args: {
     record: RunRecord;
+    /**
+     * 这次运行的取消开关。**由调用方在入队时建好**——排队中的运行也要能被取消，
+     * 所以它不能等到真正开跑时才创建。
+     */
+    controller: AbortController;
     provider: SandboxProvider;
     goal: string;
     envType: EnvType | 'auto';
@@ -517,8 +582,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     };
   }): Promise<void> {
     const { record, provider, goal, envType } = args;
-    const controller = new AbortController();
-    store.registerController(record.id, controller);
+    const controller = args.controller;
+    // controller 已在入队时注册（排队中就要能取消），这里只把状态推进到 running。
     store.update(record.id, { status: 'running' });
 
     const orchestrator = new Orchestrator();
@@ -810,58 +875,88 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       template = deps.templates.get(templateId);
     }
 
-    const task = executeRun({
+    // 取消开关在**入队时**就建好并登记：排队中的运行也要能被取消。
+    // 等到开跑才建的话，用户对排队中的运行点取消会毫无反应。
+    const controller = new AbortController();
+    store.registerController(record.id, controller);
+
+    const job: QueuedRun = {
       record,
-      provider,
-      goal,
-      envType,
-      ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
-      // **缺省是 false**：不放行按次计费的生成工具。
-      // "实测生图要经过我的许可"这条纪律写进代码，而不是靠人记着。
-      ...(typeof body['allowPaidGeneration'] === 'boolean'
-        ? { allowPaidGeneration: body['allowPaidGeneration'] }
-        : {}),
-      ...(typeof body['minArtifacts'] === 'number'
-        ? { minArtifacts: body['minArtifacts'] }
-        : {}),
-      structured: {
-        ...(candidateBlockIds !== undefined && candidateBlockIds.length > 0
-          ? { candidateBlockIds }
-          : {}),
-        ...(template !== undefined ? { template } : {}),
-        ...(typeof body['maxBlocks'] === 'number' ? { maxBlocks: body['maxBlocks'] } : {}),
-        ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
-        // 缺省是 **false**：不显式要求就不调生成层。零成本是默认值。
-        ...(typeof body['useGenerative'] === 'boolean'
-          ? { useGenerative: body['useGenerative'] }
-          : {}),
-        ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
-        // 截图默认关：要求了才挂节点（与 useGenerative 同一条纪律）。
-        ...(typeof body['screenshot'] === 'boolean' ? { screenshot: body['screenshot'] } : {}),
-        // 定点重做：只有这些块挂填充节点，其余块原样透传。
-        ...(redoBlockIds !== undefined ? { redoBlockIds } : {}),
-        // 既定结构：带上它，结构**不再由决策模型决定**（templateId / candidateBlockIds /
-        // maxBlocks 也就一并被盖过）。projectId 与 goal 取本次运行的：
-        // 结构是上一次的产出，而这次要按这次的目标填、写进这次的沙盒。
-        ...(structureInput !== undefined
-          ? {
-              pageSpec: {
-                projectId: record.projectId,
-                goal,
-                templateId: structureInput.templateId,
-                // 候选集由**实际用到的块类型**派生（按首次出现去重，与 `blockTypesOf`
-                // 同一套语义）：结构已经定稿，那个候选集合是历史，不是这一问的输入。
-                candidateBlockIds: [...new Set(structureInput.blocks.map((b) => b.type))],
-                blocks: structureInput.blocks,
-                qualityScore: structureInput.qualityScore,
-                createdAt: Date.now(),
-              },
-            }
-          : {}),
-      },
-    });
-    inFlight.add(task);
-    void task.finally(() => inFlight.delete(task));
+      controller,
+      execute: () =>
+        executeRun({
+          record,
+          // 入队时建的那个 controller 就是这次运行的取消开关：排队中被取消与跑动中
+          // 被取消走的是同一个，两条路径的行为因此一致。队列把它的 signal 传下来，
+          // 这里不需要再包一层。
+          controller,
+          provider,
+          goal,
+          envType,
+          ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
+          // **缺省是 false**：不放行按次计费的生成工具。
+          // "实测生图要经过我的许可"这条纪律写进代码，而不是靠人记着。
+          ...(typeof body['allowPaidGeneration'] === 'boolean'
+            ? { allowPaidGeneration: body['allowPaidGeneration'] }
+            : {}),
+          ...(typeof body['minArtifacts'] === 'number'
+            ? { minArtifacts: body['minArtifacts'] }
+            : {}),
+          structured: {
+            ...(candidateBlockIds !== undefined && candidateBlockIds.length > 0
+              ? { candidateBlockIds }
+              : {}),
+            ...(template !== undefined ? { template } : {}),
+            ...(typeof body['maxBlocks'] === 'number' ? { maxBlocks: body['maxBlocks'] } : {}),
+            ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
+            // 缺省是 **false**：不显式要求就不调生成层。零成本是默认值。
+            ...(typeof body['useGenerative'] === 'boolean'
+              ? { useGenerative: body['useGenerative'] }
+              : {}),
+            ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
+            // 截图默认关：要求了才挂节点（与 useGenerative 同一条纪律）。
+            ...(typeof body['screenshot'] === 'boolean' ? { screenshot: body['screenshot'] } : {}),
+            // 定点重做：只有这些块挂填充节点，其余块原样透传。
+            ...(redoBlockIds !== undefined ? { redoBlockIds } : {}),
+            // 既定结构：带上它，结构**不再由决策模型决定**（templateId / candidateBlockIds /
+            // maxBlocks 也就一并被盖过）。projectId 与 goal 取本次运行的：
+            // 结构是上一次的产出，而这次要按这次的目标填、写进这次的沙盒。
+            ...(structureInput !== undefined
+              ? {
+                  pageSpec: {
+                    projectId: record.projectId,
+                    goal,
+                    templateId: structureInput.templateId,
+                    // 候选集由**实际用到的块类型**派生（按首次出现去重，与 `blockTypesOf`
+                    // 同一套语义）：结构已经定稿，那个候选集合是历史，不是这一问的输入。
+                    candidateBlockIds: [...new Set(structureInput.blocks.map((b) => b.type))],
+                    blocks: structureInput.blocks,
+                    qualityScore: structureInput.qualityScore,
+                    createdAt: Date.now(),
+                  },
+                }
+              : {}),
+          },
+        }),
+    };
+
+    // 入队：有余额就立刻开跑，否则排队；队列满则**明确拒绝**。
+    // 先入队再记账：被 429 挡掉的运行不该在服务端留下一条记录——
+    // 否则列表里会多出一条永远排不上队的运行，而调用方以为它被拒了。
+    const admission = queue.enqueue(job);
+    if (!admission.accepted) {
+      store.remove(record.id);
+      errorResponse(
+        res,
+        429,
+        admission.reason,
+        `当前 ${admission.snapshot.running} 个在跑、${admission.snapshot.waiting} 个在排队；稍后重试`,
+      );
+      return;
+    }
+    // 只把**真的在排队**的记进表：立刻开跑的那个不是"排队中"，
+    // 记进去会让 `queuePositionOf` 给一个已经在跑的运行报位次。
+    if (!admission.started) waiting.set(record.id, job);
 
     // 被既定结构盖过的入参要**主动说出来**：不吭声的话，调用方会以为
     // 自己传的 templateId 起了作用，然后在页面上找不到原因。
@@ -876,7 +971,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
     res.status(202).json({
       runId,
+      // 立刻开始的报 `queued`（它马上会转 running），排队的报 `queued` 并带上位次。
+      // 两种都报 `queued` 是因为 202 的语义就是"收下了，还没结束"；
+      // 区别由 `queuePosition` 说清楚——**别让调用方去猜自己是不是在排队**。
       status: 'queued',
+      ...(admission.started ? {} : { queuePosition: admission.position }),
       ...(redoBlockIds !== undefined
         ? { note: `定点重做：只重填 ${redoBlockIds.join('、')}，其余区块原样保留` }
         : ignored.length > 0
@@ -888,6 +987,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   // ── 查询运行 ────────────────────────────────────────────────────────
   app.get('/api/runs', (_req: Request, res: Response) => {
     res.json({
+      // 并发与排队的状态一并给出来：调用方据此知道"现在提交会不会被排上"，
+      // 而不是提交完了才发现自己在排队。
+      queue: queue.snapshot(),
       runs: store.list().map((r) => ({
         id: r.id,
         projectId: r.projectId,
@@ -898,6 +1000,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         startedAt: r.startedAt,
         finishedAt: r.finishedAt,
         artifactCount: r.artifacts.length,
+        // 排队中的运行带上位次：**光有 `queued` 状态看不出还要等多久**，
+        // 而"我排第几"正是用户唯一能据以决定"等还是撤"的信息。
+        ...queuePositionOf(r.id),
       })),
     });
   });
@@ -908,7 +1013,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       errorResponse(res, 404, '运行不存在');
       return;
     }
-    res.json(serializeRun(record));
+    // 详情与列表带同一种位次字段：形状不一致的话，前端刷新一次就得写两套解析。
+    res.json({ ...serializeRun(record), ...queuePositionOf(record.id) });
   });
 
   /**
@@ -1073,11 +1179,20 @@ export function createServer(deps: ServerDeps): CreateServerResult {
 
   app.post('/api/runs/:runId/cancel', (req: Request, res: Response) => {
     const runId = paramOf(req, 'runId');
-    if (store.get(runId) === undefined) {
+    const record = store.get(runId);
+    if (record === undefined) {
       errorResponse(res, 404, '运行不存在');
       return;
     }
-    res.json({ runId, cancelled: store.cancel(runId) });
+    // 排队中的运行**必须先摘出队列**再置状态：只 abort 不摘的话，名额一空出来
+    // 它照样开跑——用户点了取消，运行却开始了。两件事缺一不可。
+    const queued = waiting.get(runId);
+    if (queued !== undefined) {
+      queue.withdraw(queued);
+      waiting.delete(runId);
+    }
+    const cancelled = store.cancel(runId);
+    res.json({ runId, cancelled, ...(queued !== undefined ? { wasQueued: true } : {}) });
   });
 
   // ── 结构：读与改 ────────────────────────────────────────────────────

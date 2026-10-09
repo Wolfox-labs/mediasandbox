@@ -9,9 +9,11 @@ import type {
   BlockGroup,
   BlockGroupDto,
   BlockSpecDto,
+  CreateRunResult,
   EnvType,
   HealthResponse,
   ProjectDto,
+  QueueSnapshot,
   RunListItem,
   RunRecord,
   ToolSpecDto,
@@ -113,15 +115,14 @@ export const api = {
     return request<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }>(`/api/blocks${query}`);
   },
 
-  createRun(input: CreateRunInput): Promise<{ runId: string; status: string }> {
-    return request<{ runId: string; status: string }>('/api/runs', {
+  createRun(input: CreateRunInput): Promise<CreateRunResult> {    return request<CreateRunResult>('/api/runs', {
       method: 'POST',
       body: JSON.stringify(input),
     });
   },
 
-  listRuns(): Promise<{ runs: RunListItem[] }> {
-    return request<{ runs: RunListItem[] }>('/api/runs');
+  listRuns(): Promise<{ runs: RunListItem[]; queue: QueueSnapshot }> {
+    return request<{ runs: RunListItem[]; queue: QueueSnapshot }>('/api/runs');
   },
 
   /** 项目维度视图：运行按 `projectId` 分组。 */

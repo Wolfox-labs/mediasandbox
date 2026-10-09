@@ -122,6 +122,13 @@ export interface RunRecord {
   readonly error?: string | undefined;
   readonly planSummary?: readonly PlanNodeSummary[] | undefined;
   readonly eventCount: number;
+  /**
+   * 排队位次（1 起）。**只有正在排队的运行才有这个字段**——在跑与已结束的没有。
+   *
+   * 用可选字段而不是 `queuePosition: 0`：0 会被读成"排在第 0 位"，
+   * 而它想表达的是"不在排队"。
+   */
+  readonly queuePosition?: number | undefined;
 }
 
 /** 一次尝试（重试 / 换方案）。 */
@@ -144,6 +151,8 @@ export interface RunListItem {
   readonly startedAt: number;
   readonly finishedAt?: number | undefined;
   readonly artifactCount: number;
+  /** 排队位次（1 起），不在排队时缺省。与详情同名字段，前端只写一套解析。 */
+  readonly queuePosition?: number | undefined;
 }
 
 /** 项目内的单次运行（`GET /api/projects` 里嵌的裁剪版）。 */
@@ -279,8 +288,7 @@ export type WireEvent =
       readonly reason?: string | undefined;
     };
 
-/** 执行器内层事件（`execution_event.inner`）。 */
-export interface InnerExecutionEvent {
+/** 执行器内层事件（`execution_event.inner`）。 */export interface InnerExecutionEvent {
   readonly type: string;
   readonly nodeId?: string | undefined;
   readonly toolId?: string | undefined;
@@ -294,4 +302,26 @@ export interface InnerExecutionEvent {
   readonly status?: string | undefined;
   readonly nodeCount?: number | undefined;
   readonly at?: number | undefined;
+}
+
+/**
+ * `POST /api/runs` 的受理结果。
+ *
+ * 202 的语义是"收下了，还没结束"，所以立刻开跑与排队都报 `queued`；
+ * 区别由 `queuePosition` 说清楚——**别让人去猜自己是不是在排队**。
+ */
+export interface CreateRunResult {
+  readonly runId: string;
+  readonly status: string;
+  /** 排队位次（1 起）。立刻开跑时缺省。 */
+  readonly queuePosition?: number | undefined;
+  readonly note?: string | undefined;
+}
+
+/** `GET /api/runs` 里带出的队列状态：同时能跑几个、现在几个在跑/在排。 */
+export interface QueueSnapshot {
+  readonly running: number;
+  readonly waiting: number;
+  readonly maxConcurrent: number;
+  readonly limit: number;
 }

@@ -52,6 +52,8 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
   const [envType, setEnvType] = useState<EnvType>('copy');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  /** 提交成功但需要说明的事（例如"已排在第 N 位"）。与 error 分开，免得被当成失败。 */
+  const [submitNote, setSubmitNote] = useState<string | null>(null);
 
   // ── 结构化制作（webpage 环境）专用输入 ────────────────────────────────
   //
@@ -168,8 +170,9 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
 
     setSubmitting(true);
     setSubmitError(null);
+    setSubmitNote(null);
     try {
-      const { runId } = await api.createRun({
+      const { runId, queuePosition } = await api.createRun({
         goal: trimmed,
         envType,
         // 结构化参数只在 webpage 环境提交。带上别的环境的参数没有意义，
@@ -187,12 +190,21 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
       refreshedFor.current = undefined;
       selectRun(runId);
       refreshRuns();
+      // 排上了就说清楚排在第几位：只报"已提交"的话，用户在界面上看到
+      // 一条排队中的运行却不知道要等多久，只能反复点提交。
+      setSubmitNote(
+        queuePosition !== undefined
+          ? `已排入队列，当前第 ${queuePosition} 位；轮到时自动开始，不需要重新提交`
+          : null,
+      );
     } catch (error) {
       const message =
         error instanceof ApiError
           ? `${error.message}${error.detail !== undefined ? `（${error.detail}）` : ''}`
           : String(error);
-      setSubmitError(message);
+      // 429 是"队列满了"，不是"参数错了"：说清楚可以稍后重试，
+      // 免得用户去改一个本来没问题的目标描述。
+      setSubmitError(error instanceof ApiError && error.status === 429 ? `队列已满：${message}` : message);
     } finally {
       setSubmitting(false);
     }
@@ -283,6 +295,12 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
               {submitError}
             </p>
           )}
+
+          {submitNote !== null && submitError === null && (
+            <p className="rounded border border-sky-500/30 bg-sky-500/10 px-2 py-1.5 text-xs text-sky-200">
+              {submitNote}
+            </p>
+          )}
         </Panel>
 
         <Panel
@@ -320,6 +338,13 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
                       <span>{formatTime(run.startedAt)}</span>
                       <span>·</span>
                       <span>{run.envType}</span>
+                      {/* 排队位次跟状态徽章一起看：光有"排队中"看不出还要等多久。 */}
+                      {run.queuePosition !== undefined && (
+                        <>
+                          <span>·</span>
+                          <span className="text-sky-300/80">队列第 {run.queuePosition} 位</span>
+                        </>
+                      )}
                       {run.artifactCount > 0 && (
                         <>
                           <span>·</span>

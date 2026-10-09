@@ -78,6 +78,22 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
 }
 
 /**
+ * 读一个**正整数**环境变量。缺失或非法时用默认值。
+ *
+ * 与上一个分开是因为 0 在这里没有意义：并发为 0 等于"永远不跑"，
+ * 而调用方写 0 时想的多半是"不限"——那种情况正确答案是夹到 1 并说出来，
+ * 不是安静地让服务再也不跑任何东西。
+ */
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const value = parseNonNegativeInt(raw, fallback);
+  if (value === 0) {
+    log(`并发上限不能为 0（等于永远不跑），按 1 处理`);
+    return 1;
+  }
+  return value;
+}
+
+/**
  * 决策层三选一：
  *   - `MEDIASANDBOX_DECISION=demo`（默认）演示决策层：按目标关键词选工具，
  *     让演示链路自洽（"做一个网页"确实产出网页）
@@ -264,6 +280,11 @@ async function main(): Promise<void> {
   // 产物是从沙盒工作区实时读的，所以结束后要留一段时间才能下载。
   // 但必须设上限，否则每跑一次就永久多一个工作区（Local 目录 / Docker 容器）。
   const sandboxRetention = parseNonNegativeInt(process.env['SANDBOX_RETENTION'], 20);
+  // 并发与排队。默认 **2 并发 / 16 队列**：保守值，因为每个运行都会起一个沙盒
+  // （Docker 下是一个容器）。队列满时回 429 而不是继续收——收进来的尽头是 OOM。
+  // 排队中的运行不会在重启后复活（队列只在内存里，`persist.ts` 会把它们标成已取消）。
+  const maxConcurrentRuns = parsePositiveInt(process.env['MAX_CONCURRENT_RUNS'], 2);
+  const queueLimit = parseNonNegativeInt(process.env['RUN_QUEUE_LIMIT'], 16);
   // 落定产物（`projects/`）**默认不删**：它是沙盒回收之后交付物的唯一副本，
   // 默认删掉不叫清理，叫丢东西。要控盘就显式设 PROJECTS_RETENTION。
   const projectsRetention = parseNonNegativeInt(process.env['PROJECTS_RETENTION'], 0);
@@ -287,6 +308,7 @@ async function main(): Promise<void> {
     policy: DEFAULT_POLICY,
     sandboxRetention: { maxRuns: sandboxRetention },
     projectsRetention: { maxRunsPerProject: projectsRetention },
+    concurrency: { maxConcurrentRuns, queueLimit },
     ...(webDistExists ? { staticDir: WEB_DIST } : {}),
   });
 
@@ -325,6 +347,10 @@ async function main(): Promise<void> {
       `、${externalBlocks.length} 个自定义 block、${userTemplates.length} 套模板）`,
   );
   log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
+  log(
+    `  并发      ${maxConcurrentRuns} 个同时跑，超出排 ${queueLimit} 个（MAX_CONCURRENT_RUNS / RUN_QUEUE_LIMIT 可调），` +
+      `队满回 429；重启不恢复排队`,
+  );
   log(
     `  落定保留  ${
       projectsRetention === 0
