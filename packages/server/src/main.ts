@@ -310,6 +310,8 @@ async function main(): Promise<void> {
     decision,
     ...(llm !== undefined ? { llm } : {}),
     ...(clickDriver !== undefined ? { clickDriver } : {}),
+    // 只为 `/api/health` 如实报告截图能力（真浏览器还是占位）。
+    screenshotDriver,
     providers,
     defaultProvider,
     policy: DEFAULT_POLICY,

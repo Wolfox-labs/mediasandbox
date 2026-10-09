@@ -99,6 +99,14 @@ export interface ServerDeps {
    * 省略即这台机器点不了——端点会**如实回 503**，而不是给一个看起来通过的空结论。
    */
   readonly clickDriver?: ClickDriver | undefined;
+  /**
+   * 截图驱动，**只为健康检查的报告**。
+   *
+   * 截图工具从 `createStructuredTools(blocks, screenshotDriver)` 拿到驱动，
+   * 服务本身不用它——但 `/api/health` 要如实回答"截图是真浏览器还是占位"，
+   * 而那个事实只有这里知道。
+   */
+  readonly screenshotDriver?: { readonly placeholder: boolean } | undefined;
   /** 按 provider 名取实现：'local' 或 'docker'。 */
   readonly providers: Readonly<Record<string, SandboxProvider>>;
   readonly defaultProvider: string;
@@ -727,6 +735,18 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       providers: Object.keys(deps.providers),
       defaultProvider: deps.defaultProvider,
       toolCount: deps.registry.size,
+      /**
+       * 浏览器能力到底可不可用。
+       *
+       * `providers` 里有 `docker` **只说明 dockerode 装上了**，不代表 daemon 可达——
+       * 这两件事混在一起正是那个"Docker 探测缺失"缺陷的根源。
+       * 这里把真实状态单独报出来，界面与脚本据它决定怎么说，不必去猜或解析日志。
+       */
+      browser: {
+        screenshot: deps.screenshotDriver?.placeholder === false ? 'chromium' : 'placeholder',
+        interaction: deps.clickDriver !== undefined ? 'chromium' : 'unavailable',
+      },
+      queue: queue.snapshot(),
     });
   });
 

@@ -33,6 +33,21 @@ describe('HTTP + WebSocket 服务', () => {
     assert.equal(body['defaultProvider'], 'local');
   });
 
+  it('GET /api/health 如实报告浏览器能力与队列状态', async () => {
+    const body = (await (await fetch(`${ctx.origin}/api/health`)).json()) as {
+      browser: { screenshot: string; interaction: string };
+      queue: { running: number; waiting: number; maxConcurrent: number; limit: number };
+    };
+    // **不能靠 `providers` 里有没有 docker 判断能力**：那只说明 dockerode 装上了。
+    // 这正是那个"Docker 探测缺失"缺陷的根源，所以真实状态要单独报出来。
+    assert.equal(body.browser.screenshot, 'placeholder', '测试环境没有真浏览器驱动');
+    assert.equal(body.browser.interaction, 'unavailable');
+    assert.equal(body.queue.running, 0);
+    assert.equal(body.queue.waiting, 0);
+    assert.ok(body.queue.maxConcurrent >= 1);
+    assert.ok(body.queue.limit >= 0);
+  });
+
   it('GET /api/tools 列出可用工具，可按环境筛选', async () => {
     const all = (await (await fetch(`${ctx.origin}/api/tools`)).json()) as { tools: unknown[] };
     assert.ok(all.tools.length > 0);
