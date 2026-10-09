@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     :model-value="visible"
-    title="注册一个 block"
+    :title="isEditing ? `编辑 block：${editingId}` : '注册一个 block'"
     width="720px"
     @update:model-value="emit('update:visible', $event)"
   >
@@ -11,13 +11,18 @@
       :closable="false"
       show-icon
       title="提议 ≠ 决定"
-      description="入池后仍要由决策模型选中才会被用到。校验与内置 block 完全一致：类型、slot 形态、能否打头、能否重复。"
+      :description="
+        isEditing
+          ? '改完立刻生效、重启后仍在。id 不能改：结构里存的是旧 id，换 id 会让已有运行引用不到它。'
+          : '入池后仍要由决策模型选中才会被用到。校验与内置 block 完全一致：类型、slot 形态、能否打头、能否重复。'
+      "
     />
 
     <el-form label-position="top">
       <div class="block-form__row">
         <el-form-item label="id（进 HTML 属性与文件名，字符集受限）">
-          <el-input v-model="form.id" placeholder="例如 pricing-table" />
+          <!-- 编辑时锁住 id：它是历史结构引用这个 block 的唯一凭据。 -->
+          <el-input v-model="form.id" :disabled="isEditing" placeholder="例如 pricing-table" />
         </el-form-item>
         <el-form-item label="显示名">
           <el-input v-model="form.label" placeholder="例如 价格表" />
@@ -81,22 +86,30 @@
 
     <template #footer>
       <el-button @click="emit('update:visible', false)">取消</el-button>
-      <el-button type="primary" :loading="isSubmitting" @click="handleSubmit">注册</el-button>
+      <el-button type="primary" :loading="isSubmitting" @click="handleSubmit">
+        {{ isEditing ? "保存" : "注册" }}
+      </el-button>
     </template>
   </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { ApiError, MediaSandboxAPI } from "@/api/mediasandbox/client";
-import type { BlockGroup, BlockPlacement, SlotType } from "@/api/mediasandbox/types";
+import type { BlockGroup, BlockPlacement, BlockSpec, SlotType } from "@/api/mediasandbox/types";
 
-const props = defineProps<{ visible: boolean }>();
+const props = defineProps<{
+  visible: boolean;
+  /** 给了就是编辑模式（保存到 `PUT /api/blocks/:id`）。 */
+  editing?: BlockSpec | null;
+}>();
 const emit = defineEmits<{
   "update:visible": [visible: boolean];
   created: [note: string];
 }>();
+const isEditing = computed(() => props.editing != null);
+const editingId = computed(() => props.editing?.id ?? "");
 
 const SLOT_TYPES: readonly SlotType[] = [
   "title",
@@ -146,10 +159,34 @@ function createEmptyDraft(): BlockDraft {
 const form = reactive<BlockDraft>(createEmptyDraft());
 const isSubmitting = ref(false);
 
+/** 把池子里的 spec 转成表单草稿。编辑时用它预填，而不是让用户重敲一遍。 */
+function draftFromSpec(spec: BlockSpec): BlockDraft {
+  return {
+    id: spec.id,
+    label: spec.label,
+    description: spec.description,
+    group: spec.group,
+    costHint: spec.costHint,
+    placement: spec.placement,
+    canLead: spec.canLead,
+    repeatable: spec.repeatable,
+    slots: spec.slots.map(slot => ({
+      name: slot.name,
+      type: slot.type,
+      description: slot.description,
+      required: slot.required
+    }))
+  };
+}
+
 watch(
   () => props.visible,
   visible => {
-    if (visible) Object.assign(form, createEmptyDraft());
+    if (!visible) return;
+    Object.assign(
+      form,
+      props.editing != null ? draftFromSpec(props.editing) : createEmptyDraft()
+    );
   }
 );
 
@@ -172,7 +209,7 @@ async function handleSubmit(): Promise<void> {
   }
   isSubmitting.value = true;
   try {
-    const result = await MediaSandboxAPI.createBlock({
+    const payload = {
       id: form.id.trim(),
       label: form.label.trim(),
       description: form.description.trim(),
@@ -187,12 +224,18 @@ async function handleSubmit(): Promise<void> {
         description: slot.description.trim() === "" ? slot.name.trim() : slot.description.trim(),
         required: slot.required
       }))
-    });
-    ElMessage.success(`已入池：${result.block.id}`);
+    };
+    const result =
+      props.editing != null
+        ? await MediaSandboxAPI.updateBlock(props.editing.id, payload)
+        : await MediaSandboxAPI.createBlock(payload);
+    ElMessage.success(isEditing.value ? `已更新：${result.block.id}` : `已入池：${result.block.id}`);
     emit("created", result.note);
     emit("update:visible", false);
   } catch (error) {
-    ElMessage.error(error instanceof ApiError ? error.message : "注册失败");
+    ElMessage.error(
+      error instanceof ApiError ? error.message : isEditing.value ? "保存失败" : "注册失败"
+    );
   } finally {
     isSubmitting.value = false;
   }

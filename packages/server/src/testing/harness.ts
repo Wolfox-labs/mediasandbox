@@ -29,6 +29,7 @@ import {
 import { createServer } from '../app.js';
 import { JsonPersist } from '../persist.js';
 import type { LoadedPools } from '../boot.js';
+import { loadPersistedPools } from '../boot.js';
 
 const rootDir = path.join(os.tmpdir(), `mediasandbox-server-test-${process.pid}`);
 const localSandbox = new LocalSandbox({ rootDir });
@@ -85,20 +86,38 @@ export async function startServer(
     registry.registerAll(BUILTIN_TOOLS);
   }
 
+  const persist =
+    overrides.dataDir !== undefined ? new JsonPersist({ rootDir: overrides.dataDir }) : undefined;
+
+  /*
+   * 与 main.ts 同一条启动顺序：**先把落盘的池子装回来，再建服务、装工具**。
+   *
+   * 这一步是关键：`loadPersistedPools()` 会走 `parseBlockSpec` 与模板校验，
+   * 于是"重启后还在"这条性质在测试里与线上走的是**同一条装载代码路径**。
+   * 此前脚手架跳过了它，测试里"重启"出来的服务永远只有内置池——
+   * 既会让"改动落盘了没有"这类用例假失败，也会掩盖真正的装载问题。
+   */
+  const loadedPools =
+    persist !== undefined
+      ? await loadPersistedPools(persist, (message) => overrides.onLog?.(message))
+      : undefined;
+
   // block 池与工具必须成对出现：工具装在哪个池子上，规划器就得用哪个池子。
   const blocks =
     overrides.pools?.blocks ??
-    (overrides.structured === true ? createBlockRegistry() : undefined);
+    loadedPools?.blocks ??
+    (overrides.structured === true || overrides.dataDir !== undefined
+      ? createBlockRegistry()
+      : undefined);
   if (blocks !== undefined) {
     registry.registerAll(createStructuredTools(blocks));
   }
   const templates =
     blocks !== undefined
-      ? createTemplateRegistry(blocks, [...(overrides.pools?.userTemplates ?? [])])
+      ? createTemplateRegistry(blocks, [
+          ...(overrides.pools?.userTemplates ?? loadedPools?.userTemplates ?? []),
+        ])
       : undefined;
-
-  const persist =
-    overrides.dataDir !== undefined ? new JsonPersist({ rootDir: overrides.dataDir }) : undefined;
 
   const instance = createServer({
     registry,

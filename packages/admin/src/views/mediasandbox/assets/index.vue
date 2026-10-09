@@ -79,7 +79,7 @@
 
         <el-tab-pane :label="`block 组件（${blocks.length}）`" name="blocks">
           <div class="ms-assets__bar">
-            <el-button type="primary" @click="isBlockFormVisible = true">注册 block</el-button>
+            <el-button type="primary" @click="openCreate">注册 block</el-button>
             <el-button :loading="isLoading" @click="fetchBlocks">刷新</el-button>
             <span class="ms-assets__note">
               分组：{{ groups.map(group => `${group.label} ${group.count}`).join(" · ") }}
@@ -126,12 +126,49 @@
             <el-table-column label="成本" width="80">
               <template #default="{ row }">{{ row.costHint }}</template>
             </el-table-column>
+            <el-table-column label="来源" width="90">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.builtin ? 'info' : 'success'">
+                  {{ row.builtin ? "内置" : "自定义" }}
+                </el-tag>
+                <el-tag v-if="row.disabled" size="small" type="warning">已停用</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="150">
+              <template #default="{ row }">
+                <!-- 内置 block 的改/删会被后端拒绝，所以按钮直接禁用：
+                     让用户点了才报错，不如一开始就说明为什么点不了。 -->
+                <el-button link type="primary" :disabled="row.builtin" @click="openEdit(row)">
+                  编辑
+                </el-button>
+                <el-button
+                  link
+                  type="warning"
+                  :disabled="row.builtin || row.disabled"
+                  @click="handleDisableBlock(row)"
+                >
+                  停用
+                </el-button>
+                <el-button
+                  link
+                  type="danger"
+                  :disabled="row.builtin"
+                  @click="handlePurgeBlock(row)"
+                >
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </el-tab-pane>
       </el-tabs>
     </el-card>
 
-    <BlockForm v-model:visible="isBlockFormVisible" @created="handleBlockCreated" />
+    <BlockForm
+      v-model:visible="isBlockFormVisible"
+      :editing="editingBlock"
+      @created="handleBlockCreated"
+    />
   </div>
 </template>
 
@@ -154,6 +191,8 @@ const templateLabel = ref("");
 const blockNote = ref("");
 const isLoading = ref(false);
 const isBlockFormVisible = ref(false);
+/** 正在编辑的 block；为 null 时表单是"注册"模式。 */
+const editingBlock = ref<BlockSpec | null>(null);
 
 function reportError(error: unknown): void {
   ElMessage.error(error instanceof ApiError ? error.message : "操作失败");
@@ -223,6 +262,66 @@ async function handleDeleteTemplate(templateId: string): Promise<void> {
 function handleBlockCreated(note: string): void {
   blockNote.value = note;
   void fetchBlocks();
+}
+
+/** 打开注册：必须把上一次的编辑目标清掉，否则表单会带着旧 block 预填。 */
+function openCreate(): void {
+  editingBlock.value = null;
+  isBlockFormVisible.value = true;
+}
+
+/** 打开编辑：把这一行原样交给表单预填。 */
+function openEdit(row: BlockSpec): void {
+  editingBlock.value = row;
+  isBlockFormVisible.value = true;
+}
+
+/**
+ * 停用：不再参与新页面的候选，**历史结构照样能渲染**。
+ * 所以这里只提示"不再被选中"，不说"已删除"——两件事不一样。
+ */
+async function handleDisableBlock(row: BlockSpec): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `停用 ${row.id}？它会退出候选池，但用过它的历史运行仍能照常渲染。`,
+      "确认停用",
+      { type: "warning" }
+    );
+  } catch {
+    return;
+  }
+  try {
+    const result = await MediaSandboxAPI.deleteBlock(row.id);
+    ElMessage.success(
+      result.usedByRuns > 0
+        ? `已停用；${result.usedByRuns} 次历史运行用过它，那些结构仍可渲染`
+        : "已停用"
+    );
+    await fetchBlocks();
+  } catch (error) {
+    reportError(error);
+  }
+}
+
+/**
+ * 物理删除：只对**从未被任何运行用过**的允许。
+ * 后端会拒绝并说清是哪次运行用过——这里把原因照原样显示出来，不吞掉。
+ */
+async function handlePurgeBlock(row: BlockSpec): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`彻底删除 ${row.id}？此操作不可撤销（未被任何运行用过的才允许）。`, "确认删除", {
+      type: "error"
+    });
+  } catch {
+    return;
+  }
+  try {
+    await MediaSandboxAPI.deleteBlock(row.id, { purge: true });
+    ElMessage.success("已删除");
+    await fetchBlocks();
+  } catch (error) {
+    reportError(error);
+  }
 }
 
 onMounted(async () => {

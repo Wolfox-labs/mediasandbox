@@ -142,8 +142,14 @@ export const MediaSandboxAPI = {
   },
 
   /** block 池目录：结构化制作的候选集来源。 */
-  blocks(group?: BlockGroup): Promise<{ blocks: BlockSpec[]; groups: BlockGroupSummary[] }> {
-    const query = group !== undefined ? `?group=${group}` : "";
+  blocks(
+    group?: BlockGroup,
+    options: { includeDisabled?: boolean } = {}
+  ): Promise<{ blocks: BlockSpec[]; groups: BlockGroupSummary[] }> {
+    const params = new URLSearchParams();
+    if (group !== undefined) params.set("group", group);
+    if (options.includeDisabled === true) params.set("includeDisabled", "1");
+    const query = params.toString() === "" ? "" : `?${params.toString()}`;
     return request<{ blocks: BlockSpec[]; groups: BlockGroupSummary[] }>(`/api/blocks${query}`);
   },
 
@@ -153,6 +159,42 @@ export const MediaSandboxAPI = {
       method: "POST",
       body: JSON.stringify(input)
     });
+  },
+
+  /**
+   * 改一个自定义 block。内置的会被后端拒绝（400）。
+   *
+   * id 不允许改：结构里存的是旧 id，换 id 等于让历史运行引用悬空。
+   */
+  updateBlock(
+    blockId: string,
+    input: BlockInput
+  ): Promise<{ block: { id: string; label: string; group: string; disabled: boolean }; note: string }> {
+    return request<{
+      block: { id: string; label: string; group: string; disabled: boolean };
+      note: string;
+    }>(`/api/blocks/${encodeURIComponent(blockId)}`, {
+      method: "PUT",
+      body: JSON.stringify(input)
+    });
+  },
+
+  /**
+   * 停用或彻底删除一个自定义 block。
+   *
+   * 默认**停用**：不再参与新页面的候选，但历史结构照样能渲染。
+   * `purge` 才是物理删除，且只允许从未被任何运行用过的（否则后端 400）。
+   */
+  deleteBlock(
+    blockId: string,
+    options: { purge?: boolean } = {}
+  ): Promise<{ block: { id: string; disabled?: boolean; removed?: boolean }; usedByRuns: number; note: string }> {
+    const suffix = options.purge === true ? "?purge=1" : "";
+    return request<{
+      block: { id: string; disabled?: boolean; removed?: boolean };
+      usedByRuns: number;
+      note: string;
+    }>(`/api/blocks/${encodeURIComponent(blockId)}${suffix}`, { method: "DELETE" });
   },
 
   templates(): Promise<{ templates: TemplateItem[] }> {

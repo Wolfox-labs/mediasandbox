@@ -279,6 +279,21 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   }
 
   /**
+   * 哪些运行的结构里用过这个 block 类型。
+   *
+   * 用来回答两个问题：停用时告诉用户"影响面有多大"，以及物理删除前确认
+   * "真的没人用过"。判据是**结构留痕里的 `type`**，不是产物内容——
+   * 产物是渲染结果，从它反推引用关系不可靠。
+   */
+  function runsUsingBlockType(blockId: string): string[] {
+    const hits: string[] = [];
+    for (const record of store.list()) {
+      if (record.structure?.page.blocks.some((b) => b.type === blockId)) hits.push(record.id);
+    }
+    return hits;
+  }
+
+  /**
    * 淘汰超出保留额度的沙盒，从最旧的已结束 run 开始销毁。
    *
    * 只销毁**已结束**的 run：在途运行的沙盒正在被写，不能碰。
@@ -1376,7 +1391,12 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
     const groupRaw = req.query['group'];
     const group = isBlockGroup(groupRaw) ? groupRaw : undefined;
-    const specs = registry.filter(group !== undefined ? { group } : {});
+    // 默认只给能用的；`?includeDisabled=1` 才把停用的一并带出来（管理端要显示它们）。
+    const includeDisabled = req.query['includeDisabled'] === '1' || req.query['includeDisabled'] === 'true';
+    const specs = registry.filter({
+      ...(group !== undefined ? { group } : {}),
+      ...(includeDisabled ? { includeDisabled: true } : {}),
+    });
     res.json({
       blocks: specs.map((s) => ({
         id: s.id,
@@ -1390,6 +1410,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         placement: s.placement ?? 'any',
         costHint: s.costHint,
         slots: s.slots,
+        // 内置与否必须给出来：管理端据此决定"改/删"按钮能不能点。
+        // 让前端自己维护一份内置 id 列表的话，两边迟早不一致。
+        builtin: registry.isBuiltin(s.id),
+        // 停用状态要带出来（只在 `?includeDisabled=1` 时会看到它们）。
+        ...(s.disabled === true ? { disabled: true } : {}),
       })),
       groups: registry.groups().map((g) => ({
         id: g,
@@ -1470,6 +1495,130 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         'code 出代码块、link 出链接、image 出图、list-* 出列表与图集）；' +
         '要专属版式需要内置渲染器。填充与结构决策已完全可用。',
     });
+  });
+
+  /**
+   * 改一个自定义 block 的声明（label / 描述 / slot 声明 / 位置约束……）。
+   *
+   * **内置 block 一律拒绝**：它们由代码提供，改了会在下次部署时被覆盖，
+   * 而"看起来改成功了、重启就回去了"是最难查的一类问题。
+   * id 也不允许改：结构里存的是旧 id，换 id 等于把历史运行改成悬空引用。
+   */
+  app.put('/api/blocks/:blockId', (req: Request, res: Response) => {
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+    const blockId = paramOf(req, 'blockId');
+    if (!registry.has(blockId)) {
+      errorResponse(res, 404, `未注册的 block: ${blockId}`);
+      return;
+    }
+    if (registry.isBuiltin(blockId)) {
+      errorResponse(
+        res,
+        400,
+        `内置 block 不可修改: ${blockId}`,
+        '内置 block 由代码提供，改了下次启动会被覆盖；要定制请新建一个自定义 block',
+      );
+      return;
+    }
+    let spec: BlockSpec;
+    try {
+      spec = parseBlockSpec(req.body);
+    } catch (error) {
+      if (error instanceof BlockInputError) {
+        errorResponse(res, 400, error.message);
+        return;
+      }
+      throw error;
+    }
+    if (spec.id !== blockId) {
+      errorResponse(
+        res,
+        400,
+        `不允许改 id: ${blockId} → ${spec.id}`,
+        '结构里存的是旧 id，换 id 会让已有运行引用不到它；要换名字请新建一个',
+      );
+      return;
+    }
+    try {
+      registry.replace(spec);
+    } catch (error) {
+      if (error instanceof BlockError) {
+        errorResponse(res, 400, error.message, `code=${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    saveExternalBlocks();
+    res.json({
+      block: { id: spec.id, label: spec.label, group: spec.group, disabled: spec.disabled === true },
+      note: '已更新。改动立刻生效，重启后仍在。',
+    });
+  });
+
+  /**
+   * 停用一个自定义 block（**不是物理删除**）。
+   *
+   * 停用只做一件事：不再参与新页面的候选。历史运行的结构里存着 `type: 'x'`，
+   * 渲染要靠注册表把 id 解析成 spec——所以停用的 spec **仍然在池子里**，
+   * 那些运行照样打开、照样能重新校验。
+   *
+   * 想彻底删掉用 `DELETE /api/blocks/:id?purge=1`，但只允许**从未被任何运行用过**的。
+   * 这不是刁难：删掉一个在用过的 block，历史结构就渲染不出来了，而它本来是好的。
+   */
+  app.delete('/api/blocks/:blockId', (req: Request, res: Response) => {
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+    const blockId = paramOf(req, 'blockId');
+    if (!registry.has(blockId)) {
+      errorResponse(res, 404, `未注册的 block: ${blockId}`);
+      return;
+    }
+    if (registry.isBuiltin(blockId)) {
+      errorResponse(
+        res,
+        400,
+        `内置 block 不可删除: ${blockId}`,
+        '内置 block 由代码提供；要让它不参与候选，请改代码里的 BUILTIN_BLOCKS',
+      );
+      return;
+    }
+
+    const purge = req.query['purge'] === '1' || req.query['purge'] === 'true';
+    const users = runsUsingBlockType(blockId);
+    if (!purge) {
+      const spec = registry.get(blockId);
+      registry.replace({ ...spec, disabled: true });
+      saveExternalBlocks();
+      res.json({
+        block: { id: blockId, disabled: true },
+        usedByRuns: users.length,
+        note:
+          '已停用：不再参与新页面的候选。历史运行的结构仍能渲染——' +
+          '它还在池子里，只是不再被选中。彻底删除用 ?purge=1。',
+      });
+      return;
+    }
+
+    if (users.length > 0) {
+      errorResponse(
+        res,
+        400,
+        `block 已被历史运行引用，不能物理删除: ${blockId}`,
+        `用过它的运行：${users.slice(0, 5).join('、')}${users.length > 5 ? ` 等 ${users.length} 个` : ''}；` +
+          '删除后那些结构会渲染不出来。改用停用（不带 ?purge=1）。',
+      );
+      return;
+    }
+    registry.remove(blockId);
+    saveExternalBlocks();
+    res.json({ block: { id: blockId, removed: true }, usedByRuns: 0, note: '已从池子与落盘里摘掉。' });
   });
 
   /**

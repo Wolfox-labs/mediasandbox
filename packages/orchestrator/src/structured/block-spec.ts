@@ -122,6 +122,17 @@ export interface BlockSpec {
   readonly placement?: BlockPlacement | undefined;
   /** 实现成本提示，供决策模型权衡。 */
   readonly costHint: 'fast' | 'medium' | 'slow';
+  /**
+   * 已停用：**不再参与新页面的候选**，但仍然是"已注册"的。
+   *
+   * 为什么是标记而不是直接摘掉：历史运行的结构里存着 `type: 'x'`，
+   * 渲染与校验要靠注册表把 id 解析成 spec。把 spec 摘掉，那些运行就变成
+   * "引用了不存在的类型"，而它们本来是好的。
+   *
+   * 所以停用的语义**只有一个**：不参与新页面的候选与规划。
+   * 已经用了它的结构照样渲染、照样能重新校验。
+   */
+  readonly disabled?: boolean | undefined;
 }
 
 export class BlockError extends Error {
@@ -161,6 +172,13 @@ export interface BlockQuery {
   /** 只看可重复出现的。 */
   readonly repeatableOnly?: boolean | undefined;
   readonly exclude?: readonly string[] | undefined;
+  /**
+   * 是否把**已停用**的 block 也带出来。默认 false。
+   *
+   * 默认不带出：候选、规划、目录都只该看见能用的。
+   * 需要"看全部"的场合（管理端列出停用项、把结构还原成 spec）显式传 true。
+   */
+  readonly includeDisabled?: boolean | undefined;
 }
 
 function validateSlot(spec: BlockSpec, slot: SlotSpec): void {
@@ -282,6 +300,13 @@ export class BlockRegistry {
     return this.blocks.has(blockId);
   }
 
+  /**
+   * 已停用的算不算"注册过"？**算**。
+   *
+   * `has()` 回答的是"这个 id 认不认识"，不是"能不能拿来用"——
+   * 历史结构里引用过的停用 block 必须仍然认识，否则那些结构就没法渲染了。
+   * 候选集是否包含它，由 `filter()` / `candidatesFor()` 决定。
+   */
   get(blockId: string): BlockSpec {
     const spec = this.blocks.get(blockId);
     if (spec === undefined) {
@@ -290,19 +315,49 @@ export class BlockRegistry {
     return spec;
   }
 
-  /** 全部 spec，按 id 排序保证确定性。 */
-  specs(): BlockSpec[] {
-    return [...this.blocks.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+  /**
+   * 用一份新 spec 替换已注册的那个（**改 id 不允许**：结构里存的是旧 id，
+   * 换 id 等于把历史运行的引用改成悬空）。
+   */
+  replace(spec: BlockSpec): this {
+    validateSpec(spec);
+    if (!this.blocks.has(spec.id)) {
+      throw new BlockError(`未注册的 block，无法替换: ${spec.id}`, 'UNKNOWN_BLOCK', spec.id);
+    }
+    this.blocks.set(spec.id, spec);
+    return this;
   }
 
-  /** 分组名，按固定顺序（骨架 → 内容 → 交互），不是字母序。 */
+  /** 从池子里摘掉。历史结构若引用过它，渲染会失败——调用方负责先确认没人用过。 */
+  remove(blockId: string): boolean {
+    return this.blocks.delete(blockId);
+  }
+
+  /** 是否是内置 block（由代码提供，不受管理端改/删影响）。 */
+  isBuiltin(blockId: string): boolean {
+    return BUILTIN_BLOCK_IDS.has(blockId);
+  }
+
+  /**
+   * 全部 spec，按 id 排序保证确定性。
+   *
+   * **默认不含已停用的**（见 `BlockQuery.includeDisabled`）。
+   */
+  specs(query: Pick<BlockQuery, 'includeDisabled'> = {}): BlockSpec[] {
+    const all = [...this.blocks.values()];
+    const visible = query.includeDisabled === true ? all : all.filter((s) => s.disabled !== true);
+    return visible.sort((a, b) => (a.id < b.id ? -1 : 1));
+  }
+
+  /** 分组名，按固定顺序（骨架 → 内容 → 交互），不是字母序。只看**可用**的块。 */
   groups(): BlockGroup[] {
-    return BLOCK_GROUPS.filter((g) => this.specs().some((s) => s.group === g));
+    const enabled = this.specs();
+    return BLOCK_GROUPS.filter((g) => enabled.some((s) => s.group === g));
   }
 
   filter(query: BlockQuery = {}): BlockSpec[] {
     const exclude = new Set(query.exclude ?? []);
-    return this.specs().filter((spec) => {
+    return this.specs({ includeDisabled: query.includeDisabled }).filter((spec) => {
       if (exclude.has(spec.id)) return false;
       if (query.group !== undefined && spec.group !== query.group) return false;
       if (query.leadOnly === true && !spec.canLead) return false;
@@ -601,6 +656,8 @@ const BLOCKS: readonly BlockSpec[] = [
 export const BUILTIN_BLOCKS: readonly BlockSpec[] = [...BLOCKS].sort((a, b) =>
   a.id < b.id ? -1 : 1,
 );
+/** 内置 id 集合。判断"哪些是代码提供的"，用成员判断而不是逐次遍历。 */
+const BUILTIN_BLOCK_IDS: ReadonlySet<string> = new Set(BUILTIN_BLOCKS.map((b) => b.id));
 /** 建一个装了内置 block 的池子。外部来源自行 `register` 追加。 */
 export function createBlockRegistry(extra: readonly BlockSpec[] = []): BlockRegistry {
   return new BlockRegistry().registerAll(BUILTIN_BLOCKS).registerAll(extra);

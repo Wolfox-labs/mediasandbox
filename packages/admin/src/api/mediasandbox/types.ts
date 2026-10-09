@@ -86,6 +86,10 @@ export interface BlockSpec {
   readonly placement: BlockPlacement;
   readonly costHint: "fast" | "medium" | "slow";
   readonly slots: readonly SlotSpec[];
+  /** 内置 block：由代码提供，改/删会被后端拒绝。 */
+  readonly builtin: boolean;
+  /** 已停用：不再参与新页面的候选（只在 `?includeDisabled=1` 时会看到）。 */
+  readonly disabled?: boolean;
 }
 
 export interface BlockGroupSummary {
