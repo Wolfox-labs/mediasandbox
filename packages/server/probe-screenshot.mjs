@@ -51,6 +51,7 @@ console.log('artifacts:', files.map((f) => `${f.path}(${f.size}B)`).join(' '));
 // 上一轮就是这么被误导的。
 if (shot?.status !== 'succeeded') {
   console.error('截图节点没有成功，先看它的报错，而不是去读 PNG');
+  await release(result.handle);
   process.exit(1);
 }
 
@@ -59,3 +60,25 @@ const out = path.join(process.cwd(), 'screenshot-verify.png');
 await fs.writeFile(out, png);
 console.log('written:', out, png.byteLength, 'bytes');
 console.log('workdir:', result.handle.workDir);
+await release(result.handle);
+
+/**
+ * 回收沙盒：不然每跑一次就永久多一个容器/工作区
+ * （连跑几次之后 `docker ps` 里躺了 5 个就是这么来的）。
+ *
+ * 说明白：这条覆盖的是**正常跑完**与**截图节点失败**两条路径；
+ * 脚本自己抛异常时仍可能漏一个（探针是一次性脚本，不为它再套一层）。
+ * 想留着现场看就 `KEEP_SANDBOX=1 node probe-screenshot.mjs`。
+ */
+async function release(handle) {
+  if (process.env.KEEP_SANDBOX === '1') {
+    console.log('保留现场（KEEP_SANDBOX=1）：', handle.workDir);
+    return;
+  }
+  try {
+    await provider.destroy(handle);
+    console.log('已回收沙盒');
+  } catch (error) {
+    console.log('回收沙盒失败：', error instanceof Error ? error.message : String(error));
+  }
+}
