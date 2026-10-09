@@ -37,7 +37,11 @@ class PickingDecision implements DecisionClient {
   options: string[] = [];
   question = '';
 
-  constructor(private readonly pick: string | null) {}
+  private readonly picks: readonly (string | null)[];
+
+  constructor(pick: string | null | readonly (string | null)[]) {
+    this.picks = Array.isArray(pick) ? pick : [pick as string | null];
+  }
 
   async health(): Promise<{ ok: boolean; detail: string }> {
     return { ok: true, detail: 'stub' };
@@ -53,7 +57,8 @@ class PickingDecision implements DecisionClient {
       if (question.type !== 'choice') throw new Error(`交互验证只该问 choice，收到了 ${question.type}`);
       this.options = Object.keys(question.criteria);
       this.question = question.instructions;
-      answers[id] = choiceAnswer(this.pick);
+      const picked = this.picks[this.calls - 1] ?? this.picks[this.picks.length - 1] ?? null;
+      answers[id] = choiceAnswer(picked);
     }
     return { answers, meta: { latencyMs: 1, source: 'stub' }, usage: { inputTokens: 10, outputTokens: 0 }, raw: { stub: true } };
   }
@@ -63,22 +68,27 @@ function choiceAnswer(value: string | null) {
   return { type: 'choice' as const, value, probabilities: value === null ? {} : { [value]: 0.9 } };
 }
 
-/** 假驱动：只记录被点的是谁，结论由测试自己给。 */
+/**
+ * 假驱动：记录被点的是谁，结论由测试自己给。
+ *
+ * `dudKeys` 里的目标"点了没变化"——用来重现"决策层挑了个白点的元素"。
+ */
 class RecordingDriver implements ClickDriver {
   readonly name = 'recording';
   readonly placeholder = false;
   readonly requests: ClickRequest[] = [];
 
-  constructor(private readonly changed = true) {}
+  constructor(private readonly dudKeys: readonly string[] = []) {}
 
   async click(request: ClickRequest): Promise<ClickResult> {
     this.requests.push(request);
+    const changed = !this.dudKeys.includes(request.target.key);
     return {
       target: request.target,
       before: { selectedTabs: ['b1:1'] },
-      after: { selectedTabs: [request.target.key] },
-      changed: this.changed,
-      detail: this.changed ? '点击后标签页变为选中' : '点击后没有任何变化',
+      after: { selectedTabs: changed ? [request.target.key] : ['b1:1'] },
+      changed,
+      detail: changed ? '点击后标签页变为选中' : `点击后 ${request.target.key} 没有任何变化`,
       screenshot: { bytes: new Uint8Array([1, 2, 3]), path: 'artifacts/click.png' },
       driver: this.name,
       placeholder: false,
@@ -169,9 +179,62 @@ describe('交互验证：候选由页面定，选择由决策层定，结论由�
 
   it('点击没生效时结论是未通过，不粉饰', async () => {
     const decision = new PickingDecision('b1:2');
-    const driver = new RecordingDriver(false);
+    const driver = new RecordingDriver(['b1:1', 'b1:2']);
     const result = await verifyInteraction({ structure: tabsPage, decision, driver, sandbox, goal: '测试目标' });
     assert.match(result.detail, /交互验证未通过/);
+  });
+
+  it('第一次挑中"点了没变化"的目标时，换一个候选再点（并留下两次记录）', async () => {
+    // 决策层第一次挑 b1:2（假驱动把它当白点），第二次只剩 b1:1，点通了。
+    const decision = new PickingDecision(['b1:2', 'b1:1']);
+    const driver = new RecordingDriver(['b1:2']);
+    const result = await verifyInteraction({ structure: tabsPage, decision, driver, sandbox, goal: '测试目标' });
+
+    assert.deepEqual(
+      driver.requests.map((r) => r.target.key),
+      ['b1:2', 'b1:1'],
+      '应该换一个候选再试，而不是盯着同一个死点',
+    );
+    assert.equal(result.result?.changed, true);
+    assert.match(result.detail, /交互验证通过/);
+    assert.match(result.detail, /第 2 次尝试生效/);
+    assert.match(result.detail, /尝试 2 次/);
+    assert.equal(result.attempts?.length, 2);
+    assert.match(result.attempts?.[0] ?? '', /b1:2/);
+    // 第二轮只剩一个候选，不能再问决策层（choice 至少要 2 个候选，问了就是 422）。
+    assert.equal(decision.calls, 1, '只剩一个候选时不该再问一次');
+  });
+
+  it('只剩一个候选且它点了没变化时，不会拿同一个目标反复点', async () => {
+    const form = page([
+      block('b7', 'form', {
+        heading: { kind: 'text', text: '联系我们' },
+        fields: { kind: 'list', items: ['邮箱'] },
+        submitText: { kind: 'text', text: '发送' },
+      }),
+    ]);
+    const decision = new PickingDecision('b7');
+    const driver = new RecordingDriver(['b7']);
+    const result = await verifyInteraction({ structure: form, decision, driver, sandbox, goal: '测试目标' });
+    assert.equal(driver.requests.length, 1, '同一个候选只该点一次');
+    assert.match(result.detail, /交互验证未通过/);
+  });
+
+  it('页面上只有一个可点元素时不问决策层，直接点它并说清没得挑', async () => {
+    const form = page([
+      block('b7', 'form', {
+        heading: { kind: 'text', text: '联系我们' },
+        fields: { kind: 'list', items: ['邮箱'] },
+        submitText: { kind: 'text', text: '发送' },
+      }),
+    ]);
+    const decision = new PickingDecision('b7');
+    const driver = new RecordingDriver();
+    const result = await verifyInteraction({ structure: form, decision, driver, sandbox, goal: '测试目标' });
+    assert.equal(decision.calls, 0, '只有一个候选还去问决策层，服务端会直接 422');
+    assert.equal(driver.requests.length, 1);
+    assert.equal(result.picked?.key, 'b7');
+    assert.match(result.detail, /只有一个可点元素/);
   });
 
   it('候选超过决策层上限时截断，并在上下文里说明', async () => {

@@ -33,6 +33,13 @@ RUN apk add --no-cache --timeout 60 chromium
 #                  而这种"截图成功了、但全是豆腐块"最难被发现。
 RUN apk add --no-cache --timeout 60 font-noto-cjk
 
+# socat —— 给"模拟点击"用：新版 chromium 的 DevTools 只肯监听容器内的 127.0.0.1
+# （`--remote-debugging-address` 已被忽略，实测仍绑 127.0.0.1），
+# 而端口要从宿主机经 Docker 代理进来，够不着那个回环地址。
+# 于是在容器内做一层转发：0.0.0.0:<对外端口> → 127.0.0.1:9222。
+# 宿主机侧只发布 `127.0.0.1:<随机端口>`，局域网里别的机器连不上。
+RUN apk add --no-cache --timeout 60 socat
+
 RUN mkdir -p /workspace \
  && adduser -D -u 1000 shooter \
  && chown -R shooter:shooter /workspace

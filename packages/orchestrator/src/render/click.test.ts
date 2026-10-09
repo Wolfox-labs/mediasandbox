@@ -26,6 +26,7 @@ function target(kind: ClickTarget['kind'], key: string, blockId = 'b1'): ClickTa
     label: '标签',
     selector: `[data-ms-${kind}="${key}"]`,
     effect: '效果',
+    initiallyActive: false,
   };
 }
 

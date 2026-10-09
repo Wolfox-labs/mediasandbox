@@ -132,7 +132,32 @@ describe('可点元素发现：辅助函数', () => {
 
   it('给决策模型的选项文本带着"点了会怎样"', () => {
     const text = describeClickTargets(parseClickTargets(renderPage(tabsPage)));
-    assert.match(text, /b1:1：概览（tab；点击后 .*aria-selected/);
-    assert.match(text, /b1:2：参数 & 价格/);
+    assert.match(text, /b1:1：概览（tab，当前已是默认激活状态，点它不会有可观察变化；点击后 .*aria-selected/);
+    assert.match(text, /b1:2：参数 & 价格（tab；点击后/);
+  });
+
+  it('初始就是激活状态的目标被标出来，模型才有机会避开它', () => {
+    const tabs = parseClickTargets(renderPage(tabsPage)).filter((t) => t.kind === 'tab');
+    assert.equal(tabs[0]!.initiallyActive, true, '第一个标签页本来就是选中的');
+    assert.equal(tabs[1]!.initiallyActive, false);
+
+    const folded = parseClickTargets(
+      renderPage(page([block('b9', 'accordion', { items: { kind: 'list', items: ['问一|答一', '问二|答二'] } })])),
+    ).filter((t) => t.kind === 'accordion');
+    assert.equal(folded[0]!.initiallyActive, true, '第一个折叠项本来就是展开的');
+    assert.equal(folded[1]!.initiallyActive, false);
+
+    const submit = parseClickTargets(
+      renderPage(
+        page([
+          block('b7', 'form', {
+            heading: { kind: 'text', text: '表单' },
+            fields: { kind: 'list', items: ['姓名'] },
+            submitText: { kind: 'text', text: '提交' },
+          }),
+        ]),
+      ),
+    ).filter((t) => t.kind === 'submit');
+    assert.equal(submit[0]!.initiallyActive, false, '提交按钮没有"初始激活"这回事');
   });
 });

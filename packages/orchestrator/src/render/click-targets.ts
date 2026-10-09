@@ -27,6 +27,14 @@ export interface ClickTarget {
   readonly selector: string;
   /** 点击后应该发生的可观察变化（人话），同时就是验收标准。 */
   readonly effect: string;
+  /**
+   * 初始就是"激活"状态（第一个标签页已选中 / 第一个折叠项已展开）。
+   *
+   * 这个字段是为**决策层**准备的：点一个本来就选中的标签页，页面不会有任何变化，
+   * 于是验证注定"看不出结果"。把它标出来，模型才可能避开；
+   * 判定层（`judgeClick`）也会据此把这种点击判为"无法判断"，而不是当成功。
+   */
+  readonly initiallyActive: boolean;
 }
 
 const EFFECTS: Record<ClickKind, string> = {
@@ -91,6 +99,7 @@ export function parseClickTargets(html: string): ClickTarget[] {
         label,
         selector: `[data-ms-tab="${cssAttrValue(tabKey)}"]`,
         effect: EFFECTS.tab,
+        initiallyActive: /aria-selected="true"/i.test(attrs),
       });
     } else if (accordionKey) {
       const rest = html.slice(tagRe.lastIndex);
@@ -103,6 +112,8 @@ export function parseClickTargets(html: string): ClickTarget[] {
         label: summary ? plainText(summary[1] ?? '') : '',
         selector: `[data-ms-accordion="${cssAttrValue(accordionKey)}"] > summary`,
         effect: EFFECTS.accordion,
+        // `<details open>` 的初始展开状态写在 details 标签自己的属性里。
+        initiallyActive: /(^|\s)open(\s|=|$)/i.test(attrs),
       });
     } else if (submitKey) {
       const close = html.indexOf('</button>', tagRe.lastIndex);
@@ -115,6 +126,8 @@ export function parseClickTargets(html: string): ClickTarget[] {
         label,
         selector: `[data-ms-submit="${cssAttrValue(submitKey)}"]`,
         effect: EFFECTS.submit,
+        // 提交按钮没有"初始激活"的概念：没点过就是没动静。
+        initiallyActive: false,
       });
     }
     void tag;
@@ -126,9 +139,14 @@ export function findClickTarget(targets: readonly ClickTarget[], key: string): C
   return targets.find((t) => t.key === key);
 }
 
-/** 决策模型的问题选项：每行"key：标签（种类，点了会怎样）"。 */
+/** 决策模型的问题选项：每行"key：标签（种类、初始状态、点了会怎样）"。 */
 export function describeClickTargets(targets: readonly ClickTarget[]): string {
   return targets
-    .map((t) => `${t.key}：${t.label || '(无文本)'}（${t.kind}；点击后 ${t.effect}）`)
+    .map(
+      (t) =>
+        `${t.key}：${t.label || '(无文本)'}（${t.kind}` +
+        `${t.initiallyActive ? '，当前已是默认激活状态，点它不会有可观察变化' : ''}；` +
+        `点击后 ${t.effect}）`,
+    )
     .join('\n');
 }

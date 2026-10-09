@@ -47,6 +47,13 @@ console.log('screenshot node:', shot?.status, shot?.error ?? '', shot?.summary ?
 const files = await provider.listFiles(result.handle, 'artifacts/*');
 console.log('artifacts:', files.map((f) => `${f.path}(${f.size}B)`).join(' '));
 
+// 先看截图节点自己成没成：直接去读 PNG 会把 chromium 真正的报错盖成一个 ENOENT，
+// 上一轮就是这么被误导的。
+if (shot?.status !== 'succeeded') {
+  console.error('截图节点没有成功，先看它的报错，而不是去读 PNG');
+  process.exit(1);
+}
+
 const png = await provider.readFile(result.handle, 'artifacts/screenshot.png');
 const out = path.join(process.cwd(), 'screenshot-verify.png');
 await fs.writeFile(out, png);

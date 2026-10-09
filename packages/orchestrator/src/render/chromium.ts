@@ -83,6 +83,12 @@ export class ChromiumScreenshotDriver implements ScreenshotDriver {
 
     const container = await this.docker.createContainer({
       Image: this.image,
+      // **只读根下必须把 HOME 指到 tmpfs**：chromium 要往 `$HOME/.config` 下
+      // 建 profile 与 crashpad 数据库，建不出来时它不报"目录不可写"，
+      // 而是把 crashpad handler 拉起来却少给参数，最后以 133 退出、**一张图都不写**。
+      // 实测：同一个容器，只加这一条 `HOME=/tmp` 就从 133 变成 0 并写出 PNG；
+      // `--user-data-dir` 单独加是没用的。隔离边界不变（只读根照旧）。
+      Env: ['HOME=/tmp'],
       Cmd: [
         '/usr/bin/chromium-browser',
         '--headless=new',
@@ -91,6 +97,8 @@ export class ChromiumScreenshotDriver implements ScreenshotDriver {
         '--disable-gpu',
         // 默认 /dev/shm 很小，不禁用的话大页面会渲染到一半崩掉。
         '--disable-dev-shm-usage',
+        // profile 落到 tmpfs（与上面的 HOME 配套）。
+        '--user-data-dir=/tmp/chromium-profile',
         '--hide-scrollbars',
         `--window-size=${width},${height}`,
         `--screenshot=${this.containerWorkDir}/${OUTPUT_PATH}`,

@@ -28,8 +28,17 @@ import type { BrowserContainer } from './chromium.js';
 import type { ClickDriver, ClickObservation, ClickRequest, ClickResult } from './click.js';
 import { buildClickScript, judgeClick, parseClickScriptResult } from './click.js';
 
-/** 容器里的调试端口。固定值，宿主机端口由 Docker 随机分配。 */
-const DEBUG_PORT = 9222;
+/**
+ * chromium 在容器内监听的端口（只有回环）。
+ *
+ * 两者分开是必须的：新版 chromium **忽略** `--remote-debugging-address`，
+ * 永远只绑 127.0.0.1（实测 netstat 里就是 `127.0.0.1:9222`），
+ * 而 Docker 的端口转发是连容器的非回环地址，于是永远连不上、只报一句 `fetch failed`。
+ * 中间加一层 socat 把 `0.0.0.0:<DEBUG_PORT>` 转到回环上的这个端口。
+ */
+const INNER_PORT = 9222;
+/** 容器内对外（经 socat）的调试端口；宿主机端口由 Docker 随机分配。 */
+const DEBUG_PORT = 9223;
 /** 容器内工作区挂载点，与项目容器、截图驱动保持一致。 */
 const CONTAINER_WORKDIR = '/workspace';
 /** 点击后截图的相对路径。与截图驱动分开命名，两者可以同时存在。 */
@@ -170,19 +179,28 @@ export class ChromiumClickDriver implements ClickDriver {
 
     const container = await this.docker.createContainer({
       Image: this.image,
+      // 与截图驱动同一条：只读根下 HOME 必须可写，否则 chromium 以 133 退出、什么都不做。
+      Env: ['HOME=/tmp'],
       Cmd: [
-        '/usr/bin/chromium-browser',
-        '--headless=new',
-        // 与截图驱动同一条理由：外层容器才是沙盒。
-        '--no-sandbox',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
-        '--hide-scrollbars',
-        `--window-size=${width},${height}`,
-        // 只读根下 HOME 不可写，profile 必须落到 tmpfs 里。
-        '--user-data-dir=/tmp/chromium-profile',
-        `--remote-debugging-port=${DEBUG_PORT}`,
-        `file://${this.containerWorkDir}/${pagePath}`,
+        '/bin/sh',
+        '-c',
+        // socat 先把对外的口开出来，再 exec chromium（exec 让容器退出码就是 chromium 的，
+        // 出问题时一眼看得出是谁挂的）。socat 的 `fork` 让每个连接各起一个子进程。
+        `socat TCP-LISTEN:${DEBUG_PORT},fork,reuseaddr TCP:127.0.0.1:${INNER_PORT} & exec ` +
+          [
+            '/usr/bin/chromium-browser',
+            '--headless=new',
+            // 与截图驱动同一条理由：外层容器才是沙盒。
+            '--no-sandbox',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--hide-scrollbars',
+            `--window-size=${width},${height}`,
+            // profile 落到 tmpfs（与上面的 HOME 配套）。
+            '--user-data-dir=/tmp/chromium-profile',
+            `--remote-debugging-port=${INNER_PORT}`,
+            `file://${this.containerWorkDir}/${pagePath}`,
+          ].join(' '),
       ],
       WorkingDir: this.containerWorkDir,
       ExposedPorts: { [`${DEBUG_PORT}/tcp`]: {} },

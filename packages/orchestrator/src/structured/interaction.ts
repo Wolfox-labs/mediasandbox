@@ -17,7 +17,7 @@ import type { SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
 import type { DecisionClient } from '../decision/types.js';
 import { askChoice } from '../decision/types.js';
 import type { ClickTarget } from '../render/click-targets.js';
-import { parseClickTargets } from '../render/click-targets.js';
+import { describeClickTargets, parseClickTargets } from '../render/click-targets.js';
 import type { ClickDriver, ClickResult } from '../render/click.js';
 import { CLICK_VIEWPORT } from '../render/click.js';
 import type { PageSpec } from './page-spec.js';
@@ -27,6 +27,13 @@ import { renderPage } from './renderer.js';
 const MAX_CANDIDATES = 26;
 /** 候选标签截断长度：模型只需要认得出是哪个元素。 */
 const LABEL_LIMIT = 40;
+/**
+ * 最多点几次。
+ *
+ * 2 次是刻意的：第一次给决策层挑，挑到"点了也看不出变化"的目标时再给一次机会；
+ * 再多就变成拿浏览器时间碰运气了，而失败原因本来就已经写清楚了。
+ */
+const MAX_ATTEMPTS = 2;
 /** 页面在工作区里的默认相对路径，与截图工具约定一致。 */
 const DEFAULT_PAGE_PATH = 'artifacts/index.html';
 
@@ -52,6 +59,8 @@ export interface InteractionVerification {
   readonly picked?: ClickTarget | undefined;
   /** 真驱动的结果；没点成时为 undefined。 */
   readonly result?: ClickResult | undefined;
+  /** 每一次尝试的一句话记录（第一次挑错时，这里能看出发生过什么）。 */
+  readonly attempts?: readonly string[] | undefined;
   /** 人话总结，直接可以进报告。 */
   readonly detail: string;
   readonly driver: string;
@@ -78,33 +87,80 @@ export async function verifyInteraction(
   }
 
   const candidates = all.slice(0, MAX_CANDIDATES);
-  const answer = await askChoice(request.decision, {
-    context: {
-      goal: request.goal,
-      envType: 'webpage',
-      facts: {
-        可点元素数: String(all.length),
-        ...(all.length > candidates.length ? { 候选已截断至: String(candidates.length) } : {}),
-      },
-      ...(request.evidence !== undefined ? { evidence: request.evidence } : {}),
-    },
-    question: [
-      '这是网页上可点击的元素。挑一个最值得做交互验证的（一般是主交互，比如第一个非默认标签页、折叠项或提交按钮）。',
-      ...candidates.map((t) => `${t.key}：${t.label || '(无文本)'}（${t.kind}；点击后 ${t.effect}）`),
-    ].join('\n'),
-    options: candidates.map((t) => ({
-      id: t.key,
-      label: `${(t.label || '(无文本)').slice(0, LABEL_LIMIT)}（${t.kind}）`,
-    })),
-    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
-  });
+  const viewport = {
+    width: request.width ?? CLICK_VIEWPORT.width,
+    height: request.height ?? CLICK_VIEWPORT.height,
+  };
 
-  // 弃权也要有结论：按文档顺序取第一个是确定性的兜底，并在 detail 里说清是兜底。
-  const abstained = answer.value === null;
-  const picked = abstained
-    ? candidates[0]
-    : (candidates.find((t) => t.key === answer.value) ?? candidates[0]);
-  if (picked === undefined) {
+  const tried = new Set<string>();
+  const attempts: string[] = [];
+  let picked: ClickTarget | undefined;
+  let result: ClickResult | undefined;
+  let abstained = false;
+  /** 只有一个候选、压根没问过决策层——报告里要说清，别让人以为模型参与了。 */
+  let noChoiceNeeded = false;
+
+  // 决策层可能挑一个"点了也不会有变化"的目标（比如本来就选中的第一个标签页）。
+  // 那是一次**可诊断的**挑错，不该把整次验证判死：换一个候选再点一次，
+  // 但只多试一轮——再点下去就成了拿预算碰运气。
+  for (let round = 0; round < MAX_ATTEMPTS; round += 1) {
+    const remaining = candidates.filter((t) => !tried.has(t.key));
+    if (remaining.length === 0) break;
+
+    let chosen: ClickTarget;
+    if (remaining.length === 1) {
+      // **只剩一个候选时不能问**：决策层的 choice 问题至少要 2 个候选
+      // （`assertChoiceCriteria` 直接拒），硬问只会换来一次 422。
+      // 没得挑就别假装在挑。
+      chosen = remaining[0]!;
+      if (round === 0) noChoiceNeeded = true;
+    } else {
+      const answer = await askChoice(request.decision, {
+        context: {
+          goal: request.goal,
+          envType: 'webpage',
+          facts: {
+            可点元素数: String(all.length),
+            ...(all.length > candidates.length ? { 候选已截断至: String(candidates.length) } : {}),
+            ...(round > 0 ? { 本轮是第几次尝试: String(round + 1) } : {}),
+          },
+          ...(request.evidence !== undefined ? { evidence: request.evidence } : {}),
+        },
+        question: [
+          round === 0
+            ? '这是网页上可点击的元素。挑一个最值得做交互验证的（挑**当前不是默认激活状态**的那个，否则点了看不出变化）。'
+            : '上一个候选点了没有可观察的变化。请在剩下的候选里再挑一个。',
+          describeClickTargets(remaining),
+        ].join('\n'),
+        options: remaining.map((t) => ({
+          id: t.key,
+          label: `${(t.label || '(无文本)').slice(0, LABEL_LIMIT)}（${t.kind}${t.initiallyActive ? '，已激活' : ''}）`,
+        })),
+        ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+      });
+
+      // 弃权也要有结论：按文档顺序取第一个是确定性的兜底，并在 detail 里说清是兜底。
+      if (round === 0) abstained = answer.value === null;
+      chosen =
+        answer.value === null
+          ? remaining[0]!
+          : (remaining.find((t) => t.key === answer.value) ?? remaining[0]!);
+    }
+
+    picked = chosen;
+    tried.add(picked.key);
+    result = await request.driver.click({
+      target: picked,
+      width: viewport.width,
+      height: viewport.height,
+      ...(request.pagePath !== undefined ? { pagePath: request.pagePath } : {}),
+      sandbox: request.sandbox,
+    });
+    attempts.push(`${picked.key}（${picked.label || '无文本'}）：${result.changed ? '观察到变化' : result.detail}`);
+    if (result.changed) break;
+  }
+
+  if (picked === undefined || result === undefined) {
     return {
       targets: all,
       detail: `发现 ${all.length} 个可点元素，但没有可用的候选`,
@@ -113,26 +169,23 @@ export async function verifyInteraction(
     };
   }
 
-  const viewport = {
-    width: request.width ?? CLICK_VIEWPORT.width,
-    height: request.height ?? CLICK_VIEWPORT.height,
-  };
-  const result = await request.driver.click({
-    target: picked,
-    width: viewport.width,
-    height: viewport.height,
-    ...(request.pagePath !== undefined ? { pagePath: request.pagePath } : {}),
-    sandbox: request.sandbox,
-  });
-
-  const prefix = abstained ? '决策层弃权，按文档顺序取第一个候选；' : '';
-  const verdict = result.changed ? '交互验证通过' : '交互验证未通过';
+  const prefix = noChoiceNeeded
+    ? '页面上只有一个可点元素，没有可挑的，直接点它；'
+    : abstained
+      ? '决策层弃权，按文档顺序取第一个候选；'
+      : '';
+  // 试了几轮也照实说：只报"通过/未通过"会把"第一次挑错了"这件事藏起来。
+  const triedNote = attempts.length > 1 ? `尝试 ${attempts.length} 次：${attempts.join('；')}。` : '';
+  const verdict = result.changed
+    ? `${prefix}交互验证通过${attempts.length > 1 ? `（第 ${attempts.length} 次尝试生效）` : ''}`
+    : `${prefix}交互验证未通过`;
   const shot = result.screenshot !== undefined ? `；点击后截图 ${result.screenshot.path}` : '';
   return {
     targets: all,
     picked,
     result,
-    detail: `${prefix}${verdict}：${result.detail}${shot}（驱动 ${result.driver}）`,
+    attempts,
+    detail: `${verdict}：${result.detail}${shot}（驱动 ${result.driver}）${triedNote === '' ? '' : ` ${triedNote}`}`,
     driver: request.driver.name,
     placeholder: result.placeholder,
   };
