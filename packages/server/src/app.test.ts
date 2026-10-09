@@ -57,6 +57,8 @@ async function startServer(overrides: {
   pools?: LoadedPools;
   /** 交付物落定目录。给了之后产物不随沙盒回收消失。 */
   projectsDir?: string;
+  /** 落定产物清理额度。省略 = 默认不清理（一个都不删）。 */
+  projectsRetention?: { maxRunsPerProject?: number };
   /** 覆盖沙盒 provider（"重启后接管沙盒"这类用例要指定自己的工作区根目录）。 */
   providers?: Record<string, SandboxProvider>;
   /** 收集服务端日志，用于断言"接管沙盒"这类只留日志的动作。 */
@@ -97,6 +99,9 @@ async function startServer(overrides: {
     ...(templates !== undefined ? { templates } : {}),
     ...(persist !== undefined ? { persist } : {}),
     ...(overrides.projectsDir !== undefined ? { projectsDir: overrides.projectsDir } : {}),
+    ...(overrides.projectsRetention !== undefined
+      ? { projectsRetention: overrides.projectsRetention }
+      : {}),
     decision: overrides.decision ?? makeDecision(),
     ...(overrides.llm !== undefined ? { llm: overrides.llm } : {}),
     ...(overrides.onLog !== undefined ? { onLog: overrides.onLog } : {}),
@@ -602,6 +607,104 @@ describe('交付物落定：产物不随沙盒回收消失', () => {
       const fsp = await import('node:fs/promises');
       const entries = await fsp.readdir(path.join(dir, 'proj-settle', 'runs'));
       assert.ok(entries.includes(runId), `落定目录里应有 ${runId}，实际 ${entries.join(', ')}`);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+/**
+ * 落定产物的清理策略：**默认不删**。
+ *
+ * 为什么值得单独锁一遍：`projects/` 里的东西是**交付物**，不是缓存。
+ * 沙盒被回收之后它就是唯一的一份，删掉等于把用户的东西弄丢了——
+ * 所以默认必须是"一个都不删"，要删得由部署方显式配额度。
+ * 这条测试就是防止以后有人把默认值改成"顺手清一下"。
+ */
+describe('落定产物清理策略（默认不删）', () => {
+  let cleanupRoot = '';
+
+  before(async () => {
+    const os = await import('node:os');
+    const fsp = await import('node:fs/promises');
+    const path = await import('node:path');
+    cleanupRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'ms-retention-'));
+  });
+
+  after(async () => {
+    const fsp = await import('node:fs/promises');
+    if (cleanupRoot !== '') await fsp.rm(cleanupRoot, { recursive: true, force: true });
+  });
+
+  async function runTimes(
+    ctx: Awaited<ReturnType<typeof startServer>>,
+    count: number,
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const submit = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ goal: `清理策略用例 ${i}`, envType: 'copy', projectId: 'proj-clean' }),
+      });
+      assert.equal(submit.status, 202);
+      const { runId } = (await submit.json()) as { runId: string };
+      await waitForStatus(ctx.origin, runId, ['succeeded', 'failed', 'escalated']);
+      ids.push(runId);
+      // 目录 mtime 决定"谁更旧"，同秒内连续跑会让顺序变得不可判定——
+      // 显式拉开一点间隔，让这条用例测的是策略而不是文件系统的时间精度。
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    return ids;
+  }
+
+  it('不配额度时一个都不删', async () => {
+    const dir = path.join(cleanupRoot, 'keep');
+    const ctx = await startServer({ maxRuns: 5, projectsDir: dir });
+    try {
+      const ids = await runTimes(ctx, 3);
+      const fsp = await import('node:fs/promises');
+      const entries = await fsp.readdir(path.join(dir, 'proj-clean', 'runs'));
+      assert.equal(entries.length, 3, `默认不该删任何落定产物，实际剩 ${entries.join(', ')}`);
+      for (const id of ids) assert.ok(entries.includes(id), `${id} 的落定产物被删了`);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('配了每项目额度时只留最近的 N 个，运行记录照样查得到', async () => {
+    const dir = path.join(cleanupRoot, 'prune');
+    const ctx = await startServer({
+      maxRuns: 5,
+      projectsDir: dir,
+      projectsRetention: { maxRunsPerProject: 1 },
+    });
+    try {
+      const ids = await runTimes(ctx, 3);
+      const fsp = await import('node:fs/promises');
+      const entries = await fsp.readdir(path.join(dir, 'proj-clean', 'runs'));
+      assert.deepEqual(entries, [ids[2]!], `只该留最新那一个，实际剩 ${entries.join(', ')}`);
+
+      // 交付物没了，但**运行历史**不能跟着消失——那是两件事。
+      const detail = await fetch(`${ctx.origin}/api/runs/${ids[0]!}`);
+      assert.equal(detail.status, 200, '清理落定产物不该把运行记录也删掉');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('额度大于运行数时不多删', async () => {
+    const dir = path.join(cleanupRoot, 'roomy');
+    const ctx = await startServer({
+      maxRuns: 5,
+      projectsDir: dir,
+      projectsRetention: { maxRunsPerProject: 5 },
+    });
+    try {
+      await runTimes(ctx, 2);
+      const fsp = await import('node:fs/promises');
+      const entries = await fsp.readdir(path.join(dir, 'proj-clean', 'runs'));
+      assert.equal(entries.length, 2, `没超额度不该删，实际剩 ${entries.join(', ')}`);
     } finally {
       await ctx.close();
     }

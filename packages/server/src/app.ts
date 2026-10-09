@@ -12,7 +12,7 @@
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import path from 'node:path';
-import { mkdir, readFile, stat as statFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat as statFile, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import type { Artifact, EnvType, SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
 import { ENV_TYPES } from '@mediasandbox/sandbox';
@@ -110,6 +110,23 @@ export interface ServerDeps {
     | {
         /** 最多保留多少个已结束 run 的沙盒。默认 20。 */
         readonly maxRuns?: number | undefined;
+      }
+    | undefined;
+  /**
+   * 落定产物（`projects/`）的清理策略。**默认不删**。
+   *
+   * 与 `sandboxRetention` 是两件事，别混：那个管的是**工作区**（随时可以重建），
+   * 这个管的是**交付物**——沙盒被回收之后，落定副本就是唯一的一份。
+   * 所以默认值是 0 = 一个都不删：默认删交付物不叫清理策略，叫静默的数据丢失。
+   *
+   * 需要控盘时把 `maxRunsPerProject` 设成正数：每个项目只留最近 N 次运行的落定目录，
+   * 更旧的删掉（**在途运行的目录永远不碰**）。删掉之后那些 run 的产物下载会变成 410——
+   * 与"沙盒超出额度被回收"的表现一致，运行记录本身照样查得到。
+   */
+  readonly projectsRetention?:
+    | {
+        /** 每个项目最多保留多少次已结束运行的落定产物。默认 0 = 不清理。 */
+        readonly maxRunsPerProject?: number | undefined;
       }
     | undefined;
   /**
@@ -284,6 +301,59 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
     if (saved > 0) {
       deps.onLog?.(`运行 ${record.id} 落定 ${saved} 个产物到 ${settledDirFor(record) ?? ''}`);
+    }
+  }
+
+  /**
+   * 清理落定产物：**默认什么都不做**，配了额度才删。
+   *
+   * 只删"超出额度"的那部分，从最旧的开始；两条硬性保护：
+   *   1. **在途运行的目录不碰**——它正在被写；
+   *   2. 删除目标必须落在 `projects/` 根目录之内（路径由 `readdir` 给出，
+   *      但这里仍旧 `resolve` 后再比一次，不让任何拼接失控）。
+   * 删除失败只记日志：清理是收尾动作，不该把一次成功的运行变成失败。
+   */
+  async function pruneSettledProjects(record: RunRecord): Promise<void> {
+    const limit = deps.projectsRetention?.maxRunsPerProject ?? 0;
+    const root = deps.projectsDir;
+    if (limit <= 0 || root === undefined) return;
+
+    const runsDir = path.join(root, record.projectId, 'runs');
+    let names: string[];
+    try {
+      names = await readdir(runsDir);
+    } catch {
+      return; // 还没落定过任何产物：没有可清理的东西
+    }
+
+    const dirs: { runId: string; mtimeMs: number }[] = [];
+    for (const name of names) {
+      try {
+        const info = await statFile(path.join(runsDir, name));
+        if (info.isDirectory()) dirs.push({ runId: name, mtimeMs: info.mtimeMs });
+      } catch {
+        // 单个目录读不到不影响其他目录的判断。
+      }
+    }
+    if (dirs.length <= limit) return;
+
+    // 新的在前，保留前 limit 个。
+    dirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const rootResolved = path.resolve(root);
+    for (const doomed of dirs.slice(limit)) {
+      const live = store.get(doomed.runId);
+      if (live !== undefined && live.finishedAt === undefined) continue;
+
+      const full = path.resolve(runsDir, doomed.runId);
+      if (!full.startsWith(`${rootResolved}${path.sep}`)) continue;
+      try {
+        await rm(full, { recursive: true, force: true });
+        deps.onLog?.(`清理落定产物：${doomed.runId}（超出每项目保留额度 ${limit}）`);
+      } catch (error) {
+        deps.onLog?.(
+          `落定产物清理失败：${doomed.runId}（${error instanceof Error ? error.message : String(error)}）`,
+        );
+      }
     }
   }
 
@@ -532,6 +602,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       // 放在 finally 里：失败与取消的 run 同样留下工作区，同样要算进额度。
       finishedRuns.push({ runId: record.id, finishedAt: Date.now() });
       await reclaimSandboxes();
+      // 落定产物的清理是**可选的**（默认不删）；放在回收之后，
+      // 顺序上先保证"产物已经落定"，再去考虑要不要删旧的。
+      await pruneSettledProjects(record);
     }
   }
 
