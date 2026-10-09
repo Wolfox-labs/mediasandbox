@@ -40,6 +40,7 @@ import {
 import { createServer } from './app.js';
 import { JsonPersist } from './persist.js';
 import { loadPersistedPools, type LoadedPools } from './boot.js';
+import { probeBrowserDocker } from './docker-probe.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = path.resolve(HERE, '../../..', 'workspaces');
@@ -174,7 +175,7 @@ function buildLlm(): LlmClient | undefined {
 async function buildProviders(): Promise<{
   providers: Record<string, SandboxProvider>;
   defaultProvider: string;
-  /** Docker 可用时把它交出来，供截图驱动旁挂浏览器容器用。 */
+  /** Docker 的浏览器能力**已确认可用**时把它交出来；否则 undefined，截图退回占位驱动。 */
   docker: BrowserDocker | undefined;
 }> {
   const local = new LocalSandbox({ rootDir: path.join(WORKSPACE_ROOT, 'local') });
@@ -182,6 +183,9 @@ async function buildProviders(): Promise<{
   let docker: BrowserDocker | undefined;
 
   // Docker 是可选能力：装不上也要能起来（只有 local 可用）。
+  // **光 import 成功不算"有 Docker"**：dockerode 的客户端对象是惰性的，一次往返都不发，
+  // 所以这里再探一次 daemon 与截图镜像。探不通就当没有，让截图退回占位驱动——
+  // 而不是等到运行到截图那一步才失败（那会把整次运行判成 escalated）。
   try {
     const dockerode = await import('dockerode');
     const api = new dockerode.default() as unknown as DockerApi;
@@ -190,8 +194,14 @@ async function buildProviders(): Promise<{
       rootDir: path.join(WORKSPACE_ROOT, 'docker'),
       autoPull: false,
     });
-    docker = api as unknown as BrowserDocker;
-    log('已启用 docker provider');
+    const probe = await probeBrowserDocker(api, BROWSER_IMAGE);
+    if (probe.ok) {
+      docker = api as unknown as BrowserDocker;
+      log(`已启用 docker provider（浏览器截图可用：${probe.detail}）`);
+    } else {
+      log(`docker provider 已装载但浏览器能力不可用：${probe.reason}`);
+      log('  截图改用占位驱动；产物里会标明是占位图');
+    }
   } catch (error) {
     log(`docker provider 不可用，仅用 local：${String(error)}`);
   }
