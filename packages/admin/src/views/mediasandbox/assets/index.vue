@@ -138,14 +138,14 @@
               <template #default="{ row }">
                 <!-- 内置 block 的改/删会被后端拒绝，所以按钮直接禁用：
                      让用户点了才报错，不如一开始就说明为什么点不了。 -->
-                <el-button link type="primary" :disabled="row.builtin" @click="openEdit(row)">
+                <el-button link type="primary" :disabled="row.builtin" @click="openEdit(row.id)">
                   编辑
                 </el-button>
                 <el-button
                   link
                   type="warning"
                   :disabled="row.builtin || row.disabled"
-                  @click="handleDisableBlock(row)"
+                  @click="handleDisableBlock(row.id)"
                 >
                   停用
                 </el-button>
@@ -153,7 +153,7 @@
                   link
                   type="danger"
                   :disabled="row.builtin"
-                  @click="handlePurgeBlock(row)"
+                  @click="handlePurgeBlock(row.id)"
                 >
                   删除
                 </el-button>
@@ -270,9 +270,13 @@ function openCreate(): void {
   isBlockFormVisible.value = true;
 }
 
-/** 打开编辑：把这一行原样交给表单预填。 */
-function openEdit(row: BlockSpec): void {
-  editingBlock.value = row;
+/**
+ * `el-table` 的插槽把行标成 `DefaultRow`（一个宽泛的记录类型），所以这里接字符串 id
+ * 而不是整行——模板里传 `row.id`，类型与运行时都对得上，不需要在模板里强转。
+ * 要按类型分支时（例如"内置的不许删"）在模板里用 `row.builtin` 判断，那本来就能推导。
+ */
+function openEdit(blockId: string): void {
+  editingBlock.value = blocks.value.find(b => b.id === blockId) ?? null;
   isBlockFormVisible.value = true;
 }
 
@@ -280,10 +284,10 @@ function openEdit(row: BlockSpec): void {
  * 停用：不再参与新页面的候选，**历史结构照样能渲染**。
  * 所以这里只提示"不再被选中"，不说"已删除"——两件事不一样。
  */
-async function handleDisableBlock(row: BlockSpec): Promise<void> {
+async function handleDisableBlock(blockId: string): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `停用 ${row.id}？它会退出候选池，但用过它的历史运行仍能照常渲染。`,
+      `停用 ${blockId}？它会退出候选池，但用过它的历史运行仍能照常渲染。`,
       "确认停用",
       { type: "warning" }
     );
@@ -291,7 +295,7 @@ async function handleDisableBlock(row: BlockSpec): Promise<void> {
     return;
   }
   try {
-    const result = await MediaSandboxAPI.deleteBlock(row.id);
+    const result = await MediaSandboxAPI.deleteBlock(blockId);
     ElMessage.success(
       result.usedByRuns > 0
         ? `已停用；${result.usedByRuns} 次历史运行用过它，那些结构仍可渲染`
@@ -307,16 +311,16 @@ async function handleDisableBlock(row: BlockSpec): Promise<void> {
  * 物理删除：只对**从未被任何运行用过**的允许。
  * 后端会拒绝并说清是哪次运行用过——这里把原因照原样显示出来，不吞掉。
  */
-async function handlePurgeBlock(row: BlockSpec): Promise<void> {
+async function handlePurgeBlock(blockId: string): Promise<void> {
   try {
-    await ElMessageBox.confirm(`彻底删除 ${row.id}？此操作不可撤销（未被任何运行用过的才允许）。`, "确认删除", {
+    await ElMessageBox.confirm(`彻底删除 ${blockId}？此操作不可撤销（未被任何运行用过的才允许）。`, "确认删除", {
       type: "error"
     });
   } catch {
     return;
   }
   try {
-    await MediaSandboxAPI.deleteBlock(row.id, { purge: true });
+    await MediaSandboxAPI.deleteBlock(blockId, { purge: true });
     ElMessage.success("已删除");
     await fetchBlocks();
   } catch (error) {
