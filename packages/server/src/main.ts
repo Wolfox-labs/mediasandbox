@@ -254,6 +254,9 @@ async function main(): Promise<void> {
   // 产物是从沙盒工作区实时读的，所以结束后要留一段时间才能下载。
   // 但必须设上限，否则每跑一次就永久多一个工作区（Local 目录 / Docker 容器）。
   const sandboxRetention = parseNonNegativeInt(process.env['SANDBOX_RETENTION'], 20);
+  // 落定产物（`projects/`）**默认不删**：它是沙盒回收之后交付物的唯一副本，
+  // 默认删掉不叫清理，叫丢东西。要控盘就显式设 PROJECTS_RETENTION。
+  const projectsRetention = parseNonNegativeInt(process.env['PROJECTS_RETENTION'], 0);
 
   // 前端构建产物存在就一并托管，让"可运行版本"是一个地址。
   const webDistExists = await stat(WEB_DIST)
@@ -273,6 +276,7 @@ async function main(): Promise<void> {
     defaultProvider,
     policy: DEFAULT_POLICY,
     sandboxRetention: { maxRuns: sandboxRetention },
+    projectsRetention: { maxRunsPerProject: projectsRetention },
     ...(webDistExists ? { staticDir: WEB_DIST } : {}),
   });
 
@@ -311,6 +315,13 @@ async function main(): Promise<void> {
       `、${externalBlocks.length} 个自定义 block、${userTemplates.length} 套模板）`,
   );
   log(`  保留      ${sandboxRetention} 个已结束运行的沙盒（SANDBOX_RETENTION 可调，0 = 不保留）`);
+  log(
+    `  落定保留  ${
+      projectsRetention === 0
+        ? '不清理（交付物一个都不删，PROJECTS_RETENTION 可调）'
+        : `每个项目保留最近 ${projectsRetention} 次（PROJECTS_RETENTION 可调）`
+    }`,
+  );
   if (!webDistExists) {
     log('  前端      未构建（跑 pnpm --filter @mediasandbox/web build 后即可经本服务访问）');
   }
