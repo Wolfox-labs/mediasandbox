@@ -67,5 +67,61 @@ Write-Host "         then press the 'interaction verification' button."
 Write-Host "stop:    Ctrl-C in this window"
 Write-Host ""
 
+# --- Docker bridge ---------------------------------------------------------
+# Why a bridge at all: any node.exe started by DSH runs at Low integrity and
+# Windows Mandatory Integrity Control refuses it access to Docker's named pipe
+# (connect EPERM //./pipe/docker_engine). python.exe (Medium) *can* open the
+# pipe, so scripts/docker-bridge.py exposes the Docker API over 127.0.0.1 TCP
+# by translating requests into `docker` CLI calls. The server then talks TCP.
+$bridgePort = if ($env:BRIDGE_PORT) { $env:BRIDGE_PORT } else { '2375' }
+$bridgeScript = Join-Path $RepoRoot 'scripts\docker-bridge.py'
+
+function Test-Bridge {
+    try {
+        $response = Invoke-WebRequest "http://127.0.0.1:$bridgePort/_ping" -TimeoutSec 3 -UseBasicParsing
+        return $response.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+if (Test-Bridge) {
+    Write-Host "docker bridge: already listening on $bridgePort" -ForegroundColor Green
+} else {
+    $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $python) {
+        Write-Host "python not found - cannot start the docker bridge." -ForegroundColor Red
+        Write-Host "Install Python 3, or run scripts/docker-bridge.py yourself." -ForegroundColor Red
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    if (-not (Test-Path $bridgeScript)) {
+        Write-Host "missing $bridgeScript" -ForegroundColor Red
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    Write-Host "docker bridge: starting on $bridgePort ..." -ForegroundColor Green
+    $bridgeLog = Join-Path $env:TEMP 'mediasandbox-docker-bridge.log'
+    Start-Process -FilePath $python -ArgumentList $bridgeScript, '--port', $bridgePort `
+        -RedirectStandardOutput $bridgeLog -RedirectStandardError "$bridgeLog.err" -WindowStyle Hidden
+    $ready = $false
+    foreach ($attempt in 1..20) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Bridge) { $ready = $true; break }
+    }
+    if ($ready) {
+        Write-Host "docker bridge: ready (log: $bridgeLog)" -ForegroundColor Green
+    } else {
+        Write-Host "docker bridge: did NOT come up. See $bridgeLog and $bridgeLog.err" -ForegroundColor Red
+    }
+}
+
+# The server must use the bridge, otherwise it falls back to the placeholder
+# screenshot driver and the interaction verification reports 503.
+$env:DOCKER_HOST = "tcp://127.0.0.1:$bridgePort"
+if (-not $env:SANDBOX_PROVIDER) { $env:SANDBOX_PROVIDER = 'docker' }
+Write-Host "DOCKER_HOST=$env:DOCKER_HOST  SANDBOX_PROVIDER=$env:SANDBOX_PROVIDER" -ForegroundColor Green
+Write-Host ""
+
 # Run the server in the foreground, same environment as `pnpm start`.
 & $node --env-file-if-exists=.env 'packages/server/dist/main.js'

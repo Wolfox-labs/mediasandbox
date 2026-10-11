@@ -24,3 +24,13 @@ dist/
 /logs/
 # 持久化数据目录（运行记录、用户新增的 block 与模板）。同上，前缀 `/` 不能省。
 /data/
+
+# 探针脚本的人工验收产物：`probe-screenshot.mjs` / `probe-click.mjs` 会把
+# 真截图写到仓库根，供人打开看。它们是一次性证据，不该进仓库。
+/screenshot-verify.png
+/click-verify.png
+
+# `scripts/docker-bridge.py` 被 python 运行时会生成字节码缓存。
+# 不锚定也可以（`__pycache__` 不会出现在源码目录名里），但前缀 `/` 更明确。
+__pycache__/
+*.pyc
