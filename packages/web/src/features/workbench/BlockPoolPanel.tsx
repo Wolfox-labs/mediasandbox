@@ -56,6 +56,18 @@ export interface BlockPoolPanelProps {
   /** 页面上是否标注每块的来源（生成式/确定性/用户）。排查用。 */
   readonly annotate: boolean;
   readonly onAnnotateChange: (next: boolean) => void;
+
+  /**
+   * 是否在链路里加一个截图节点。
+   *
+   * 服务端的 `/api/runs` 一直支持这个参数（CLI 探针就在用），但界面此前**没有**这个
+   * 开关——于是从界面提交的运行永远拿不到截图，而右栏产物里当然也找不到
+   * `artifacts/screenshot.png`。能力在、入口不在，就是缺一个勾选框的事。
+   */
+  readonly screenshot: boolean;
+  readonly onScreenshotChange: (next: boolean) => void;
+  /** 服务端是否有真浏览器驱动（`/api/health` 的 `browser.screenshot`）。 */
+  readonly screenshotReady: boolean;
 }
 
 export function BlockPoolPanel(props: BlockPoolPanelProps): ReactNode {
@@ -282,6 +294,23 @@ export function BlockPoolPanel(props: BlockPoolPanelProps): ReactNode {
             在页面上标注来源
             <span className="block text-slate-600">
               每块显示 id、状态与各 slot 的填充来源，便于核对与排查
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-2 text-[11px] text-slate-400">
+          <input
+            type="checkbox"
+            checked={props.screenshot}
+            onChange={(e) => props.onScreenshotChange(e.target.checked)}
+            className="mt-0.5 accent-[color:var(--accent)]"
+          />
+          <span>
+            截图
+            <span className="block text-slate-600">
+              {props.screenshotReady
+                ? '链路上多一个截图节点，产出 artifacts/screenshot.png（真 chromium，多花 3–10 秒）'
+                : '当前服务没有真浏览器驱动，产出的是占位图（启动日志里会写明）'}
             </span>
           </span>
         </label>

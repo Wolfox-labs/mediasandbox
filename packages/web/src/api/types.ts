@@ -241,6 +241,22 @@ export interface HealthResponse {
   readonly providers: readonly string[];
   readonly defaultProvider: string;
   readonly toolCount: number;
+  /**
+   * 浏览器能力的真实状态。
+   *
+   * 界面据此说清"截图是真渲染还是占位图"。`providers` 里出现 `docker`
+   * **不能**用来判断这件事——那只说明 dockerode 装上了，不代表 daemon 可达。
+   */
+  readonly browser?: {
+    readonly screenshot: 'chromium' | 'placeholder';
+    readonly interaction: 'chromium' | 'unavailable';
+  };
+  readonly queue?: {
+    readonly running: number;
+    readonly waiting: number;
+    readonly maxConcurrent: number;
+    readonly limit: number;
+  };
 }
 
 /**

@@ -65,6 +65,14 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
   const [maxBlocks, setMaxBlocks] = useState(6);
   const [useGenerative, setUseGenerative] = useState(false);
   const [annotate, setAnnotate] = useState(true);
+  /**
+   * 是否让链路加一个截图节点。默认**开**。
+   *
+   * 服务端一直支持这个参数，但界面此前没暴露，于是从界面提交的运行永远没有截图——
+   * 右栏只有 index.html，用户找不到 `artifacts/screenshot.png`。能力在、入口不在，
+   * 属于"文档与实现不符"那一类，补一个勾选框即可。
+   */
+  const [screenshot, setScreenshot] = useState(true);
 
   const [activeRunId, setActiveRunId] = useState<string | undefined>(initialRunId);
   const [runs, setRuns] = useState<readonly RunListItem[]>([]);
@@ -128,6 +136,29 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
     refreshRuns();
   }, []);
 
+  /**
+   * 问一次服务端有没有真浏览器驱动。
+   *
+   * 只影响"截图"那一行的说明文字（真渲染还是占位图），不阻止提交——
+   * 占位图也是合法产物，只是必须在界面上说清楚，不能让人以为拿到了真截图。
+   */
+  const [screenshotReady, setScreenshotReady] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .health()
+      .then((health) => {
+        if (!cancelled) setScreenshotReady(health.browser?.screenshot === 'chromium');
+      })
+      .catch(() => {
+        // 健康检查失败不影响提交；标记保持 false，界面会照实说"可能只是占位图"。
+        if (!cancelled) setScreenshotReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (activeRunId === undefined) return;
     if (!isTerminal(vm.status)) return;
@@ -184,6 +215,7 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
               maxBlocks,
               useGenerative,
               annotate,
+              screenshot,
             }
           : {}),
       });
@@ -451,6 +483,9 @@ export function Workbench({ initialRunId }: WorkbenchProps = {}): ReactNode {
             onUseGenerativeChange={setUseGenerative}
             annotate={annotate}
             onAnnotateChange={setAnnotate}
+            screenshot={screenshot}
+            onScreenshotChange={setScreenshot}
+            screenshotReady={screenshotReady}
           />
         </Panel>
       ) : (

@@ -98,6 +98,13 @@ export interface CreateRunInput {
   readonly useGenerative?: boolean | undefined;
   /** 页面上是否标注每块的来源（生成式/确定性/用户）。 */
   readonly annotate?: boolean | undefined;
+  /**
+   * 是否在链路里加一个截图节点，产出 `artifacts/screenshot.png`。
+   *
+   * 后端一直支持；界面此前没暴露，导致从界面提交的运行**永远没有截图**——
+   * 右栏产物里自然找不到那个文件。有真浏览器驱动时是真渲染，否则是占位图。
+   */
+  readonly screenshot?: boolean | undefined;
 }
 
 export const api = {
