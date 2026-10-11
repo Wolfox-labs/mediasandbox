@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import socket
 import subprocess
@@ -60,6 +61,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DOCKER = "docker"
 EXEC_SESSION_TTL = 600.0
+
+
+def resolve_docker() -> str:
+    """定位 docker 可执行文件。
+
+    不能只依赖 PATH：启动器是**静默**起桥的，如果调用方环境里没有
+    `C:\\Program Files\\Docker\\Docker\\resources\\bin`，桥就会一个命令都跑不起来，
+    而失败信息只会出现在桥自己的日志里——服务那边表现为"截图又退回占位图"，
+    排查要从头再来一遍。所以这里显式回退到默认安装位置。
+    """
+    import shutil
+
+    found = shutil.which(DOCKER)
+    if found:
+        return found
+    candidates = [
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "Docker", "Docker", "resources", "bin", "docker.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     "Docker", "Docker", "resources", "bin", "docker.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return DOCKER
 
 # execId -> {"container": id, "cmd": [...], "exit": int|None}
 EXEC_SESSIONS: dict[str, dict] = {}
@@ -633,11 +659,13 @@ class Bridge(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    global DOCKER
     parser = argparse.ArgumentParser(description="Docker API -> docker CLI bridge")
     parser.add_argument("--port", type=int, default=2375)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
 
+    DOCKER = resolve_docker()
     code, out, err = docker_run(["--version"], timeout=30)
     if code != 0:
         print(f"docker 不可用：{err.strip() or out.strip()}")
