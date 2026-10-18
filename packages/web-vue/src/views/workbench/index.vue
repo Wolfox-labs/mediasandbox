@@ -14,7 +14,7 @@
  * 但页面结构按业务来。
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import {
   NAlert,
   NButton,
@@ -54,6 +54,7 @@ const message = useMessage();
 
 /** URL 里的深链：`#/workbench?runId=xxx` 也能直接打开某次运行。 */
 const route = useRoute();
+const router = useRouter();
 const deepLinkRunId = computed(() => {
   const value = route.query['runId'];
   return typeof value === 'string' && value !== '' ? value : undefined;
@@ -125,6 +126,19 @@ function toggleGroup(group: string, checked: boolean): void {
   candidateBlockIds.value = [...set];
 }
 
+/**
+ * 单个 block 的勾选。
+ *
+ * 不用 `v-model:checked` + `:value` 绑数组：NCheckbox 的单选只支持 boolean，
+ * 数组绑定要靠 NCheckboxGroup。这里显式改数组更直白，也便于和"按组全选"共用逻辑。
+ */
+function toggleBlock(blockId: string, checked: boolean): void {
+  const set = new Set(candidateBlockIds.value);
+  if (checked) set.add(blockId);
+  else set.delete(blockId);
+  candidateBlockIds.value = [...set];
+}
+
 // ── 运行列表 ────────────────────────────────────────────────────────
 const runs = ref<RunListItem[]>([]);
 const queue = ref<QueueSnapshot | null>(null);
@@ -156,7 +170,9 @@ const vm = computed(() => foldEvents(events.value));
 
 watch(activeRunId, id => {
   if (id !== undefined) {
-    void route
+    // 用 router.replace 而不是 route.replace：后者是"当前路由对象"，
+    // 没有导航方法。写错会在运行时报错而不是编译期，所以这里显式用 router。
+    void router
       .replace({ query: { ...route.query, runId: id } })
       .catch(() => undefined);
   }
@@ -512,10 +528,10 @@ onMounted(async () => {
           >
             <div class="workbench__structure">
               <NTag
-                v-for="block in vm.structure.blocks"
+                v-for="block in vm.structure.page.blocks"
                 :key="block.id"
                 size="small"
-                :type="block.filled ? 'success' : 'default'"
+                :type="block.status === 'filled' ? 'success' : 'default'"
               >
                 {{ block.type }}
                 <span class="workbench__structure-id">{{ block.id }}</span>
@@ -550,8 +566,8 @@ onMounted(async () => {
                 {{ verdict.passed ? '通过' : verdict.targetCount === 0 ? '未做验证' : '未通过' }}
               </NTag>
               <span class="workbench__verdict-detail">{{ verdict.detail }}</span>
-              <ul v-if="verdict.attempts.length > 0" class="workbench__attempts">
-                <li v-for="(line, index) in verdict.attempts" :key="index">{{ line }}</li>
+              <ul v-if="(verdict.attempts?.length ?? 0) > 0" class="workbench__attempts">
+                <li v-for="(line, index) in verdict.attempts ?? []" :key="index">{{ line }}</li>
               </ul>
             </div>
           </NCard>
@@ -630,9 +646,9 @@ onMounted(async () => {
                 <NCheckbox
                   v-for="block in entry.items"
                   :key="block.id"
-                  v-model:checked="candidateBlockIds"
-                  :value="block.id"
+                  :checked="candidateBlockIds.includes(block.id)"
                   size="small"
+                  @update:checked="checked => toggleBlock(block.id, checked)"
                 >
                   {{ block.label }}
                   <span class="workbench__block-id">{{ block.id }}</span>

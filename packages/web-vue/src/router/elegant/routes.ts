@@ -83,5 +83,32 @@ export const generatedRoutes: GeneratedRoute[] = [
       title: 'workbench',
       i18nKey: 'route.workbench'
     }
+  },
+  {
+    name: 'projects',
+    path: '/projects',
+    component: 'layout.base$view.projects',
+    meta: {
+      title: 'projects',
+      i18nKey: 'route.projects'
+    }
+  },
+  {
+    name: 'sandbox',
+    path: '/sandbox',
+    component: 'layout.base$view.sandbox',
+    meta: {
+      title: 'sandbox',
+      i18nKey: 'route.sandbox'
+    }
+  },
+  {
+    name: 'tools',
+    path: '/tools',
+    component: 'layout.base$view.tools',
+    meta: {
+      title: 'tools',
+      i18nKey: 'route.tools'
+    }
   }
 ];

@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r --filter=!@mediasandbox/web-vue typecheck",
+    "typecheck:web-vue": "pnpm --filter @mediasandbox/web-vue typecheck",
     "test": "pnpm -r test",
     "dev": "pnpm --filter @mediasandbox/web dev",
     "dev:admin": "pnpm --filter @mediasandbox/admin dev",

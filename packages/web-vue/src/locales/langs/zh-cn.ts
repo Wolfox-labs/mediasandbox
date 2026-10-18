@@ -226,7 +226,10 @@ const local: App.I18n.Schema = {
     500: '服务器错误',
     'iframe-page': '外链页面',
     home: '首页',
-    workbench: '创作工作台'
+    workbench: '创作工作台',
+    projects: '项目与产物',
+    sandbox: '沙盒环境',
+    tools: '工具链'
   },
   page: {
     login: {

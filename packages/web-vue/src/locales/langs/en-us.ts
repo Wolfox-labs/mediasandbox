@@ -230,7 +230,10 @@ const local: App.I18n.Schema = {
     500: 'Server Error',
     'iframe-page': 'Iframe',
     home: 'Home',
-    workbench: 'Workbench'
+    workbench: 'Workbench',
+    projects: 'Projects',
+    sandbox: 'Sandbox',
+    tools: 'Toolchain'
   },
   page: {
     login: {
