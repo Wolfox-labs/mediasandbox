@@ -55,6 +55,20 @@ const DOCKER_CONSTRAINTS: readonly { label: string; value: string; why: string }
   { label: '进程数', value: '256', why: 'PidsLimit 防 fork 炸弹' }
 ];
 
+/**
+ * 环境预设表的顺序与显示名。
+ *
+ * 这三套是**沙盒基础镜像**（Node / Python / 极简），与"网页走哪条生成路线"无关，
+ * 所以显示镜像自己的名字，不借用环境选择器的标签。
+ */
+const PRESET_ORDER = ['frontend', 'image', 'copy'] as const;
+
+const PRESET_LABEL: Readonly<Record<string, string>> = {
+  frontend: '前端（Node 工具链）',
+  image: '图像（Python + Pillow）',
+  copy: '文案（极简文本）'
+};
+
 const health = ref<HealthResponse | null>(null);
 const runs = ref<RunListItem[] | null>(null);
 const loadError = ref<string | null>(null);
@@ -138,7 +152,7 @@ onBeforeUnmount(() => {
               </div>
               <p class="sandbox__provider-desc">
                 路径级隔离：每个运行一个工作目录，靠 Node 的路径校验挡住越界读写。
-                轻量、启动快，但只防"误操作"，不防"恶意代码"。
+                轻量、启动快，但只能防误操作，防不了恶意代码。
               </p>
             </div>
             <div class="sandbox__provider">
@@ -149,8 +163,8 @@ onBeforeUnmount(() => {
                 </NTag>
               </div>
               <p class="sandbox__provider-desc">
-                容器级隔离：独立内核命名空间 + 只读根 + 无网络 + 资源配额。
-                本机已构建四套镜像时才有真截图与真点击能力。
+                容器级隔离：独立内核命名空间、只读根、无网络、资源配额。
+                构建过浏览器镜像时才有真截图和真点击能力。
               </p>
             </div>
           </div>
@@ -180,9 +194,9 @@ onBeforeUnmount(() => {
       <NGi span="24 m:12">
         <NCard title="环境预设" size="small" :bordered="false" class="sandbox__card">
           <div class="sandbox__presets">
-            <div v-for="env in ENV_TYPES.filter(e => e !== 'webpage')" :key="env" class="sandbox__preset">
+            <div v-for="env in PRESET_ORDER" :key="env" class="sandbox__preset">
               <div class="sandbox__preset-head">
-                <span class="sandbox__preset-name">{{ ENV_LABELS[env].label }}</span>
+                <span class="sandbox__preset-name">{{ PRESET_LABEL[env] }}</span>
                 <NTag size="tiny">{{ ENV_PRESET_VIEW[env]?.size }}</NTag>
               </div>
               <div class="sandbox__preset-row">
@@ -206,7 +220,7 @@ onBeforeUnmount(() => {
       <NGi span="24 m:12">
         <NCard title="容器隔离的 8 项约束" size="small" :bordered="false" class="sandbox__card">
           <p class="sandbox__hint">
-            这些不是宣传语，是 <code>docker-sandbox.ts</code> 里实际传给 Docker 的参数。
+            下表是 <code>docker-sandbox.ts</code> 实际传给 Docker 的参数。
           </p>
           <table class="sandbox__table">
             <thead>

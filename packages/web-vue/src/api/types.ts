@@ -16,14 +16,26 @@ export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage';
 
 export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage'];
 
+/**
+ * 界面上可选的环境。
+ *
+ * **只列三个**：网页 / 图像 / 文案。
+ *
+ * 后端有 `frontend` 与 `webpage` 两个类型（前者是早期"整页生成"的路线，
+ * 后者是逐块结构化的路线），但对用户来说**网页就是网页**，没有两套做法之分。
+ * 页面一律走结构化链路（`webpage`），`frontend` 不再出现在选择器里——
+ * 保留它在类型里只是为了兼容历史运行记录的回显。
+ */
+export const UI_ENV_TYPES: readonly EnvType[] = ['webpage', 'image', 'copy'];
+
 /** 环境的中文说明，界面展示用。 */
 export const ENV_LABELS: Readonly<Record<EnvType, { label: string; hint: string }>> = {
-  frontend: { label: '前端 / 网页', hint: '产出 HTML 页面与静态站点（整页生成）' },
+  frontend: { label: '网页（旧路线）', hint: '整页生成，历史运行记录里可能出现' },
   image: { label: '图像', hint: '产出图片类作品' },
   copy: { label: '文案', hint: '产出 Markdown 文稿' },
   webpage: {
-    label: '结构化网页',
-    hint: '结构由决策模型逐块决定，可选取 block 候选集，逐块填充并组装成整页',
+    label: '网页',
+    hint: '选好要用的区块，逐块填充后组装成整页',
   },
 };
 

@@ -74,14 +74,14 @@ const TEMPLATES: readonly {
   {
     id: 'product-page',
     name: '产品介绍页',
-    envType: 'frontend',
+    envType: 'webpage',
     goal: '做一个产品介绍落地页，含标题、特性列表和页脚',
     tools: 'scaffold-frontend → build-frontend'
   },
   {
     id: 'static-page',
     name: '静态页（模板路线）',
-    envType: 'frontend',
+    envType: 'webpage',
     goal: '用模板生成一个简洁的静态页面',
     tools: 'static-page-from-template → build-frontend'
   },
@@ -182,7 +182,7 @@ function onExport(): void {
   window.location.href = api.exportProjectUrl(current.projectId);
   window.setTimeout(() => {
     exporting.value = false;
-    notice.value = '已发起下载。若产物所在沙盒已被回收，包内会缺少对应文件。';
+    notice.value = '已发起下载。产物所在的沙盒若已被回收，压缩包里会缺少对应文件。';
   }, 1500);
 }
 
@@ -236,7 +236,7 @@ onBeforeUnmount(() => {
           <NSpin :show="projects === null">
             <NEmpty
               v-if="projects !== null && projects.length === 0"
-              description="还没有项目——到「创作工作台」提交一次目标"
+              description="还没有项目。到「创作工作台」提交一次目标"
               size="small"
             />
             <div v-else class="projects__list">
@@ -328,8 +328,7 @@ onBeforeUnmount(() => {
       <NGi span="24 m:24 l:6">
         <NCard title="内置模板" size="small" :bordered="false" class="projects__card">
           <p class="projects__hint">
-            模板只是起手式示例，<strong>不参与决策</strong>——点一下把目标复制到剪贴板，
-            到工作台粘贴即可（提交仍由你确认）。
+            这些是起手式示例，不参与决策。点一下复制目标，到工作台粘贴即可。
           </p>
           <div class="projects__templates">
             <div v-for="template in TEMPLATES" :key="template.id" class="projects__template">

@@ -97,8 +97,8 @@ onMounted(async () => {
       </template>
       <NAlert v-if="error" type="error" :bordered="false" class="mb-2">{{ error }}</NAlert>
       <p class="tools__hint">
-        决策模型就是在这个列表里选。列在这里的每一项都对应注册表里的一个工具——
-        <strong>扩充工具链只需改注册表，不需要重训模型</strong>。
+        决策模型在这个列表里选择。每一项对应注册表里的一个工具，扩充工具链只需改注册表，
+        不需要重训模型。
       </p>
       <div class="tools__filters">
         <button
@@ -153,8 +153,8 @@ onMounted(async () => {
 
     <NCard title="每类环境的两条路线" size="small" :bordered="false" class="tools__card">
       <p class="tools__hint">
-        两条路线是刻意设计——有两条，<code>choice</code> 才有真实的选择可做；
-        而且生成层不可用时，确定性路线就是降级方案。
+        每类环境都有两条路线。有两条，<code>choice</code> 才有真实的选择；
+        生成层不可用时，确定性路线就是降级方案。
       </p>
       <table class="tools__table">
         <thead>
