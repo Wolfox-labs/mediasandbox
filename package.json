@@ -12,6 +12,7 @@
     "test": "pnpm -r test",
     "dev": "pnpm --filter @mediasandbox/web dev",
     "dev:admin": "pnpm --filter @mediasandbox/admin dev",
+    "dev:vue": "pnpm --filter @mediasandbox/web-vue dev",
     "start": "node --env-file-if-exists=.env packages/server/dist/main.js",
     "demo": "node scripts/demo.mjs",
     "dev:all": "node scripts/dev-all.mjs",
