@@ -96,6 +96,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * 结构编辑的最小动作集，与 `packages/server/src/structure-input.ts` 的
+ * `parseStructureOps` 对齐。
+ *
+ * 字段名是 `op` 而不是 `type`（`type` 在 append/insert 里表示**区块类型**），
+ * `move` 用 `blockId + toIndex` 定位——按后端来，别自己发明。
+ */
+export type StructureOpInput =
+  | { readonly op: 'remove'; readonly blockId: string }
+  | { readonly op: 'move'; readonly blockId: string; readonly toIndex: number }
+  | { readonly op: 'append'; readonly type: string }
+  | { readonly op: 'insert'; readonly index: number; readonly type: string };
+
 /** 提交一次创作的入参。 */
 export interface CreateRunInput {
   readonly goal: string;
@@ -107,6 +120,8 @@ export interface CreateRunInput {
   // ── 以下仅 webpage 环境（结构化制作）使用 ──────────────────────────
   /** 本次候选 block 类型；省略则用池子全集。 */
   readonly candidateBlockIds?: readonly string[] | undefined;
+  /** 选定模板：给了就按它的起手结构来，不给则由决策模型自由决定。 */
+  readonly templateId?: string | undefined;
   /** 页面 block 数上限。 */
   readonly maxBlocks?: number | undefined;
   readonly brand?: string | undefined;
@@ -193,6 +208,47 @@ export const api = {
     );
   },
 
+  // ── 模板池 ──────────────────────────────────────────────────────────
+  /** 模板目录：起手可以用哪几套结构。 */
+  templates(): Promise<{ templates: TemplateItem[] }> {
+    return request<{ templates: TemplateItem[] }>('/api/templates');
+  },
+
+  /**
+   * 新建模板。两种做法：
+   *   - 给 `fromRunId`：把某次已完成运行的结构沉淀下来
+   *   - 给 `blocks`：用指定的区块类型人工组一套起手结构
+   */
+  createTemplate(
+    input: { label: string; description?: string; blocks?: readonly { type: string }[]; fromRunId?: string }
+  ): Promise<{ template: { id: string; label: string } }> {
+    return request<{ template: { id: string; label: string } }>('/api/templates', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    });
+  },
+
+  // ── 结构干预 ────────────────────────────────────────────────────────
+  /**
+   * 对已完成运行的结构做增量编辑（增删移）。
+   *
+   * 走 ops 而不是整份覆盖：前端拿到的是压缩视图（块只有 id/type/status），
+   * 覆盖式会把它没看见的内容一并抹掉。
+   */
+  structureOps(
+    runId: string,
+    ops: readonly StructureOpInput[]
+  ): Promise<{
+    applied: number;
+    structure: { page: { blocks: readonly { id: string; type: string; status: string }[] } };
+    fixes: readonly string[];
+  }> {
+    return request(`/api/runs/${encodeURIComponent(runId)}/structure/ops`, {
+      method: 'POST',
+      body: JSON.stringify({ ops })
+    });
+  },
+
   /**
    * 产物下载地址。
    *
@@ -239,4 +295,15 @@ export function isHtmlArtifact(artifact: Artifact): boolean {
   const ext = artifact.path.split('.').pop()?.toLowerCase() ?? '';
   if (ext === 'html' || ext === 'htm') return true;
   return artifact.mimeHint.toLowerCase().includes('text/html');
+}
+
+/** 模板池里的一项（`GET /api/templates`）。 */
+export interface TemplateItem {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  /** 内置模板（我们提供的）还是从项目里沉淀的。 */
+  readonly builtin: boolean;
+  readonly blocks: readonly { readonly type: string }[];
+  readonly allowedBlockIds: readonly string[] | null;
 }
