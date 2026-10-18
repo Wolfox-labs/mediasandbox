@@ -27,10 +27,32 @@ pnpm start            # DOCKER_HOST 指向 Docker 桥时才有真截图/真点�
 
 | 路由 | 页面 | 说明 |
 |---|---|---|
-| `/workbench` | 创作工作台 | 三栏：提交与历史 / 决策·结构·交互验证·步骤 / 候选池·实时预览 |
+| `/workbench/:step?` | 创作工作台 | 线性四步，每步一个地址：`goal` 创作目标 → `decision` 模型决策 → `interaction` 模型交互测试 → `result` 结果展示。缺省/非法步骤值一律按 `goal` |
 | `/projects` | 项目与产物 | 项目列表、按运行分组的文件树、导出 ZIP、内置模板 |
 | `/sandbox` | 沙盒环境 | provider 对比、环境预设、容器 8 项隔离约束、最近运行 |
 | `/tools` | 工具链 | 决策层候选集（按角色分组）、每类环境的两条路线 |
+
+## 创作工作台的四个步骤
+
+工作台是**一条线性流程**，不是长滚动页：每步有独立地址（`/workbench/:step?`），
+浏览器前进后退可用、刷新后停在同一页。顶部有进程导航，显示每步的序号、名称与
+完成/进行中/未开始状态；未解锁的步骤禁用并给出原因。
+
+| 步骤 | 地址 | 做什么 | 真调的接口 |
+|---|---|---|---|
+| 创作目标 | `/workbench/goal` | 写目标、选模态、挑页面元素、套模板 | `GET /api/blocks`、`POST /api/blocks`、`GET /api/templates`、`POST /api/templates` |
+| 模型决策 | `/workbench/decision` | 提交运行、看统筹规划与逐块决策、改结构、定点重做 | `POST /api/runs`、`POST /api/runs/:id/structure/ops`、`POST /api/runs`（带 `redoFrom`） |
+| 模型交互测试 | `/workbench/interaction` | 用真浏览器点一下页面 | `POST /api/runs/:id/verify-interaction` |
+| 结果展示 | `/workbench/result` | 产物预览与下载、状态与耗时、失败原因 | `GET /api/runs/:id`、`GET /api/runs/:id/artifacts`、`GET /api/runs` |
+
+跨步骤状态在 `src/store/modules/workbench/index.ts`（Pinia setup store）。入参与当前
+`runId` 落 localStorage：刷新后停在同一页，且"上次写到哪、跑的是哪一次"还在。
+运行快照（统筹规划 / 结构 / 产物）**不落盘**——那是服务端的事实来源，进页面后先
+`GET /api/runs/:id` 取一次，之后由 WebSocket 事件流（服务端连上就补发历史）维护。
+
+步骤定义集中在 `src/constants/workbench.ts`。改步骤名或加步骤时要同步：该文件、
+`src/router/elegant/{routes,transform}.ts`、`src/typings/elegant-router.d.ts`，以及
+`src/router/guard/route.ts` 里"非法步骤值归一"的那段判断。
 
 ## 与模板的差异（改动原因都写在代码注释里）
 

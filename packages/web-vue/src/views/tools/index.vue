@@ -38,6 +38,11 @@ const ROUTE_NOTE: Readonly<Record<EnvType, { generative: string; deterministic: 
   webpage: {
     generative: 'fill-block（文案走生成层，逐 slot 调用）',
     deterministic: 'fill-block（全部确定性填充，零成本）'
+  },
+  // 演示文稿同理，只是单元换成版式、一个节点一页。
+  slides: {
+    generative: 'fill-slide（文案走生成层，逐 slot 调用）',
+    deterministic: 'fill-slide（全部确定性填充，零成本）'
   }
 };
 

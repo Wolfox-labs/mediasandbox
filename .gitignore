@@ -34,3 +34,7 @@ dist/
 # 不锚定也可以（`__pycache__` 不会出现在源码目录名里），但前缀 `/` 更明确。
 __pycache__/
 *.pyc
+
+# 测试副产物：`blocks-lifecycle` 一类用例会在 packages/server 下建
+# `ms-blocks-<pid>-<n>/` 当临时 block 池。它们不是源码。
+/packages/server/ms-blocks-*/

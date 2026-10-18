@@ -76,8 +76,11 @@ export const generatedRoutes: GeneratedRoute[] = [
     }
   },
   {
+    // 步骤是路径参数：`/workbench/goal|decision|interaction|result`，
+    // 缺省 / 非法值由路由守卫归一成 `goal`（见 src/router/guard/route.ts）。
+    // 带「:」的 path 会被 transform 自动补 `props: true`，所以步骤值以 prop 形式进页面。
     name: 'workbench',
-    path: '/workbench',
+    path: '/workbench/:step?',
     component: 'layout.base$view.workbench',
     meta: {
       title: 'workbench',

@@ -58,6 +58,7 @@ const SQ = {
  * 而不是伪装成智能。真实 `RizzoFlowClient` 接上后本文件不参与。
  */
 const LAYOUT_ORDER: readonly string[] = [
+  // 网页区块
   'nav',
   'hero',
   'features',
@@ -73,15 +74,31 @@ const LAYOUT_ORDER: readonly string[] = [
   'form',
   'cta',
   'footer',
+  // 演示文稿版式。**放在同一张表里是安全的**：选的时候按"候选集里有哪些"过滤，
+  // 网页池里没有这些 id，它们永远不会被网页链路选中。
+  // 排在这里的顺序就是演示模式下的默认页序：封面 → 目录 → 章节 → 要点 → 收尾。
+  'cover',
+  'agenda',
+  'section',
+  'bullets',
+  'two-col',
+  'quote-slide',
+  'image-slide',
+  'closing',
 ];
 
 /**
- * 收尾块。出现它之后就认为版式齐了，"还要不要再来一块"答否。
+ * 收尾块 / 收尾版式。出现它之后就认为版式齐了，"还要不要再来一块"答否。
  *
  * 这条让演示里的停止**有依据**（而不是"跑满 N 块就硬停"），
  * 也让 `noul` 原语在演示里有真实语义。
+ *
+ * `closing` 与 `cta` / `footer` 平级：它们都声明了 `placement: 'last'`，
+ * 是一份东西的最后一页/最后一块。漏掉它，演示模式下排完结尾页还会继续排，
+ * 而规划器那边"放下末尾块即收尾"已经停了——两边判定不一致时，
+ * 界面上就会出现"模型说还要继续，但结构已经定稿"的怪现象。
  */
-const CLOSING_BLOCKS: readonly string[] = ['cta', 'footer'];
+const CLOSING_BLOCKS: readonly string[] = ['cta', 'footer', 'closing'];
 
 /** 关键词 → 工具 id 的映射表。按顺序匹配，先命中者胜。 */
 interface Rule {
@@ -180,7 +197,13 @@ export class DemoDecisionClient implements DecisionClient {
     setPrimary: (value: string) => void,
   ): Answer {
     // ── 结构化链路：网页环境的问题集与单链路完全不同 ────────────────
-    if (context.envType === 'webpage') {
+    //
+    // **演示文稿也走这一支**。此前这里写死 `envType === 'webpage'`，后果是
+    // 演示模式下的演示文稿只有第一页：`next_block` / `continue_structuring` /
+    // `slot_count` 这些 id 落到单链路的默认答案上（"不继续"），
+    // 于是版式决策形同虚设——而真正的模型一切正常，问题只在演示层。
+    // 判断依据本就该是"这套问题属于结构化链路"，不是某一个环境名。
+    if (context.envType === 'webpage' || context.envType === 'slides') {
       const structured = this.answerStructured(id, question);
       if (structured !== undefined) return structured;
     }

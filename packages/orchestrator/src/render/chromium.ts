@@ -80,6 +80,9 @@ export class ChromiumScreenshotDriver implements ScreenshotDriver {
     const pagePath = request.pagePath ?? 'artifacts/index.html';
     const width = Math.max(1, Math.round(request.width));
     const height = Math.max(1, Math.round(request.height));
+    // 截图落到哪由调用方定（默认 `artifacts/screenshot.png`）。
+    // 写死一个路径会让"演示文稿另存 deck.png"变成同一张图在产物里出现两次。
+    const outputPath = request.outputPath ?? OUTPUT_PATH;
 
     const container = await this.docker.createContainer({
       Image: this.image,
@@ -101,7 +104,7 @@ export class ChromiumScreenshotDriver implements ScreenshotDriver {
         '--user-data-dir=/tmp/chromium-profile',
         '--hide-scrollbars',
         `--window-size=${width},${height}`,
-        `--screenshot=${this.containerWorkDir}/${OUTPUT_PATH}`,
+        `--screenshot=${this.containerWorkDir}/${outputPath}`,
         `file://${this.containerWorkDir}/${pagePath}`,
       ],
       WorkingDir: this.containerWorkDir,
@@ -130,9 +133,9 @@ export class ChromiumScreenshotDriver implements ScreenshotDriver {
       await container.remove({ force: true }).catch(() => undefined);
     }
 
-    const bytes = await provider.readFile(handle, OUTPUT_PATH);
+    const bytes = await provider.readFile(handle, outputPath);
     if (bytes.byteLength === 0) {
-      throw new Error(`chromium 没有写出截图: ${OUTPUT_PATH}`);
+      throw new Error(`chromium 没有写出截图: ${outputPath}`);
     }
     return {
       bytes,

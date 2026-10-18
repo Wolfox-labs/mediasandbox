@@ -282,8 +282,13 @@ export function createScreenshotDeckTool(driver: ScreenshotDriver): ToolRegistra
         width: numberInput(runtime.inputs, 'width', DEFAULT_VIEWPORT.width),
         height: numberInput(runtime.inputs, 'height', DEFAULT_VIEWPORT.height),
         sandbox: { provider: runtime.sandbox, handle: runtime.handle },
+        // 直说这张图要落在哪：默认路径会让真驱动写出一份 screenshot.png，
+        // 而这里再存一份 deck.png —— 同一张图在产物里出现两次。
+        outputPath: 'artifacts/deck.png',
       });
       const path = 'artifacts/deck.png';
+      // 占位驱动只在内存里生成字节，不写文件；真驱动已经写好了同一份。
+      // 两种都写一次是幂等的（内容相同），但省掉判断更不容易出错。
       await runtime.sandbox.writeFile(runtime.handle, path, shot.bytes);
       return {
         outputs: { path },

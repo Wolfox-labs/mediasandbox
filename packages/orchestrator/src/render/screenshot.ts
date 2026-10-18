@@ -37,6 +37,15 @@ export interface ScreenshotRequest {
   readonly sandbox?:
     | { readonly provider: SandboxProvider; readonly handle: SandboxHandle }
     | undefined;
+  /**
+   * 截图写到哪个相对路径。默认 `artifacts/screenshot.png`。
+   *
+   * 为什么要有这个参数：真浏览器驱动是**在沙盒里**跑 chromium 写文件的，
+   * 写哪个路径由这里决定。写死一个路径时，演示文稿那条链路就只能得到一张
+   * 叫 `screenshot.png` 的图，而它自己又得再存一份 `deck.png` ——
+   * 结果是同一张图在产物里出现两次（实测踩到过：两份字节完全相同）。
+   */
+  readonly outputPath?: string | undefined;
 }
 
 export interface Screenshot {

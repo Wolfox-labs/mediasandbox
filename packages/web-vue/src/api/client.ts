@@ -136,6 +136,19 @@ export interface CreateRunInput {
    * 根本不会有 `screenshot-page` 节点，产物里自然找不到截图。
    */
   readonly screenshot?: boolean | undefined;
+  /**
+   * 是否跑一次统筹规划（大模型出的"这页讲哪几段"）。
+   *
+   * 后端默认开：规划只跑一次、成本固定，而它是"计划与实际结构的偏差"
+   * 唯一的来源。不确定时才显式传。
+   */
+  readonly useBlueprint?: boolean | undefined;
+
+  // ── 定点重做：只重填某次运行里的几块，其余原样保留 ────────────────────
+  /** 从哪一次运行读回现成内容。只对 `webpage` 有意义。 */
+  readonly redoFrom?: string | undefined;
+  /** 要重填的块 id（必须属于 `redoFrom` 那次运行的结构）。 */
+  readonly blockIds?: readonly string[] | undefined;
 }
 
 export const api = {
@@ -154,6 +167,17 @@ export const api = {
     return request<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }>(`/api/blocks${query}`);
   },
 
+  /**
+   * 演示文稿版式池。
+   *
+   * 与 `blocks()` **分开一条端点**：后端就是两个注册表。
+   * 合成一条会让界面以为它们是同一批东西，而"网页的候选里冒出章节分隔页"
+   * 正是要防的错。
+   */
+  slideLayouts(): Promise<{ layouts: BlockSpecDto[]; groups: BlockGroupDto[] }> {
+    return request<{ layouts: BlockSpecDto[]; groups: BlockGroupDto[] }>('/api/slide-layouts');
+  },
+
   createRun(input: CreateRunInput): Promise<CreateRunResult> {
     return request<CreateRunResult>('/api/runs', {
       method: 'POST',
@@ -163,6 +187,34 @@ export const api = {
 
   listRuns(): Promise<{ runs: RunListItem[]; queue: QueueSnapshot }> {
     return request<{ runs: RunListItem[]; queue: QueueSnapshot }>('/api/runs');
+  },
+
+  /**
+   * 注册一个新 block（用户手打 / 导入 / 模型提议）。
+   *
+   * 走与内置 block **完全相同**的校验：提议不等于决定，能进池子的前提是
+   * 它先是一份合法声明。所以这里的失败信息（400）要原样带到界面上。
+   */
+  createBlock(input: {
+    readonly id: string;
+    readonly label: string;
+    readonly description: string;
+    readonly group: BlockGroup;
+    readonly canLead?: boolean | undefined;
+    readonly repeatable?: boolean | undefined;
+    readonly costHint?: 'fast' | 'medium' | 'slow' | undefined;
+    readonly slots: readonly {
+      readonly name: string;
+      readonly type: string;
+      readonly required?: boolean | undefined;
+      readonly description: string;
+      readonly countRange?: { readonly min: number; readonly max: number } | undefined;
+    }[];
+  }): Promise<{ block: { id: string; label: string; group: string }; note?: string }> {
+    return request<{ block: { id: string; label: string; group: string }; note?: string }>(
+      '/api/blocks',
+      { method: 'POST', body: JSON.stringify(input) }
+    );
   },
 
   /** 项目维度视图：运行按 `projectId` 分组。 */

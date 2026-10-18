@@ -11,22 +11,25 @@
  *
  * `webpage` 与 `frontend` 并存：后者是整页生成（工具是交付物级），
  * 前者是**结构化制作**（工具是 block 级，结构由决策模型逐块决定）。
+ *
+ * `slides` 是第二种结构化模态：单元是**版式**而不是页面区块，一次产出**多页**。
+ * 它不是网页改名——版式池、产物形态、渲染器都是另一套。
  */
-export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage';
+export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage' | 'slides';
 
-export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage'];
+export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage', 'slides'];
 
 /**
  * 界面上可选的环境。
  *
- * **只列三个**：网页 / 图像 / 文案。
+ * **只列四个**：网页 / 演示文稿 / 图像 / 文案。
  *
  * 后端有 `frontend` 与 `webpage` 两个类型（前者是早期"整页生成"的路线，
  * 后者是逐块结构化的路线），但对用户来说**网页就是网页**，没有两套做法之分。
  * 页面一律走结构化链路（`webpage`），`frontend` 不再出现在选择器里——
  * 保留它在类型里只是为了兼容历史运行记录的回显。
  */
-export const UI_ENV_TYPES: readonly EnvType[] = ['webpage', 'image', 'copy'];
+export const UI_ENV_TYPES: readonly EnvType[] = ['webpage', 'slides', 'image', 'copy'];
 
 /** 环境的中文说明，界面展示用。 */
 export const ENV_LABELS: Readonly<Record<EnvType, { label: string; hint: string }>> = {
@@ -37,10 +40,14 @@ export const ENV_LABELS: Readonly<Record<EnvType, { label: string; hint: string 
     label: '网页',
     hint: '选好要用的区块，逐块填充后组装成整页',
   },
+  slides: {
+    label: '演示文稿',
+    hint: '选好要用的版式，一页一个版式，组成一份 16:9 可放映的文稿',
+  },
 };
 
-/** block 分组。 */
-export type BlockGroup = 'skeleton' | 'content' | 'interactive';
+/** block 分组（`deck` 只出现在演示文稿版式池里）。 */
+export type BlockGroup = 'skeleton' | 'content' | 'interactive' | 'deck';
 
 /** block 的 slot 类型。决定**由谁来填**。 */
 export type SlotType =
@@ -134,6 +141,15 @@ export interface RunRecord {
   readonly error?: string | undefined;
   readonly planSummary?: readonly PlanNodeSummary[] | undefined;
   readonly eventCount: number;
+  /**
+   * 结构化链路的定稿结构（只有 `webpage` 环境有，其余为 `null`）。
+   *
+   * 与 WebSocket 的 `plan_assembled.structure` 是同一个压缩函数：刷新页面后
+   * 从 REST 取到的形状和当时推过来的一模一样。
+   */
+  readonly structure?: StructureView | null | undefined;
+  /** 统筹规划（`webpage`）。没跑过规划时为 `null`，跑了但失败/被关掉时是 `ok:false`。 */
+  readonly blueprint?: BlueprintView | null | undefined;
   /**
    * 排队位次（1 起）。**只有正在排队的运行才有这个字段**——在跑与已结束的没有。
    *
@@ -245,6 +261,41 @@ export interface StructureView {
   }[];
 }
 
+/** 统筹规划里的一段，对应后端 `BlueprintSection`（`compactBlueprint` 的裁剪版）。 */
+export interface BlueprintSectionView {
+  /** 这一段要解决什么问题，一句话。 */
+  readonly purpose: string;
+  /** 展开写什么：要点、例子、数据。 */
+  readonly detail: string;
+  /** 建议用哪些块（只是建议，真正选哪块由决策层回答）。 */
+  readonly blockIds: readonly string[];
+}
+
+/**
+ * 统筹规划的结果。
+ *
+ * WebSocket 的 `plan_assembled.blueprint` 与 `GET /api/runs/:id` 的 `blueprint`
+ * **是同一个压缩函数的输出**，所以前端只写一套解析。
+ *
+ * `ok: false` 时只有 `detail`：可能是"按要求关闭了统筹规划"，也可能是
+ * "规划模型调用失败：……"。界面必须**原样**把这句话显示出来——空着和没做是两件事。
+ */
+export type BlueprintView =
+  | {
+      readonly ok: true;
+      readonly title: string;
+      readonly positioning: string;
+      readonly audience: string;
+      readonly tone: string;
+      /** `ok` 表示按 JSON 契约解析成功，`lenient` 表示按行文退回解析。 */
+      readonly status: string;
+      readonly model: string;
+      readonly latencyMs: number;
+      readonly sections: readonly BlueprintSectionView[];
+      readonly notes: readonly string[];
+    }
+  | { readonly ok: false; readonly detail: string };
+
 /** 健康检查（`GET /api/health`）。 */
 export interface HealthResponse {
   readonly ok: boolean;
@@ -288,6 +339,13 @@ export type WireEvent =
       readonly rationale: readonly string[];
       /** 仅结构化链路（`webpage` 环境）带这个字段。 */
       readonly structure?: StructureView | undefined;
+      /**
+       * 统筹规划，仅 `webpage` 且真的跑过规划时带。
+       *
+       * 缺省的意思是"这条路不适用"（没有配置生成层），与 `ok:false`
+       * （试了但失败 / 按要求关掉）是两件事，界面上要说不同的话。
+       */
+      readonly blueprint?: BlueprintView | undefined;
     }
   | {
       readonly runId: string;

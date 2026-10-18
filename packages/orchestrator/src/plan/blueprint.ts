@@ -113,6 +113,24 @@ export class BlueprintError extends Error {
 }
 
 /**
+ * 规划的默认超时。
+ *
+ * ## 为什么必须有默认值，而且不能是个很大的数
+ *
+ * 规划是**上游的第一步**：它没返回之前，一个 block 都还没开始填，
+ * 用户看到的是一条空的事件流。实测本地 1.7B 模型约 20 token/s，
+ * 这份提示词要 600–900 个 token，光规划就是 30–45 秒——而这台机器还算能跑。
+ *
+ * 所以 90 秒是个**上限而不是期望**：正常情况十几秒就回来，超过 90 秒说明
+ * 这个模型或这条链路已经不适合承担这一步，此时"如实报超时、退回直接逐页决策"
+ * 比"让用户对着空白页面等下去"好得多。生成层不可达本来也不该等于页面做不出来。
+ *
+ * 想要更长的调用方显式传 `blueprintTimeoutMs` —— 默认值不该替人做决定，
+ * 但必须有一个，否则一次卡住的请求会拖死整次运行。
+ */
+export const DEFAULT_BLUEPRINT_TIMEOUT_MS = 90_000;
+
+/**
  * 模态的中文说法。提示词里用它，避免把 `webpage` 这种代码值直接丢给模型。
  *
  * 用 `Record<string, string>` 而不是 `Record<EnvType, string>`：新增一个模态时
@@ -200,10 +218,14 @@ export async function planBlueprint(request: PlanBlueprintRequest): Promise<Blue
   const { system, user } = buildMessages(request);
   const signals: AbortSignal[] = [];
   if (request.signal !== undefined) signals.push(request.signal);
-  if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
-    signals.push(AbortSignal.timeout(request.timeoutMs));
-  }
-  const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+  // 超时**总是挂着**，默认值见 `DEFAULT_BLUEPRINT_TIMEOUT_MS`。
+  // 这里不加条件判断：漏挂一次就是"整次运行卡在一个不返回的请求上"。
+  const timeoutMs =
+    request.timeoutMs !== undefined && request.timeoutMs > 0
+      ? request.timeoutMs
+      : DEFAULT_BLUEPRINT_TIMEOUT_MS;
+  signals.push(AbortSignal.timeout(timeoutMs));
+  const signal: AbortSignal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
 
   let response;
   try {
@@ -215,13 +237,18 @@ export async function planBlueprint(request: PlanBlueprintRequest): Promise<Blue
       responseFormat: 'json',
       temperature: 0.3,
       maxTokens: 900,
-      ...(signal !== undefined ? { signal } : {}),
+      signal,
     });
   } catch (error) {
+    // 调用方自己取消的（不是我们设的超时）：交给上层取消逻辑，不当成规划失败。
     if (request.signal?.aborted === true) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    // 走到这里说明调用方没取消，那 `signal.aborted` 只可能是超时那一路。
     return {
       ok: false,
-      detail: `规划模型调用失败：${error instanceof Error ? error.message : String(error)}`,
+      detail: signal.aborted
+        ? `规划模型在 ${Math.round(timeoutMs / 1000)} 秒内没有返回，已放弃本次规划：${detail}`
+        : `规划模型调用失败：${detail}`,
     };
   }
 

@@ -4,6 +4,7 @@ import { localStg } from '@/utils/storage';
 import { useAuthStore } from '@/store/modules/auth';
 import { useRouteStore } from '@/store/modules/route';
 import { getRouteName } from '@/router/elegant/transform';
+import { toWorkbenchStep, workbenchStepPath } from '@/constants/workbench';
 
 /**
  * create route guard
@@ -156,6 +157,21 @@ function handleRouteSwitch(to: RouteLocationNormalized, from: RouteLocationNorma
     window.open(to.meta.href, '_blank');
 
     return { path: from.fullPath, replace: true, query: from.query, hash: to.hash };
+  }
+
+  /**
+   * 工作台的步骤是**可选路径参数**，这里把地址归一成四个合法值之一。
+   *
+   * 有三处会传出非法值：首页的 `redirect` 用的是 `getRoutePath('workbench')`，
+   * 也就是带参数声明的原始字符串 `/workbench/:step?`；手敲的 `/workbench/xxx`；
+   * 以及标签页里首页 tab 记下的原始路径。不归一的话，地址栏会留下 `:step?`
+   * 这种字符串，页面还要自己再猜一次——**归一放在路由层，页面只认四个值**。
+   */
+  if (to.name === 'workbench') {
+    const step = toWorkbenchStep(to.params['step']);
+    if (to.params['step'] !== step) {
+      return { path: workbenchStepPath(step), replace: true };
+    }
   }
 }
 

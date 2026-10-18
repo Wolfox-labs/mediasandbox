@@ -23,7 +23,7 @@ declare module "@elegant-router/types" {
     "home": "/home";
     "iframe-page": "/iframe-page/:url";
     "login": "/login/:module(pwd-login|code-login|register|reset-pwd|bind-wechat)?";
-    "workbench": "/workbench";
+    "workbench": "/workbench/:step?";
     "projects": "/projects";
     "sandbox": "/sandbox";
     "tools": "/tools";

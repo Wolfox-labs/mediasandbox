@@ -169,7 +169,7 @@ const routeMap: RouteMap = {
   "home": "/home",
   "iframe-page": "/iframe-page/:url",
   "login": "/login/:module(pwd-login|code-login|register|reset-pwd|bind-wechat)?",
-  "workbench": "/workbench",
+  "workbench": "/workbench/:step?",
   // 以下三个页面由人工新增（elegant-router 的生成插件已摘除，
   // 原因见 build/plugins/index.ts）。新增页面时这里要同步。
   "projects": "/projects",
