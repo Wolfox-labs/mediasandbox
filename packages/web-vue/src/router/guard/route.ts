@@ -5,9 +5,13 @@ import { useAuthStore } from '@/store/modules/auth';
 import { useRouteStore } from '@/store/modules/route';
 import { getRouteName } from '@/router/elegant/transform';
 import { toWorkbenchStep, workbenchStepPath } from '@/constants/workbench';
+import { AUTH_DISABLED } from '@/constants/auth';
 
 /**
  * create route guard
+ *
+ * `AUTH_DISABLED` 关掉了模板自带的登录守卫——本项目没有账号体系，
+ * 留着它只会把所有人挡在 `/login`（理由写在 `@/constants/auth`）。
  *
  * @param router router instance
  */
@@ -25,7 +29,7 @@ export function createRouteGuard(router: Router) {
     const loginRoute: RouteKey = 'login';
     const noAuthorizationRoute: RouteKey = '403';
 
-    const isLogin = Boolean(localStg.get('token'));
+    const isLogin = AUTH_DISABLED || Boolean(localStg.get('token'));
     const needLogin = !to.meta.constant;
     const routeRoles = to.meta.roles || [];
 
@@ -85,7 +89,7 @@ async function initRoute(to: RouteLocationNormalized): Promise<RouteLocationRaw 
     return location;
   }
 
-  const isLogin = Boolean(localStg.get('token'));
+  const isLogin = AUTH_DISABLED || Boolean(localStg.get('token'));
 
   if (!isLogin) {
     // if the user is not logged in and the route is a constant route but not the "not-found" route, then it is allowed to access.

@@ -46,8 +46,19 @@ import { probeBrowserDocker, type DockerClientApi } from './docker-probe.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = path.resolve(HERE, '../../..', 'workspaces');
-/** 前端构建产物目录。构建过就由本服务托管，使访问地址只有一个。 */
-const WEB_DIST = path.resolve(HERE, '../../web/dist');
+/**
+ * 前端构建产物目录，按顺序找第一个存在的。
+ *
+ * **新前端（`web-vue`，步骤页工作台）优先**：它才是现在这个项目的前端。
+ * 旧的 React 单页（`web/dist`）只作为回退——它还在仓库里、还能跑，
+ * 但它没有步骤页、也没有演示文稿模态，默认拿它当门面会让人以为新功能没做。
+ *
+ * 想要固定某一个目录时用 `WEB_DIST_DIR` 显式指定（绝对路径或相对本文件的路径）。
+ */
+const WEB_DIST_CANDIDATES: readonly string[] = [
+  path.resolve(HERE, '../../web-vue/dist'),
+  path.resolve(HERE, '../../web/dist'),
+];
 /**
  * 落盘数据目录。
  *
@@ -66,6 +77,30 @@ const PROJECTS_ROOT = path.resolve(HERE, '../../..', 'projects');
 
 function log(message: string): void {
   process.stdout.write(`[mediasandbox] ${message}\n`);
+}
+
+/**
+ * 找出要托管的前端构建产物目录。
+ *
+ * 顺序：`WEB_DIST_DIR` 显式指定 → 新前端 `web-vue/dist` → 旧前端 `web/dist` → 都没有。
+ * 找不到时返回 `undefined`：服务照常起，只是没有页面可看（API 仍然可用）。
+ */
+async function resolveWebDist(): Promise<string | undefined> {
+  const override = process.env['WEB_DIST_DIR'];
+  const candidates =
+    override !== undefined && override.trim() !== ''
+      ? [path.resolve(override)]
+      : WEB_DIST_CANDIDATES;
+  for (const dir of candidates) {
+    const ok = await stat(dir)
+      .then((s) => s.isDirectory())
+      .catch(() => false);
+    if (ok) return dir;
+  }
+  if (override !== undefined && override.trim() !== '') {
+    log(`  警告：WEB_DIST_DIR 指向的目录不存在或不是目录：${override}`);
+  }
+  return undefined;
 }
 
 /** 读一个非负整数环境变量。缺失或非法时用默认值。 */
@@ -305,9 +340,8 @@ async function main(): Promise<void> {
   const projectsRetention = parseNonNegativeInt(process.env['PROJECTS_RETENTION'], 0);
 
   // 前端构建产物存在就一并托管，让"可运行版本"是一个地址。
-  const webDistExists = await stat(WEB_DIST)
-    .then((s) => s.isDirectory())
-    .catch(() => false);
+  const webDist = await resolveWebDist();
+  if (webDist !== undefined) log(`  前端      ${webDist}`);
 
   const instance = createServer({
     registry,
@@ -328,7 +362,7 @@ async function main(): Promise<void> {
     sandboxRetention: { maxRuns: sandboxRetention },
     projectsRetention: { maxRunsPerProject: projectsRetention },
     concurrency: { maxConcurrentRuns, queueLimit },
-    ...(webDistExists ? { staticDir: WEB_DIST } : {}),
+    ...(webDist !== undefined ? { staticDir: webDist } : {}),
   });
 
   const server = http.createServer(instance.app);
@@ -384,8 +418,10 @@ async function main(): Promise<void> {
         : `每个项目保留最近 ${projectsRetention} 次（PROJECTS_RETENTION 可调）`
     }`,
   );
-  if (!webDistExists) {
-    log('  前端      未构建（跑 pnpm --filter @mediasandbox/web build 后即可经本服务访问）');
+  if (webDist === undefined) {
+    log(
+      '  前端      未构建（跑 pnpm --filter @mediasandbox/web-vue build 后即可经本服务访问）',
+    );
   }
 
   const shutdown = (signal: string): void => {
