@@ -81,6 +81,10 @@ export interface BlockSpecDto {
   readonly repeatable: boolean;
   readonly costHint: 'fast' | 'medium' | 'slow';
   readonly slots: readonly SlotSpecDto[];
+  /** 内置 block：由代码提供，改 / 删会被后端拒绝（400）。 */
+  readonly builtin?: boolean | undefined;
+  /** 已停用：默认不出现在 `GET /api/blocks`，要 `?includeDisabled=1` 才带出来。 */
+  readonly disabled?: boolean | undefined;
 }
 
 export interface BlockGroupDto {

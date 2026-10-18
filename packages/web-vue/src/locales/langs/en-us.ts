@@ -233,7 +233,8 @@ const local: App.I18n.Schema = {
     workbench: 'Workbench',
     projects: 'Projects',
     sandbox: 'Sandbox',
-    tools: 'Toolchain'
+    tools: 'Toolchain',
+    blocks: 'Element Pool'
   },
   page: {
     login: {

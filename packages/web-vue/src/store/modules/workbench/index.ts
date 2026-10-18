@@ -45,12 +45,23 @@ export type TemplateMode = 'blank' | 'saved' | 'new';
 /** 沙盒实现。docker 是容器级隔离，local 是路径级隔离。 */
 export type SandboxProvider = 'docker' | 'local';
 
+/**
+ * 元素勾选的两种含义（两种都要支持）：
+ *   - `candidate`：勾中的是**候选范围**——模型只能在这些里选，选不选仍由它定；
+ *   - `seed`：勾中的是**起手结构**——这几块先铺上（确定性纳入），其余交给模型。
+ *
+ * 两者在提交参数上是两个字段（`candidateBlockIds` / `seedBlocks`），
+ * 语义差别见 `packages/server/src/app.ts` 里对 `seedBlocks` 的说明。
+ */
+export type PoolMode = 'candidate' | 'seed';
+
 /** 落盘的状态形状。运行快照不在里面，理由见文件头。 */
 interface WorkbenchSnapshot {
   goal: string;
   envType: EnvType;
   candidateBlockIds: string[];
   poolSkipped: boolean;
+  poolMode: PoolMode;
   templateMode: TemplateMode;
   templateId: string | null;
   newTemplateLabel: string;
@@ -136,6 +147,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
   const candidateBlockIds = ref<string[]>(asStringList(saved.candidateBlockIds));
   /** 跳过 block 选择：本次不限定候选集，把选块的决定权全交给模型。 */
   const poolSkipped = ref(asBoolean(saved.poolSkipped, false));
+  const poolMode = ref<PoolMode>(saved.poolMode === 'seed' ? 'seed' : 'candidate');
 
   const templateMode = ref<TemplateMode>(asTemplateMode(saved.templateMode));
   const templateId = ref<string | undefined>(
@@ -253,11 +265,19 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
       provider: provider.value,
       ...(structured
         ? {
-            // 跳过时**不传候选集**：那个字段的意思正是"只在这些里选"，
-            // 传全集与不传并不等价（池子会在运行期间变）。
-            ...(poolSkipped.value || candidateBlockIds.value.length === 0
-              ? {}
-              : { candidateBlockIds: [...candidateBlockIds.value] }),
+            // 勾选的两种含义在这里分道：
+            //   seed 模式 → 走 `seedBlocks`：这几块先铺上，**不给候选集**，
+            //               让模型在整池里决定还要加什么；
+            //   candidate 模式 → 走 `candidateBlockIds`：只在这些里选。
+            // （跳过时两者都不传：那个字段的意思正是"只在这些里选"，
+            //   传全集与不传并不等价，池子会在运行期间变。）
+            ...(poolMode.value === 'seed'
+              ? candidateBlockIds.value.length === 0
+                ? {}
+                : { seedBlocks: [...candidateBlockIds.value] }
+              : poolSkipped.value || candidateBlockIds.value.length === 0
+                ? {}
+                : { candidateBlockIds: [...candidateBlockIds.value] }),
             maxBlocks: maxBlocks.value,
             useGenerative: useGenerative.value,
             ...(isWebpage.value ? { annotate: annotate.value } : {}),
@@ -494,6 +514,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
     envType.value = 'webpage';
     candidateBlockIds.value = [];
     poolSkipped.value = false;
+    poolMode.value = 'candidate';
     templateMode.value = 'blank';
     templateId.value = undefined;
     newTemplateLabel.value = '';
@@ -518,6 +539,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
       envType,
       candidateBlockIds,
       poolSkipped,
+      poolMode,
       templateMode,
       templateId,
       newTemplateLabel,
@@ -536,6 +558,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
         envType: envType.value,
         candidateBlockIds: [...candidateBlockIds.value],
         poolSkipped: poolSkipped.value,
+        poolMode: poolMode.value,
         templateMode: templateMode.value,
         templateId: templateId.value ?? null,
         newTemplateLabel: newTemplateLabel.value,
@@ -563,6 +586,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
     envType,
     candidateBlockIds,
     poolSkipped,
+    poolMode,
     templateMode,
     templateId,
     newTemplateLabel,

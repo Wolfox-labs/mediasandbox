@@ -25,4 +25,5 @@ export const views: Record<LastLevelRouteKey, RouteComponent | (() => Promise<Ro
   projects: () => import("@/views/projects/index.vue"),
   sandbox: () => import("@/views/sandbox/index.vue"),
   tools: () => import("@/views/tools/index.vue"),
+  blocks: () => import("@/views/blocks/index.vue"),
 };

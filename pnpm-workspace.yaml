@@ -38,14 +38,16 @@ allowBuilds:
 
 # 依赖版本强制。
 #
-# `chokidar@3`（@elegant-router/core 用）与 `chokidar@5`（unocss 用）对 `readdirp`
-# 的要求不同：前者 `import { ReaddirpStream } from 'readdirp'`，而 v5 的 readdirp
-# 已经移除了这个导出、且 chokidar@5 自己根本不使用 readdirp。两个版本同时在场时，
-# 一旦解析到 v5，elegant-router 的文件监视器就会在加载 vite.config 时炸掉：
+# 两个 chokidar 对 `readdirp` 的要求不同，而**各自声明的范围本来就是对的**：
+#   chokidar@3.6.0  readdirp: ~3.6.0  用 CJS `require('readdirp')`，不需要具名导出
+#   chokidar@5.0.0  readdirp: ^5.0.0  用 ESM `import { readdirp, ReaddirpStream } from 'readdirp'`
+#
+# 曾经把 readdirp **全局**钉到 3.6.0，于是 chokidar@5 拿到 CJS 的 3.6.0，
+# 在加载 vite.config 时炸掉：
 #
 #   The requested module 'readdirp' does not provide an export named 'ReaddirpStream'
 #
-# 把 readdirp 统一钉到 3.6.0：chokidar@3 拿到它要的 API，
-# chokidar@5 因为不引用它而不受影响。
+# 这条报错来自 chokidar@5，不是 chokidar@3 —— readdirp@3.6.0 是 CJS，本来就没有这个
+# 具名导出。所以只对 chokidar@3 钉版，chokidar@5 用回它自己声明的 ^5.0.0。
 overrides:
-  readdirp: 3.6.0
+  'chokidar@3>readdirp': 3.6.0

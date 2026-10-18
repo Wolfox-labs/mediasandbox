@@ -11,8 +11,9 @@
  * 另外保留"查看历史运行"：换一次运行号就把整份快照换成那一次的，产物也能重看。
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { NAlert, NButton, NCard, NSelect, NSpin, NTag, useMessage } from 'naive-ui';
-import { api, ApiError, isHtmlArtifact, isImageArtifact, isTextArtifact } from '@/api/client';
+import { NAlert, NButton, NCard, NSelect, NTag, useMessage } from 'naive-ui';
+import { api, ApiError, isHtmlArtifact, isImageArtifact } from '@/api/client';
+import ArtifactPreview from '@/components/common/artifact-preview.vue';
 import type { RunListItem } from '@/api/types';
 import { useWorkbenchStore } from '@/store/modules/workbench';
 import { formatBytes, formatDuration, STATUS_STYLE } from '@/utils/format';
@@ -24,20 +25,8 @@ const message = useMessage();
 
 const artifacts = computed(() => store.artifacts);
 const selectedPath = ref<string | undefined>(undefined);
-const artifactText = ref('');
-const textLoading = ref(false);
 
 const selected = computed(() => artifacts.value.find(item => item.path === selectedPath.value));
-
-const view = computed(() => {
-  const artifact = selected.value;
-  if (artifact === undefined) return { kind: 'none' as const, url: '' };
-  const url = api.artifactUrl(store.runId ?? '', artifact.path);
-  if (isHtmlArtifact(artifact)) return { kind: 'html' as const, url };
-  if (isImageArtifact(artifact)) return { kind: 'image' as const, url };
-  if (isTextArtifact(artifact)) return { kind: 'text' as const, url };
-  return { kind: 'binary' as const, url };
-});
 
 /** 默认选中第一个能预览的产物：网页优先，其次图片，最后随便一个。 */
 watch(
@@ -53,32 +42,6 @@ watch(
     const preferred =
       list.find(item => isHtmlArtifact(item)) ?? list.find(item => isImageArtifact(item));
     selectedPath.value = (preferred ?? list[0]).path;
-  },
-  { immediate: true }
-);
-
-/** 预览目标（换了运行、换了文件、换了类型都要重读）。 */
-const previewTarget = computed(() => ({
-  runId: store.runId,
-  path: selectedPath.value,
-  kind: view.value.kind
-}));
-
-watch(
-  previewTarget,
-  async target => {
-    if (target.runId === undefined || target.path === undefined || target.kind !== 'text') {
-      artifactText.value = '';
-      return;
-    }
-    textLoading.value = true;
-    try {
-      artifactText.value = await api.artifactText(target.runId, target.path);
-    } catch {
-      artifactText.value = '（读取失败：产物可能已随沙盒回收）';
-    } finally {
-      textLoading.value = false;
-    }
   },
   { immediate: true }
 );
@@ -267,17 +230,15 @@ onMounted(async () => {
           </div>
 
           <div class="wb__preview">
-            <iframe
-              v-if="view.kind === 'html'"
-              :src="view.url"
-              class="wb__frame"
-              sandbox="allow-scripts"
-              title="产物预览"
+            <!-- 渲染规则与「项目与产物」页共用同一个组件，避免两处各写一遍 -->
+            <ArtifactPreview
+              v-if="selected !== undefined"
+              :run-id="store.runId ?? ''"
+              :path="selected.path"
+              :size="selected.size"
+              :mime-hint="selected.mimeHint"
+              height="clamp(420px, 60vh, 900px)"
             />
-            <img v-else-if="view.kind === 'image'" :src="view.url" class="wb__image" alt="产物" />
-            <NSpin v-else-if="textLoading" size="small" />
-            <pre v-else-if="view.kind === 'text'" class="wb__code">{{ artifactText }}</pre>
-            <div v-else class="wb__empty">这个文件不适合在页面里预览，下载后查看</div>
           </div>
         </div>
 

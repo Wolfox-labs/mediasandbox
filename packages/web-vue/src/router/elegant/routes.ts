@@ -113,5 +113,16 @@ export const generatedRoutes: GeneratedRoute[] = [
       title: 'tools',
       i18nKey: 'route.tools'
     }
+  },
+  {
+    // 元素池 = 结构化制作的候选集。单独一页放在侧边栏，是因为
+    // "看一眼池子里有什么、把建错的块下线"不该只能在一次运行的流程里做。
+    name: 'blocks',
+    path: '/blocks',
+    component: 'layout.base$view.blocks',
+    meta: {
+      title: 'blocks',
+      i18nKey: 'route.blocks'
+    }
   }
 ];

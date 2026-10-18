@@ -20,7 +20,12 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-width: 1080px;
+  /* 阅读宽度的上限，但不与视口对抗：视口变宽（或浏览器缩放到 50%）时按 1600px
+     放宽；正常宽度下 `min()` 取 100%，与原来的 1080px 表现一致。
+     `width: 100%` 不能省：父级是 flex 容器，而 `margin: 0 auto` 会吸收横向空隙、
+     让 flex 项**不再 stretch**，只按内容宽度收缩（实测视口 3360px 时只有 1086px）。 */
+  width: 100%;
+  max-width: min(1600px, 100%);
   margin: 0 auto;
   padding-bottom: 24px;
 }
@@ -219,10 +224,112 @@
   border-bottom: 1px solid var(--wb-border, rgba(128, 128, 128, 0.28));
 }
 
-.wb__blocks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 16px;
+/* 单元卡片：一个元素就是一张**小卡**——它是"这块长什么样"的一眼提示，
+   不是预览页（要看细节点开放大）。所以框小、脚下只留勾选与名字。 */
+.wb__units {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 150px);
+  gap: 6px;
+}
+
+.wb__unit {
+  border: 1px solid var(--wb-border, rgba(128, 128, 128, 0.4));
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.wb__unit--on {
+  border-color: var(--wb-accent, #2080f0);
+  box-shadow: 0 0 0 1px var(--wb-accent, #2080f0) inset;
+}
+
+.wb__unit-thumb {
+  position: relative;
+  height: 84px;
+  overflow: hidden;
+  cursor: zoom-in;
+  background: #fff;
+}
+
+/* 用 **480px 窄视口**渲染再缩到 150px（×0.3125）：
+   后端渲染的是整页，宽视口下单个块只占中间一小条，缩略图里大半是空白；
+   窄视口让这块自己的内容占比大得多，小框里才真的"有东西"。 */
+.wb__unit-thumb-frame {
+  width: 480px;
+  height: 270px;
+  border: 0;
+  transform: scale(0.3125);
+  transform-origin: top left;
+  /* 缩略图只负责"看"：点击要落到容器上（放大），不能被 iframe 吃走。 */
+  pointer-events: none;
+}
+
+.wb__unit-badge {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 14px;
+  color: #fff;
+  background: rgba(240, 160, 32, 0.92);
+}
+
+.wb__unit-badge--right {
+  left: auto;
+  right: 3px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.wb__unit-zoom {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.wb__unit-thumb:hover .wb__unit-zoom,
+.wb__unit-thumb:focus-visible .wb__unit-zoom {
+  opacity: 1;
+}
+
+.wb__unit-foot {
+  padding: 3px 4px;
+  border-top: 1px solid var(--wb-border, rgba(128, 128, 128, 0.25));
+  font-size: 10px;
+  line-height: 1.6;
+  /* 卡片宽度固定：一行放不下就省略，宁可截断也不要撑高 */
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.wb__unit-foot .n-checkbox__label {
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 模板样例按整页看，给宽一点的框（仍是同一套窄视口渲染，只是放大倍率不同）。 */
+.wb__template-shot {
+  margin-top: 8px;
+}
+
+.wb__unit-thumb--wide {
+  width: 300px;
+  max-width: 100%;
+  height: 169px;
+}
+
+.wb__unit-thumb-frame--wide {
+  transform: scale(0.625);
 }
 
 .wb__block-id {
@@ -230,6 +337,23 @@
   font-family: monospace;
   font-size: 10px;
   color: var(--wb-text-3, rgba(128, 128, 128, 0.95));
+}
+
+.wb__preview-open {
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.wb__unit-preview {
+  height: clamp(420px, 62vh, 900px);
+}
+
+.wb__unit-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--wb-border, rgba(128, 128, 128, 0.4));
+  border-radius: 4px;
+  background: #fff;
 }
 
 .wb__radios {
@@ -512,7 +636,9 @@
 
 .wb__frame {
   width: 100%;
-  height: 640px;
+  /* 随视口高度伸缩，并设上下限：矮屏不再被 640px 顶出滚动条，
+     放大/缩小页面时预览框也跟着用上多出来的空间。 */
+  height: clamp(420px, 60vh, 900px);
   border: 1px solid var(--wb-border, rgba(128, 128, 128, 0.4));
   border-radius: 4px;
   background: #fff;

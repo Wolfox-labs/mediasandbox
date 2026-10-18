@@ -16,11 +16,13 @@ import {
   NEmpty,
   NGi,
   NGrid,
+  NModal,
   NSpin,
   NTag,
   useMessage
 } from 'naive-ui';
-import { api, ApiError, isImageArtifact, isHtmlArtifact } from '@/api/client';
+import { api, ApiError, isHtmlArtifact, isImageArtifact, isTextArtifact } from '@/api/client';
+import ArtifactPreview from '@/components/common/artifact-preview.vue';
 import { ENV_LABELS, type EnvType } from '@/api/types';
 import { formatBytes, formatDateTime, STATUS_STYLE } from '@/utils/format';
 
@@ -201,17 +203,35 @@ function useTemplate(template: (typeof TEMPLATES)[number]): void {
     });
 }
 
-/** 产物预览地址（点击文件名时新窗口打开）。 */
+/** 产物地址。`<a href>` 留着，浏览器自带的"新标签打开 / 复制链接 / 另存为"才都还在。 */
 function previewUrl(node: ArtifactNode): string {
   return api.artifactUrl(node.runId, node.path);
 }
 
-/** 只有图片/网页适合直接预览，其它给下载。 */
+function artifactOf(node: ArtifactNode): { path: string; size: number; mimeHint: string } {
+  return { path: node.path, size: node.size, mimeHint: node.mimeHint };
+}
+
+/** 网页 / 图片 / 文本都能在站内看；其它类型只能下载。 */
 function canPreview(node: ArtifactNode): boolean {
-  return (
-    isImageArtifact({ path: node.path, size: node.size, mimeHint: node.mimeHint }) ||
-    isHtmlArtifact({ path: node.path, size: node.size, mimeHint: node.mimeHint })
-  );
+  const artifact = artifactOf(node);
+  return isHtmlArtifact(artifact) || isImageArtifact(artifact) || isTextArtifact(artifact);
+}
+
+/** 正在站内预览的产物；`undefined` 表示弹层关着。 */
+const previewNode = ref<ArtifactNode | undefined>(undefined);
+
+/**
+ * 点击产物：**默认在站内预览**，`Ctrl / Cmd / Shift` 与中键仍交给浏览器开新标签。
+ *
+ * 只拦"普通左键"这一种情况：其余（含右键菜单里的各项）保持链接的默认语义，
+ * 这样"想在新标签里看原文件"的习惯不会被破坏。
+ */
+function onArtifactClick(event: MouseEvent, node: ArtifactNode): void {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (!canPreview(node)) return;
+  event.preventDefault();
+  previewNode.value = node;
 }
 
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -311,6 +331,7 @@ onBeforeUnmount(() => {
                       :target="canPreview(node) ? '_blank' : undefined"
                       :download="canPreview(node) ? undefined : true"
                       rel="noreferrer"
+                      @click="onArtifactClick($event, node)"
                     >
                       {{ node.path }}
                     </a>
@@ -346,10 +367,50 @@ onBeforeUnmount(() => {
         </NCard>
       </NGi>
     </NGrid>
+
+    <!-- 站内预览：普通左键走这里；Ctrl / Cmd / 中键走浏览器新标签（见 onArtifactClick） -->
+    <NModal
+      :show="previewNode !== undefined"
+      preset="card"
+      :title="previewNode?.path ?? '产物预览'"
+      style="width: min(1200px, calc(100vw - 32px))"
+      @update:show="
+        value => {
+          if (!value) previewNode = undefined;
+        }
+      "
+    >
+      <template v-if="previewNode" #header-extra>
+        <a
+          :href="previewUrl(previewNode)"
+          target="_blank"
+          rel="noreferrer"
+          class="projects__preview-open"
+        >
+          在新标签打开
+        </a>
+      </template>
+      <div v-if="previewNode" class="projects__preview">
+        <ArtifactPreview
+          :run-id="previewNode.runId"
+          :path="previewNode.path"
+          :size="previewNode.size"
+          :mime-hint="previewNode.mimeHint"
+        />
+      </div>
+    </NModal>
   </div>
 </template>
 
 <style scoped>
+.projects__preview {
+  height: clamp(360px, 62vh, 900px);
+}
+
+.projects__preview-open {
+  font-size: 12px;
+  text-decoration: none;
+}
 .projects {
   height: 100%;
   min-height: 0;

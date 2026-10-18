@@ -229,7 +229,8 @@ const local: App.I18n.Schema = {
     workbench: '创作工作台',
     projects: '项目与产物',
     sandbox: '沙盒环境',
-    tools: '工具链'
+    tools: '工具链',
+    blocks: '元素池管理'
   },
   page: {
     login: {

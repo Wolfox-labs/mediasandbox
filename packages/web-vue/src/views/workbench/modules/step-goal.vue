@@ -21,9 +21,9 @@ import {
   NCheckbox,
   NCollapse,
   NCollapseItem,
-  NDialog,
   NInput,
   NInputNumber,
+  NModal,
   NRadio,
   NRadioGroup,
   NSelect,
@@ -169,6 +169,33 @@ function clearBlocks(): void {
 
 /** 新建区块（POST /api/blocks）。成功后就刷新池子并选中它。 */
 const blockDialogVisible = ref(false);
+
+// ── 效果预览（元素 / 版式 / 模板共用同一个弹层）────────────────────────
+interface UnitPreview {
+  readonly title: string;
+  readonly url: string;
+}
+
+const unitPreview = ref<UnitPreview | undefined>(undefined);
+
+/** 单元预览地址：网页取 block 池，演示文稿取版式池（后端两条端点，不能混）。 */
+function unitPreviewUrl(unit: { readonly id: string }): string {
+  return store.isSlides ? api.slideLayoutPreviewUrl(unit.id) : api.blockPreviewUrl(unit.id);
+}
+
+/**
+ * 打开一个单元的"看效果"（放大）。
+ *
+ * 结果来自后端**确定性渲染**（不调生成层）：示例文案 + 真实版式。
+ * 所以弹层里必须写明"文案是示例值"，否则容易被当成这次运行会产出的内容。
+ */
+function openUnitPreview(unit: { readonly id: string; readonly label: string }): void {
+  unitPreview.value = { title: unit.label, url: unitPreviewUrl(unit) };
+}
+
+function openTemplatePreview(template: { readonly id: string; readonly label: string }): void {
+  unitPreview.value = { title: template.label, url: api.templatePreviewUrl(template.id) };
+}
 const creatingBlock = ref(false);
 const createBlockError = ref<string | undefined>(undefined);
 const newBlock = ref<{ id: string; label: string; group: BlockGroup; description: string }>({
@@ -410,7 +437,8 @@ onMounted(async () => {
             {{ store.isSlides ? '版式（每页一个）' : '页面元素' }}
           </span>
           <span class="wb__section-count">
-            {{ candidateCount }} / {{ blocks.length }} 已选
+            {{ candidateCount }} / {{ blocks.length }}
+            {{ store.poolMode === 'seed' ? '已点名' : '已选' }}
           </span>
           <span class="wb__actions-fill" />
           <NButton text size="tiny" :disabled="blocks.length === 0" @click="selectAllBlocks">
@@ -429,7 +457,22 @@ onMounted(async () => {
           {{ blocksError }}
         </NAlert>
 
+        <!-- 勾选的两种含义（两种都支持）：限定候选范围 / 指定起手块 -->
         <div class="wb__field">
+          <NRadioGroup v-model:value="store.poolMode" size="small" class="wb__radios">
+            <NRadio value="candidate">限定候选范围</NRadio>
+            <NRadio value="seed">指定起手块</NRadio>
+          </NRadioGroup>
+          <span class="wb__hint">
+            {{
+              store.poolMode === 'seed'
+                ? `勾中的会被先铺上——这几${store.unitNoun}一定用上，其余仍由模型在整池里决定。`
+                : `勾中的只是候选范围：模型只能在这些${store.unitNoun}里选，选不选、选几个仍由它定。`
+            }}
+          </span>
+        </div>
+
+        <div v-if="store.poolMode === 'candidate'" class="wb__field">
           <NSwitch v-model:value="store.poolSkipped">
             <template #checked>跳过这次选择</template>
             <template #unchecked>跳过这次选择</template>
@@ -467,20 +510,50 @@ onMounted(async () => {
                 {{ groupSelectedAll(entry) ? '清空本组' : '全选本组' }}
               </NButton>
             </div>
-            <div class="wb__blocks">
-              <NCheckbox
+            <!-- 每个单元一张卡片：缩略图里是**真实渲染出来的效果**，点图放大；
+                 勾选仍走下面的复选框（缩略图上 pointer-events 关掉，免得点穿）。 -->
+            <div class="wb__units">
+              <div
                 v-for="block in entry.items"
                 :key="block.id"
-                :checked="isSelected(block.id)"
-                :disabled="store.poolSkipped"
-                size="small"
-                @update:checked="checked => toggleBlock(block.id, checked)"
+                class="wb__unit"
+                :class="{ 'wb__unit--on': isSelected(block.id) && !store.poolSkipped }"
               >
-                {{ block.label }}
-                <span class="wb__block-id">{{ block.id }}</span>
-                <NTag v-if="block.costHint === 'slow'" size="tiny" type="warning">慢</NTag>
-                <NTag v-if="!block.repeatable" size="tiny">仅一次</NTag>
-              </NCheckbox>
+                <div
+                  class="wb__unit-thumb"
+                  role="button"
+                  tabindex="0"
+                  :title="`放大看「${block.label}」（${block.id}）`"
+                  @click="openUnitPreview(block)"
+                  @keydown.enter="openUnitPreview(block)"
+                >
+                  <iframe
+                    :src="unitPreviewUrl(block)"
+                    class="wb__unit-thumb-frame"
+                    sandbox="allow-scripts"
+                    loading="lazy"
+                    scrolling="no"
+                    tabindex="-1"
+                  />
+                  <!-- 角标压在图里，脚下只留"勾选 + 名字"，卡片才压得住 -->
+                  <span v-if="block.costHint === 'slow'" class="wb__unit-badge">慢</span>
+                  <span v-if="!block.repeatable" class="wb__unit-badge wb__unit-badge--right">
+                    仅一次
+                  </span>
+                  <span class="wb__unit-zoom">放大</span>
+                </div>
+                <div class="wb__unit-foot">
+                  <NCheckbox
+                    :checked="isSelected(block.id)"
+                    :disabled="store.poolSkipped"
+                    size="small"
+                    @update:checked="checked => toggleBlock(block.id, checked)"
+                  >
+                    {{ block.label }}
+                    <span class="wb__block-id">{{ block.id }}</span>
+                  </NCheckbox>
+                </div>
+              </div>
             </div>
           </div>
         </NSpin>
@@ -540,6 +613,30 @@ onMounted(async () => {
               <span v-if="selectedTemplate.allowedBlockIds" class="wb__hint wb__hint--block">
                 这套模板还会把候选块限定在 {{ selectedTemplate.allowedBlockIds.length }} 个类型内。
               </span>
+              <!-- 模板样例同样要看得见：缩略图是真渲染，点它放大 -->
+              <div class="wb__template-shot">
+                <div
+                  class="wb__unit-thumb wb__unit-thumb--wide"
+                  role="button"
+                  tabindex="0"
+                  :title="`放大看模板「${selectedTemplate.label}」`"
+                  @click="openTemplatePreview(selectedTemplate)"
+                  @keydown.enter="openTemplatePreview(selectedTemplate)"
+                >
+                  <iframe
+                    :src="api.templatePreviewUrl(selectedTemplate.id)"
+                    class="wb__unit-thumb-frame wb__unit-thumb-frame--wide"
+                    sandbox="allow-scripts"
+                    loading="lazy"
+                    scrolling="no"
+                    tabindex="-1"
+                  />
+                  <span class="wb__unit-zoom">放大</span>
+                </div>
+                <span class="wb__hint wb__hint--block">
+                  模板样例：示例内容下的起手结构与版式（确定性渲染，不调生成层）。
+                </span>
+              </div>
             </div>
           </NSpin>
         </div>
@@ -633,11 +730,11 @@ onMounted(async () => {
     </NCard>
 
     <!-- 新建区块 -->
-    <NDialog
+    <NModal
       v-model:show="blockDialogVisible"
-      title="新建区块"
       preset="card"
-      style="width: 480px"
+      title="新建区块"
+      style="width: 480px; max-width: calc(100vw - 32px)"
     >
       <div class="wb__dialog">
         <label class="wb__field">
@@ -677,14 +774,14 @@ onMounted(async () => {
           </NButton>
         </div>
       </div>
-    </NDialog>
+    </NModal>
 
     <!-- 新建模板 -->
-    <NDialog
+    <NModal
       v-model:show="templateDialogVisible"
-      title="新建模板"
       preset="card"
-      style="width: 480px"
+      title="新建模板"
+      style="width: 480px; max-width: calc(100vw - 32px)"
     >
       <div class="wb__dialog">
         <label class="wb__field">
@@ -712,7 +809,38 @@ onMounted(async () => {
           </NButton>
         </div>
       </div>
-    </NDialog>
+    </NModal>
+
+    <!-- 效果预览：后端确定性渲染的 HTML 直接进 iframe；不调生成层、不花 token -->
+    <NModal
+      :show="unitPreview !== undefined"
+      preset="card"
+      :title="unitPreview?.title ?? '效果预览'"
+      style="width: min(1000px, calc(100vw - 32px))"
+      @update:show="
+        value => {
+          if (!value) unitPreview = undefined;
+        }
+      "
+    >
+      <template v-if="unitPreview" #header-extra>
+        <a :href="unitPreview.url" target="_blank" rel="noreferrer" class="wb__preview-open">
+          在新标签打开
+        </a>
+      </template>
+      <div class="wb__unit-preview">
+        <iframe
+          v-if="unitPreview"
+          :src="unitPreview.url"
+          class="wb__unit-frame"
+          sandbox="allow-scripts"
+          title="效果预览"
+        />
+      </div>
+      <p class="wb__hint">
+        这是示例内容下的效果（后端确定性渲染，不调生成层）；真实运行中的文案由模型填。
+      </p>
+    </NModal>
   </div>
 </template>
 

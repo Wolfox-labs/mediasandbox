@@ -43,6 +43,7 @@ import { RunQueue, type QueuedRun } from './run-queue.js';
 import { runInteractionVerification } from './interaction.js';
 import { JsonPersist } from './persist.js';
 import { BlockInputError, parseBlockSpec } from './block-input.js';
+import { previewBlockHtml, previewSlideLayoutHtml, previewTemplateHtml } from './preview.js';
 import {
   StructureInputError,
   applyStructureOps,
@@ -959,13 +960,57 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     // 候选集已在上方校验过，这里直接复用（不再重复解析，避免两处取值不一致）。
     const candidateBlockIds = rawCandidateIds;
 
+    // 起手块（`seedBlocks`）：调用方直接点名"这几类块先铺上"。
+    //
+    // 与"限定候选集"是**两件事**，可以同时用：
+    //   - `candidateBlockIds` 决定模型**能**选哪些（封闭范围，选不选仍由它定）；
+    //   - `seedBlocks` 决定哪些**先铺上**（确定性纳入，模型在这之后接着排）。
+    //
+    // 先读它，是因为它比 `templateId` 更具体：两者同时给时以 `seedBlocks` 为准，
+    // 两套起手结构叠加只会互相打架。
+    const rawSeedBlocks = body['seedBlocks'];
+    let seedTypes: string[] | undefined;
+    if (rawSeedBlocks !== undefined) {
+      if (!Array.isArray(rawSeedBlocks) || rawSeedBlocks.some((item) => typeof item !== 'string')) {
+        errorResponse(
+          res,
+          400,
+          'seedBlocks 必须是字符串数组（block 类型）',
+          '例如 ["hero","features","cta"]',
+        );
+        return;
+      }
+      seedTypes = (rawSeedBlocks as string[])
+        .map((item) => item.trim())
+        .filter((item) => item !== '');
+      if (seedTypes.length > 0) {
+        const blockPool = deps.blocks;
+        if (blockPool === undefined) {
+          errorResponse(res, 503, '本次部署未装配 block 池', 'seedBlocks 需要 block 池才能校验');
+          return;
+        }
+        const unknown = seedTypes.filter((type) => !blockPool.has(type));
+        if (unknown.length > 0) {
+          errorResponse(
+            res,
+            400,
+            `起手结构里有未注册的 block: ${unknown.join(', ')}`,
+            `可用: ${blockPool.specs().map((s) => s.id).join(', ')}`,
+          );
+          return;
+        }
+      }
+    }
+    const seedApplied =
+      structureInput === undefined && seedTypes !== undefined && seedTypes.length > 0;
+
     // 模板：请求里给的是 id，这里解析成模板本身再往下传。
     // 编排层只认"这一个模板长什么样"，不认"模板池在哪"。
     const templateId = typeof body['templateId'] === 'string' ? body['templateId'] : undefined;
     let template: TemplateSpec | undefined;
-    // 给了既定结构时 `templateId` 被盖过：不解析也不校验——
+    // 给了既定结构、或直接点名了起手块时，`templateId` 被盖过：不解析也不校验——
     // 否则会拿一个**已被忽略**的参数把人挡在门外。
-    if (templateId !== undefined && structureInput === undefined) {
+    if (templateId !== undefined && structureInput === undefined && !seedApplied) {
       if (deps.templates === undefined) {
         errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
         return;
@@ -980,6 +1025,21 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         return;
       }
       template = deps.templates.get(templateId);
+    }
+
+    /*
+     * 起手块走的是与 `templateId` **完全相同**的种子路径（编排层 planner 里的
+     * `applyTemplate`），所以这里现造一份不落盘的临时模板就够了——
+     * 编排层不需要知道它的来历，也不需要为它新增一套概念。
+     */
+    if (seedApplied) {
+      template = {
+        id: '__adhoc-seed__',
+        label: '指定起手块',
+        description: '由工作台直接指定：这几类块先铺上，其余仍由决策模型决定',
+        blocks: (seedTypes ?? []).map((type) => ({ type })),
+        builtin: false,
+      };
     }
 
     // 取消开关在**入队时**就建好并登记：排队中的运行也要能被取消。
@@ -1578,6 +1638,107 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         allowedBlockIds: t.allowedBlockIds ?? null,
       })),
     });
+  });
+
+  /**
+   * 元素池预览三条端点：把池子里的一项渲染成**能直接看效果**的自包含 HTML。
+   *
+   * ## 为什么这件事该由服务端答
+   *
+   * 前端的元素池此前只有文字清单，用户看不出"hero 长什么样"。而效果只有
+   * **同一套渲染器**答得出来——前端自己拼一份近似的版式，看到的就不是真产物，
+   * 于是"预览里好看、跑出来不是那样"变成常态。
+   *
+   * ## 三条共同的约定
+   *
+   * - 只读：不注册、不落盘、不碰运行记录（见 `preview.ts` 的说明）
+   * - 零成本：只用确定性填充，**绝不调用生成层**
+   * - `text/html; charset=utf-8`：返回的是一整份自包含文档，直接塞进 iframe 就能看
+   *
+   * 未知 id 回 404 并列出可用 id（前端可以据此提示"是不是拼错了"）；
+   * 本次部署没装配对应的池子回 503——与既有端点同一套判据，不新造说法。
+   */
+  app.get('/api/blocks/:blockId/preview', async (req: Request, res: Response) => {
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+    const blockId = paramOf(req, 'blockId');
+    if (!registry.has(blockId)) {
+      errorResponse(
+        res,
+        404,
+        `未注册的 block: ${blockId}`,
+        `可用: ${registry.specs().map((s) => s.id).join(', ')}`,
+      );
+      return;
+    }
+    res.type('html').send(await previewBlockHtml(registry, registry.get(blockId)));
+  });
+
+  /** 演示文稿版式预览。与网页 block 预览分开，因为渲染器不是同一个。 */
+  app.get('/api/slide-layouts/:layoutId/preview', async (req: Request, res: Response) => {
+    const registry = deps.slideLayouts;
+    if (registry === undefined) {
+      errorResponse(
+        res,
+        503,
+        '本次部署未装配演示文稿版式池',
+        '服务启动时未提供 slideLayouts',
+      );
+      return;
+    }
+    const layoutId = paramOf(req, 'layoutId');
+    if (!registry.has(layoutId)) {
+      errorResponse(
+        res,
+        404,
+        `未注册的版式: ${layoutId}`,
+        `可用: ${registry.specs().map((s) => s.id).join(', ')}`,
+      );
+      return;
+    }
+    res.type('html').send(await previewSlideLayoutHtml(registry, registry.get(layoutId)));
+  });
+
+  /**
+   * 整套模板预览：用模板自己的块序渲染一页，"这套起手排出来是什么样"一眼可见。
+   */
+  app.get('/api/templates/:templateId/preview', async (req: Request, res: Response) => {
+    const registry = deps.blocks;
+    if (registry === undefined) {
+      errorResponse(res, 503, '本次部署未装配 block 池', '服务启动时未提供 blocks');
+      return;
+    }
+    const templates = deps.templates;
+    if (templates === undefined) {
+      errorResponse(res, 503, '本次部署未装配模板池', '服务启动时未提供 templates');
+      return;
+    }
+    const templateId = paramOf(req, 'templateId');
+    if (!templates.has(templateId)) {
+      errorResponse(
+        res,
+        404,
+        `未注册的模板: ${templateId}`,
+        `可用: ${templates.specs().map((t) => t.id).join(', ')}`,
+      );
+      return;
+    }
+    const template = templates.get(templateId);
+    // 模板可以只限定范围、不给起手结构（`blocks: []`）。那时没有块可渲染，
+    // 回一份空页面会让人以为"预览坏了"，不如明说。
+    if (template.blocks.length === 0) {
+      errorResponse(
+        res,
+        409,
+        `模板 ${templateId} 没有起手结构`,
+        '它只限定可选的 block 范围，没有块可以预览',
+      );
+      return;
+    }
+    res.type('html').send(await previewTemplateHtml(registry, template));
   });
 
   /**

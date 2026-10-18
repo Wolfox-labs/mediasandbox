@@ -120,6 +120,13 @@ export interface CreateRunInput {
   // ── 以下仅 webpage 环境（结构化制作）使用 ──────────────────────────
   /** 本次候选 block 类型；省略则用池子全集。 */
   readonly candidateBlockIds?: readonly string[] | undefined;
+  /**
+   * 起手结构：这几类块**先铺上**（确定性纳入），其余仍由决策模型决定。
+   *
+   * 与 `candidateBlockIds` 是两件事，可以同时给：那个决定"模型能选哪些"，
+   * 这个决定"哪些先用上"。两者都比 `templateId` 更具体，同给时以它们为准。
+   */
+  readonly seedBlocks?: readonly string[] | undefined;
   /** 选定模板：给了就按它的起手结构来，不给则由决策模型自由决定。 */
   readonly templateId?: string | undefined;
   /** 页面 block 数上限。 */
@@ -151,6 +158,34 @@ export interface CreateRunInput {
   readonly blockIds?: readonly string[] | undefined;
 }
 
+/**
+ * 新建 / 修改 block 的请求体。
+ *
+ * 两边共用同一个形状：`PUT` 时后端会额外校验 `id` 与路径一致——**不允许改 id**，
+ * 因为结构里存的是旧 id，换了 id 会让历史运行引用不到它。
+ */
+export interface BlockInput {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly group: BlockGroup;
+  readonly canLead?: boolean | undefined;
+  readonly repeatable?: boolean | undefined;
+  readonly costHint?: 'fast' | 'medium' | 'slow' | undefined;
+  /**
+   * 只在**修改**时有意义：`true` 停用、`false` 重新启用。
+   * 后端按请求体重建声明，所以省略它等价于"未停用"（即启用）。
+   */
+  readonly disabled?: boolean | undefined;
+  readonly slots: readonly {
+    readonly name: string;
+    readonly type: string;
+    readonly required?: boolean | undefined;
+    readonly description: string;
+    readonly countRange?: { readonly min: number; readonly max: number } | undefined;
+  }[];
+}
+
 export const api = {
   health(): Promise<HealthResponse> {
     return request<HealthResponse>('/api/health');
@@ -161,9 +196,21 @@ export const api = {
     return request<{ tools: ToolSpecDto[] }>(`/api/tools${query}`);
   },
 
-  /** block 池目录：结构化制作的候选集来源。 */
-  blocks(group?: BlockGroup): Promise<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }> {
-    const query = group !== undefined ? `?group=${group}` : '';
+  /**
+   * block 池目录：结构化制作的候选集来源。
+   *
+   * **默认不含已停用的**——后端就是这样，要看停用的必须显式传 `includeDisabled`。
+   * 元素池管理页必须传 `true`：否则"停用"会变成单向门，停完就再也看不见，
+   * 也就无从恢复（这正是改造前 admin 那边的真实缺陷）。
+   */
+  blocks(
+    group?: BlockGroup,
+    options: { includeDisabled?: boolean } = {}
+  ): Promise<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }> {
+    const params = new URLSearchParams();
+    if (group !== undefined) params.set('group', group);
+    if (options.includeDisabled === true) params.set('includeDisabled', '1');
+    const query = params.toString() === '' ? '' : `?${params.toString()}`;
     return request<{ blocks: BlockSpecDto[]; groups: BlockGroupDto[] }>(`/api/blocks${query}`);
   },
 
@@ -195,26 +242,53 @@ export const api = {
    * 走与内置 block **完全相同**的校验：提议不等于决定，能进池子的前提是
    * 它先是一份合法声明。所以这里的失败信息（400）要原样带到界面上。
    */
-  createBlock(input: {
-    readonly id: string;
-    readonly label: string;
-    readonly description: string;
-    readonly group: BlockGroup;
-    readonly canLead?: boolean | undefined;
-    readonly repeatable?: boolean | undefined;
-    readonly costHint?: 'fast' | 'medium' | 'slow' | undefined;
-    readonly slots: readonly {
-      readonly name: string;
-      readonly type: string;
-      readonly required?: boolean | undefined;
-      readonly description: string;
-      readonly countRange?: { readonly min: number; readonly max: number } | undefined;
-    }[];
-  }): Promise<{ block: { id: string; label: string; group: string }; note?: string }> {
+  createBlock(input: BlockInput): Promise<{ block: { id: string; label: string; group: string }; note?: string }> {
     return request<{ block: { id: string; label: string; group: string }; note?: string }>(
       '/api/blocks',
       { method: 'POST', body: JSON.stringify(input) }
     );
+  },
+
+  /**
+   * 改一个自定义 block。**内置的会被后端拒绝**（400），界面应据此禁用按钮。
+   */
+  updateBlock(
+    blockId: string,
+    input: BlockInput
+  ): Promise<{
+    block: { id: string; label: string; group: string; disabled: boolean };
+    note: string;
+  }> {
+    return request<{
+      block: { id: string; label: string; group: string; disabled: boolean };
+      note: string;
+    }>(`/api/blocks/${encodeURIComponent(blockId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input)
+    });
+  },
+
+  /**
+   * 停用 / 彻底删除一个自定义 block。
+   *
+   * 默认**停用**：退出候选池，但用过它的历史运行仍能照常渲染。
+   * `purge` 才是物理删除，且**只允许从未被任何运行用过**的，否则后端 400
+   * 并把"是哪几次运行用过"一起带回来——界面要原样显示那个原因。
+   */
+  deleteBlock(
+    blockId: string,
+    options: { purge?: boolean } = {}
+  ): Promise<{
+    block: { id: string; disabled?: boolean; removed?: boolean };
+    usedByRuns: number;
+    note: string;
+  }> {
+    const suffix = options.purge === true ? '?purge=1' : '';
+    return request<{
+      block: { id: string; disabled?: boolean; removed?: boolean };
+      usedByRuns: number;
+      note: string;
+    }>(`/api/blocks/${encodeURIComponent(blockId)}${suffix}`, { method: 'DELETE' });
   },
 
   /** 项目维度视图：运行按 `projectId` 分组。 */
@@ -310,6 +384,24 @@ export const api = {
   artifactUrl(runId: string, artifactPath: string): string {
     const name = artifactPath.split('/').pop() ?? artifactPath;
     return `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(name)}`;
+  },
+
+  /**
+   * 单元效果预览地址（网页 block / 演示文稿版式 / 模板）。
+   *
+   * 后端用**确定性填充 + 渲染**产出静态 HTML：所以看到的是"这块大概长什么样"
+   * （示例文案、真实版式），**不调生成层**、不花 token。
+   */
+  blockPreviewUrl(blockId: string): string {
+    return `/api/blocks/${encodeURIComponent(blockId)}/preview`;
+  },
+
+  slideLayoutPreviewUrl(layoutId: string): string {
+    return `/api/slide-layouts/${encodeURIComponent(layoutId)}/preview`;
+  },
+
+  templatePreviewUrl(templateId: string): string {
+    return `/api/templates/${encodeURIComponent(templateId)}/preview`;
   },
 
   /** 取产物文本内容（预览用）。二进制产物不要走这个。 */

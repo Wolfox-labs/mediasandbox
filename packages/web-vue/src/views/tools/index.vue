@@ -240,7 +240,8 @@ onMounted(async () => {
 
 .tools__items {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  /* `min()` 兜底：容器窄于 320px 时不再横向溢出。 */
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: 8px;
 }
 
