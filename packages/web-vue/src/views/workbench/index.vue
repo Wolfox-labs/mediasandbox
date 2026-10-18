@@ -29,7 +29,8 @@ import {
   NSelect,
   NSpin,
   NTag,
-  useMessage
+  useMessage,
+  useThemeVars
 } from 'naive-ui';
 import {
   api,
@@ -55,6 +56,14 @@ defineOptions({ name: 'Workbench' });
 
 const message = useMessage();
 const route = useRoute();
+
+/**
+ * 吸顶导航必须有不透明背景，否则内容滚到下面会从它后面透出来
+ * （实测：写 `var(--n-color-body)` 时该变量在本项目主题里不存在，
+ *  背景等于透明，截图里能看到区块文字压着导航）。
+ * 用 Naive 的主题变量对象取值，深浅色模式都能跟着变。
+ */
+const themeVars = useThemeVars();
 const router = useRouter();
 
 // ── ① 创作目标 ──────────────────────────────────────────────────────
@@ -597,7 +606,13 @@ onBeforeUnmount(() => observer?.disconnect());
 <template>
   <div class="wb">
     <!-- 步骤导航（吸顶） -->
-    <nav class="wb__nav">
+    <nav
+      class="wb__nav"
+      :style="{
+        backgroundColor: themeVars.cardColor,
+        borderBottomColor: themeVars.dividerColor
+      }"
+    >
       <button
         v-for="step in stepNav"
         :key="step.key"
@@ -982,8 +997,8 @@ onBeforeUnmount(() => observer?.disconnect());
   align-items: center;
   gap: 4px;
   padding: 6px 4px;
-  background: var(--n-color-body);
-  border-bottom: 1px solid var(--n-border-color);
+  /* 背景色由内联样式按主题给，这里只留布局 */
+  border-bottom: 1px solid transparent;
 }
 
 .wb__nav-spacer {
