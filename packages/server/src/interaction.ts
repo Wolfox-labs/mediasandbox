@@ -16,6 +16,7 @@
  * `artifacts/index.html`；而它由同一份结构渲染而来，内容等价。
  */
 import {
+  renderDeck,
   verifyInteraction,
   type ClickDriver,
   type DecisionClient,
@@ -26,6 +27,9 @@ import type { RunRecord } from './run-store.js';
 
 /** 页面在工作区里的相对路径，与截图/点击工具约定一致。 */
 export const PAGE_PATH = 'artifacts/index.html';
+
+/** 演示文稿在工作区里的相对路径，与 `assemble-deck` 约定一致。 */
+export const DECK_PATH = 'artifacts/deck.html';
 
 export type InteractionOutcome =
   | { readonly ok: true; readonly verification: InteractionVerification }
@@ -96,13 +100,21 @@ export async function runInteractionVerification(
     };
   }
 
+  const envType = record.envType === 'slides' ? 'slides' : 'webpage';
+  // 两种模态的产物路径与渲染器都不同。**必须一起换**：
+  // 路径换了渲染器没换，等于"拿演示文稿的锚点去解析一个网页"——
+  // 结果不是报错，而是解析到 0 个可点元素，看起来像"演示文稿没有交互"。
+  const pagePath = envType === 'slides' ? DECK_PATH : PAGE_PATH;
+
   const verification = await verifyInteraction({
     structure: record.structure.page,
     decision: deps.decision,
     driver: deps.driver,
     sandbox: { provider: deps.provider, handle },
-    pagePath: PAGE_PATH,
+    pagePath,
     goal: record.goal,
+    envType,
+    ...(envType === 'slides' ? { renderHtml: (structure) => renderDeck(structure, { title: record.goal }) } : {}),
   });
   return { ok: true, verification };
 }

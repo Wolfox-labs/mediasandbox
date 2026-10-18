@@ -50,15 +50,20 @@ export type SlotType =
  *   - `skeleton` 决定页面**版式**
  *   - `content`  决定**信息形态**
  *   - `interactive` 是验证环节的**测试对象**（有交互才有点击可模拟）
+ *
+ * `deck` 只出现在**演示文稿版式池**（`deck/layout-spec.ts`）里。
+ * 单独一组而不是塞进上面三组：两组池子共用同一个 `BlockSpec` 结构，
+ * 但网页链路的候选集绝不能出现"章节页"这种幻灯片版式——分组就是这条分界线。
  */
-export type BlockGroup = 'skeleton' | 'content' | 'interactive';
+export type BlockGroup = 'skeleton' | 'content' | 'interactive' | 'deck';
 
-export const BLOCK_GROUPS: readonly BlockGroup[] = ['skeleton', 'content', 'interactive'];
+export const BLOCK_GROUPS: readonly BlockGroup[] = ['skeleton', 'content', 'interactive', 'deck'];
 
 export const BLOCK_GROUP_LABELS: Readonly<Record<BlockGroup, string>> = {
   skeleton: '页面骨架',
   content: '内容块',
   interactive: '交互块',
+  deck: '幻灯片版式',
 };
 
 /**

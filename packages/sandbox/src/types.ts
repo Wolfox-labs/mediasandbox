@@ -11,10 +11,14 @@
  * `webpage` 与 `frontend` 并存而不是取代它：后者是"整页生成"链路，
  * 通着、有测试、有真实产出验证过；前者是**结构化制作**链路（block 级粒度），
  * 直接改造会同时破坏两条路。
+ *
+ * `slides` 是第二种结构化模态：同样是"单元级版式 + 决策模型选"，但单元是
+ * **版式（layout）**而不是页面区块，一次产出是**多页**而不是单页。
+ * 它不是 `webpage` 改名——产物形态、版式池、渲染器都是另一套。
  */
-export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage';
+export type EnvType = 'frontend' | 'image' | 'copy' | 'webpage' | 'slides';
 
-export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage'];
+export const ENV_TYPES: readonly EnvType[] = ['frontend', 'image', 'copy', 'webpage', 'slides'];
 
 /** 沙盒句柄。由 create() 返回，后续所有操作都作用于它。 */
 export interface SandboxHandle {

@@ -38,7 +38,7 @@ import {
   type TemplateSpec,
   type ToolRegistry,
 } from '@mediasandbox/orchestrator';
-import { RunStore, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
+import { RunStore, compactBlueprint, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
 import { RunQueue, type QueuedRun } from './run-queue.js';
 import { runInteractionVerification } from './interaction.js';
 import { JsonPersist } from './persist.js';
@@ -71,6 +71,13 @@ export interface ServerDeps {
    * 与 `blocks` 一样是可选注入：既有测试与部署不必被迫提供它。
    */
   readonly templates?: TemplateRegistry | undefined;
+  /**
+   * 演示文稿版式池（`slides` 环境）。省略时服务器退回内置版式池。
+   *
+   * 与 `blocks` **分开**：合成一个池子，网页链路就能选到"章节分隔页"。
+   * 它是可选注入的，理由与 `blocks` 相同——既有测试与部署不必被迫提供它。
+   */
+  readonly slideLayouts?: BlockRegistry | undefined;
   /**
    * 落盘存储。省略即纯内存（重启即丢）——既有测试与临时部署不必被迫提供它。
    *
@@ -611,6 +618,13 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       readonly pageSpec?: PageSpec | undefined;
       /** 是否在组装完成后截图（`artifacts/screenshot.png`）。默认 false。 */
       readonly screenshot?: boolean | undefined;
+      /**
+       * 统筹规划（大语言模型先出整体计划）。
+       *
+       * 缺省是**开启**：配了生成层就规划。显式传 false 才是关掉——
+       * 关掉它的用途是对照"有规划和没规划排出来的页面差多少"。
+       */
+      readonly useBlueprint?: boolean | undefined;
     };
   }): Promise<void> {
     const { record, provider, goal, envType } = args;
@@ -628,6 +642,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           // block 池**必须**是服务层那一个：结构化链路若自己新建一个内置池，
           // 外部来源（模型提议/手打/导入）的 block 就永远进不了候选集。
           ...(deps.blocks !== undefined ? { blocks: deps.blocks } : {}),
+          // 演示文稿版式池同理，且**必须是另一个池子**。
+          ...(deps.slideLayouts !== undefined ? { slideLayouts: deps.slideLayouts } : {}),
           ...(args.allowPaidGeneration !== undefined
             ? { allowPaidGeneration: args.allowPaidGeneration }
             : {}),
@@ -673,6 +689,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         // 结构是**产出**，不是过程：存下来之后刷新页面才还看得到。
         // 只靠 WebSocket 的 `plan_assembled` 事件的话，错过那一刻就永远没了。
         ...(result.structure !== undefined ? { structure: result.structure } : {}),
+        // 规划与结构一起落盘：刷新之后"当时打算讲哪几段、实际排了哪几块"
+        // 两样都还在，才谈得上事后核对。
+        ...(result.blueprint !== undefined ? { blueprint: result.blueprint } : {}),
         ...(result.reason !== undefined ? { reason: result.reason } : {}),
         ...(result.plan !== undefined
           ? {
@@ -747,6 +766,16 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         interaction: deps.clickDriver !== undefined ? 'chromium' : 'unavailable',
       },
       queue: queue.snapshot(),
+      /**
+       * 两条结构化链路各有多少个可选的"单元"。
+       *
+       * 前端据此决定模态选择里哪些能选：版式池没装配时给用户一个
+       * "演示文稿"选项，点了必然失败——那不是能力，是坑。
+       */
+      pools: {
+        webpageBlocks: deps.blocks?.size ?? 0,
+        slideLayouts: deps.slideLayouts?.size ?? 0,
+      },
     });
   });
 
@@ -882,6 +911,41 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         ? requestedProjectId
         : undefined;
 
+    // 候选集在**收下这次运行之前**校验。
+    //
+    // 放在这里而不是交给编排层，是因为"未注册的候选"是**调用方的参数错误**，
+    // 不是运行期故障：先收下再跑成 failed，用户看到的是一次失败的运行，
+    // 而真正的原因（他传了一个池子里没有的 id）要翻半天日志才找得到。
+    //
+    // 两种模态各自对着自己的池子校验——网页的候选集不能含有幻灯片版式，
+    // 反过来也一样。`auto` 环境无法预知走哪条链路，跳过（由编排层拦）。
+    const rawCandidateIds = Array.isArray(body['candidateBlockIds'])
+      ? body['candidateBlockIds'].filter((v): v is string => typeof v === 'string')
+      : undefined;
+    if (
+      rawCandidateIds !== undefined &&
+      rawCandidateIds.length > 0 &&
+      structureInput === undefined &&
+      (envType === 'webpage' || envType === 'slides')
+    ) {
+      const isDeck = envType === 'slides';
+      const pool = isDeck ? deps.slideLayouts : deps.blocks;
+      if (pool !== undefined) {
+        const unknown = rawCandidateIds.filter((id) => !pool.has(id));
+        if (unknown.length > 0) {
+          errorResponse(
+            res,
+            400,
+            `${envType} 的候选集里有未注册的${isDeck ? '版式' : 'block'}: ${unknown.join(', ')}`,
+            isDeck
+              ? `可用版式: ${pool.specs().map((s) => s.id).join(', ')}`
+              : '请先用 POST /api/blocks 注册，或从 GET /api/blocks 里选',
+          );
+          return;
+        }
+      }
+    }
+
     const runId = makeRunId();
     const record = store.create({
       id: runId,
@@ -892,9 +956,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     });
 
     // 异步执行，立即返回 202。前端通过 WebSocket 跟进度。
-    const candidateBlockIds = Array.isArray(body['candidateBlockIds'])
-      ? body['candidateBlockIds'].filter((v): v is string => typeof v === 'string')
-      : undefined;
+    // 候选集已在上方校验过，这里直接复用（不再重复解析，避免两处取值不一致）。
+    const candidateBlockIds = rawCandidateIds;
 
     // 模板：请求里给的是 id，这里解析成模板本身再往下传。
     // 编排层只认"这一个模板长什么样"，不认"模板池在哪"。
@@ -960,6 +1023,12 @@ export function createServer(deps: ServerDeps): CreateServerResult {
             ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
             // 截图默认关：要求了才挂节点（与 useGenerative 同一条纪律）。
             ...(typeof body['screenshot'] === 'boolean' ? { screenshot: body['screenshot'] } : {}),
+            // 统筹规划默认**开**（有生成层就跑）。这是与 useGenerative 相反的默认值，
+            // 理由也相反：`useGenerative` 管的是"花不花钱写文案"，而规划只跑一次、
+            // 成本固定，而它是"决策模型有没有全局计划"的唯一来源——不开就没有。
+            ...(typeof body['useBlueprint'] === 'boolean'
+              ? { useBlueprint: body['useBlueprint'] }
+              : {}),
             // 定点重做：只有这些块挂填充节点，其余块原样透传。
             ...(redoBlockIds !== undefined ? { redoBlockIds } : {}),
             // 既定结构：带上它，结构**不再由决策模型决定**（templateId / candidateBlockIds /
@@ -1445,6 +1514,49 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   });
 
   /**
+   * 演示文稿版式池。
+   *
+   * 与 `/api/blocks` **分开两条端点**，不是同一条加个 `mode` 参数：两个池子在
+   * 服务端就是两个注册表，合成一条端点会让前端以为它们是同一批东西——
+   * 而"网页的候选集里出现了章节分隔页"正是要防的错。
+   *
+   * 形状与 `/api/blocks` 对齐（`layouts` / `groups`），前端可以复用同一套渲染。
+   */
+  app.get('/api/slide-layouts', (_req: Request, res: Response) => {
+    const registry = deps.slideLayouts;
+    if (registry === undefined) {
+      errorResponse(
+        res,
+        503,
+        '本次部署未装配演示文稿版式池',
+        '服务启动时未提供 slideLayouts',
+      );
+      return;
+    }
+    const specs = registry.specs();
+    res.json({
+      layouts: specs.map((s) => ({
+        id: s.id,
+        label: s.label,
+        description: s.description,
+        group: s.group,
+        groupLabel: BLOCK_GROUP_LABELS[s.group],
+        canLead: s.canLead,
+        repeatable: s.repeatable,
+        placement: s.placement ?? 'any',
+        costHint: s.costHint,
+        slots: s.slots,
+        builtin: registry.isBuiltin(s.id),
+      })),
+      groups: registry.groups().map((g) => ({
+        id: g,
+        label: BLOCK_GROUP_LABELS[g],
+        count: registry.filter({ group: g }).length,
+      })),
+    });
+  });
+
+  /**
    * 模板目录：前端据此展示"起手可以用哪几套结构"。
    *
    * 模板与 block 池同构——都是"候选集来自注册表，扩展 = 加一条"。
@@ -1866,5 +1978,7 @@ function serializeRun(record: RunRecord): Record<string, unknown> {
     // 与 WebSocket 推的是**同一个压缩函数**：刷新前后形状一致，前端只写一套解析。
     structure:
       record.structure !== undefined ? compactStructure(record.structure) : null,
+    // 与 WebSocket 推的是同一个压缩函数，形状一致。
+    blueprint: record.blueprint !== undefined ? compactBlueprint(record.blueprint) : null,
   };
 }

@@ -13,6 +13,8 @@
 import type { EnvType } from '@mediasandbox/sandbox';
 import type { DecisionClient, DecisionContext, Question } from '../decision/types.js';
 import { argmaxDeterministic } from '../decision/types.js';
+import type { LlmClient } from '../llm/types.js';
+import type { BlueprintOutcome, PageBlueprint } from './blueprint.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { PortType, ToolSpec } from '../tools/types.js';
 import {
@@ -23,6 +25,7 @@ import {
   type PlanNode,
 } from './types.js';
 import { assembleStructured } from '../structured/assembler.js';
+import { assembleDeck } from '../structured/deck-assembler.js';
 import type { BlockRegistry } from '../structured/block-spec.js';
 import type { PageSpec } from '../structured/page-spec.js';
 import type { StructureStep } from '../structured/planner.js';
@@ -91,12 +94,40 @@ export interface AssembleRequest {
   /** 套用的模板。由调用方从模板池解析后传入（模板池在服务层）。 */
   readonly template?: TemplateSpec | undefined;
   /**
+   * 演示文稿版式池（`slides` 环境用）。省略则退回内置版式池。
+   *
+   * 与 `blocks` 分开，**不能合并成一个池子**：合成一个，网页链路就能选到
+   * "章节分隔页"，演示文稿链路就能选到"页脚"。
+   */
+  readonly slideLayouts?: BlockRegistry | undefined;
+  /**
    * 是否放行"需要逐次许可"的工具（目前是生图 `render-image`）。**默认 false**。
    *
    * 默认关闭意味着 image 环境退到零成本的 `solid-image`；两个都没有就如实失败。
    * 这是刻意的：**失败比悄悄花掉一次生图好**。
    */
   readonly allowPaidGeneration?: boolean | undefined;
+
+  // ── 以下仅 `webpage` 环境：两个模型的分工 ────────────────────────────
+  /**
+   * 生成层客户端。给了它，网页链路才会先跑一次**统筹规划**
+   * （大语言模型出一份内容计划，再交给决策模型逐块选块）。
+   *
+   * 不给就跳过规划：零成本仍是默认值，而"没有生成层"时也谈不上让大模型规划。
+   */
+  readonly llm?: LlmClient | undefined;
+  /**
+   * 已经算好的计划。给了就不再花一次生成额度重算。
+   *
+   * 「用户改完决策再重跑」走这条路：计划是刚才那份，重跑只重做决策与填充。
+   */
+  readonly blueprint?: PageBlueprint | undefined;
+  /** 规划超时。省略则用生成层客户端自己的超时。 */
+  readonly blueprintTimeoutMs?: number | undefined;
+  /** 关掉统筹规划（想对比"有规划/没规划"时用）。默认开启——有 llm 就规划。 */
+  readonly useBlueprint?: boolean | undefined;
+  /** 取消信号，透传给规划调用。 */
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface AssembleResult {
@@ -117,6 +148,13 @@ export interface AssembleResult {
         readonly steps: readonly StructureStep[];
       }
     | undefined;
+  /**
+   * **结构化链路专有**：统筹规划那一份计划。
+   *
+   * 它是产出的一部分，不是过程——前端要能把"模型打算讲哪几段"和
+   * "实际排了哪几块"并排显示，用户才判断得出决策模型有没有照计划走。
+   */
+  readonly blueprint?: BlueprintOutcome | undefined;
 }
 
 /** 决策问题 id。集中定义，避免散落的字符串。 */
@@ -253,6 +291,18 @@ export class PlanAssembler {
         decision,
         request,
         ...(structuredExcludes.length > 0 ? { excludeTools: structuredExcludes } : {}),
+      });
+    }
+
+    // `slides` 是**第二个结构化模态**：同样是"版式池 + 决策模型逐页选 + 每页一个节点"，
+    // 但产物是多页文稿、版式池是另一套。它与 webpage 平级，不分主次。
+    if (envType === 'slides') {
+      const deckExcludes = [...new Set([...softExcludes, ...forbidden])];
+      return await assembleDeck({
+        registry,
+        decision,
+        request,
+        ...(deckExcludes.length > 0 ? { excludeTools: deckExcludes } : {}),
       });
     }
 

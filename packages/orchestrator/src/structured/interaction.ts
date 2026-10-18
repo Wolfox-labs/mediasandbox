@@ -49,6 +49,16 @@ export interface VerifyInteractionRequest {
   readonly timeoutMs?: number | undefined;
   /** 决策上下文用：用户目标原文。 */
   readonly goal: string;
+  /** 决策上下文用：这是哪种模态。默认 `webpage`。 */
+  readonly envType?: 'webpage' | 'slides' | undefined;
+  /**
+   * 把结构渲染成 HTML。默认 `renderPage`。
+   *
+   * 演示文稿要传 `renderDeck`：锚点的解析对象与真正被点的必须是**同一份字节**，
+   * 而两种模态的渲染器不同。用错渲染器的后果不是报错，而是"解析到一堆
+   * 页面上根本不存在的锚点"，然后每次点击都判失败——看起来像交互坏了。
+   */
+  readonly renderHtml?: ((structure: PageSpec) => string) | undefined;
   readonly evidence?: readonly string[] | undefined;
 }
 
@@ -71,7 +81,7 @@ export interface InteractionVerification {
 export async function verifyInteraction(
   request: VerifyInteractionRequest,
 ): Promise<InteractionVerification> {
-  const html = renderPage(request.structure);
+  const html = (request.renderHtml ?? renderPage)(request.structure);
   const pagePath = request.pagePath ?? DEFAULT_PAGE_PATH;
   // 渲染结果**写回工作区**：驱动是从文件系统读页面去点的，
   // 只有把"我们解析的那份 HTML"落成文件，解析与点击才是同一份字节。
@@ -118,7 +128,7 @@ export async function verifyInteraction(
       const answer = await askChoice(request.decision, {
         context: {
           goal: request.goal,
-          envType: 'webpage',
+          envType: request.envType ?? 'webpage',
           facts: {
             可点元素数: String(all.length),
             ...(all.length > candidates.length ? { 候选已截断至: String(candidates.length) } : {}),

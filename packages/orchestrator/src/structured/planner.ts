@@ -40,6 +40,7 @@ import {
   type Question,
 } from '../decision/types.js';
 import { argmaxDeterministic } from '../decision/types.js';
+import { blueprintFacts, type PageBlueprint } from '../plan/blueprint.js';
 import { BLOCK_GROUP_LABELS, type BlockRegistry, type BlockSpec, type SlotSpec } from './block-spec.js';
 import { applyTemplate, narrowCandidates, type TemplateSpec } from './template-spec.js';
 import {
@@ -148,6 +149,16 @@ export interface StructureStep {
 export interface PlanStructureRequest {
   readonly projectId: string;
   readonly goal: string;
+  /**
+   * 本次是哪种模态。默认 `webpage`。
+   *
+   * 它进决策上下文的 `envType` 与 `交付格式` 两项：演示文稿的"下一块"与网页的
+   * "下一块"是同一个问题、不同答案（一页幻灯片 vs 页面上的一个区块），
+   * 不告诉决策层是哪种，它就会拿网页的版式逻辑去排幻灯片。
+   */
+  readonly envType?: 'webpage' | 'slides' | undefined;
+  /** 交付格式的人话描述，进决策上下文。省略时按 `envType` 取默认。 */
+  readonly deliverable?: string | undefined;
   /** 本次候选集——用户从 block 池里选出来的要用的类型。 */
   readonly candidateBlockIds: readonly string[];
   /**
@@ -168,6 +179,13 @@ export interface PlanStructureRequest {
   readonly decisionTimeoutMs?: number | undefined;
   /** 每轮结束回调。纯观察，抛错不影响规划。 */
   readonly onStep?: ((step: StructureStep) => void) | undefined;
+  /**
+   * **统筹规划**（由大语言模型出的那份计划）。
+   *
+   * 它只以 `facts` 的形式进入决策上下文——决策层每轮都能看到"计划里要讲这几段、
+   * 现在排到哪了"。**规划器不替决策层选块**，红线不动。
+   */
+  readonly blueprint?: PageBlueprint | undefined;
   /**
    * 文案是否走生成层。
    *
@@ -309,13 +327,16 @@ export class StructurePlanner {
 
       const context = this.buildContext(request, page);
       const questions: Record<string, Question> = {};
+      // 用词随模态走：幻灯片上问"再补一块"会得到"补一个页面区块"的答案。
+      const unit = request.envType === 'slides' ? '页' : '块';
+      const surface = request.envType === 'slides' ? '这份文稿' : '这个页面';
 
       // 首块没什么可"继续"的，不问。
       if (!isFirst) {
         questions[STRUCTURE_QUESTIONS.continueStruct] = {
           type: 'noul',
-          instructions: `当前页面已经有 ${page.blocks.length} 块（${describePageSpec(page)}）。` +
-            `再补一块能让页面更完整吗？如果版式已经齐全，答否。`,
+          instructions: `${surface}已经有 ${page.blocks.length} ${unit}（${describePageSpec(page)}）。` +
+            `再补一${unit}能让它更完整吗？如果已经齐全，答否。`,
         };
       }
 
@@ -331,10 +352,10 @@ export class StructurePlanner {
         questions[STRUCTURE_QUESTIONS.nextBlock] = {
           type: 'choice',
           instructions: isFirst
-            ? '这是页面的第一块，决定第一印象。选一个最合适的起始 block。'
-            : `当前页面已经有 ${page.blocks.length} 块（${describePageSpec(page)}）。` +
-              '选择紧接着要放在页面上的下一块。考虑版式顺序：先讲清是什么，再展开细节，最后收尾。' +
-              '不要重复放已经用过的块，除非确实需要。',
+            ? `这是${surface}的第一${unit}，决定第一印象。选一个最合适的起始${unit === '页' ? '版式' : 'block'}。`
+            : `${surface}已经有 ${page.blocks.length} ${unit}（${describePageSpec(page)}）。` +
+              `选择紧接着要放的下一${unit}。考虑顺序：先讲清是什么，再展开细节，最后收尾。` +
+              '不要重复放已经用过的版式，除非确实需要。',
           criteria: Object.fromEntries(
             pool.map((spec) => [
               spec.id,
@@ -1106,16 +1127,26 @@ export class StructurePlanner {
    * 那样"逐块决策"退化成"每块独立瞎猜"。
    */
   private buildContext(request: PlanStructureRequest, page: PageSpec): DecisionContext {
+    const envType = request.envType ?? 'webpage';
+    const deliverable =
+      request.deliverable ?? (envType === 'slides' ? '多页演示文稿（一页一屏，16:9）' : '单页 HTML');
     const facts: Record<string, string> = {
-      交付格式: '单页 HTML',
+      交付格式: deliverable,
       候选block数: String(page.candidateBlockIds.length),
     };
+    // 统筹规划的事实。放在结构事实**之前**：先给"要讲什么"，再给"排到哪了"，
+    // 决策层读到的顺序与它做决定的顺序一致。
+    if (request.blueprint !== undefined) {
+      Object.assign(facts, blueprintFacts(request.blueprint));
+      // 已排几块 / 计划几段：这是"还要不要继续"这一问最直接的依据。
+      facts['已排块数'] = String(page.blocks.length);
+    }
     if (page.blocks.length > 0) {
       facts['当前结构'] = describePageSpec(page);
     }
     return {
       goal: request.goal,
-      envType: 'webpage',
+      envType,
       ...(request.constraints !== undefined ? { constraints: request.constraints } : {}),
       facts,
     };

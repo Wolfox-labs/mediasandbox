@@ -17,6 +17,8 @@ import {
   BUILTIN_TOOLS,
   ChromiumClickDriver,
   ChromiumScreenshotDriver,
+  createDeckTools,
+  createSlideRegistry,
   createStructuredTools,
   createTemplateRegistry,
   DEFAULT_POLICY,
@@ -255,6 +257,10 @@ async function main(): Promise<void> {
   // 装晚了就只剩"跳过校验"这一条路，而没校验过的 block 进池子正是要防的事。
   const { blocks, externalBlocks, userTemplates } = await loadPools(persist);
 
+  // 演示文稿版式池。现在是内置的 8 个版式，不与 block 池混在一起——
+  // 混在一起网页链路就能选到"章节分隔页"。
+  const slideLayouts = createSlideRegistry();
+
   const { providers, defaultProvider, docker } = await buildProviders();
 
   // 截图驱动：有 Docker 就用**真浏览器**（旁挂 chromium 容器渲染沙盒里的页面），
@@ -278,7 +284,10 @@ async function main(): Promise<void> {
   // "规划器选得到、执行期说未注册"的断链。
   const registry = new ToolRegistry()
     .registerAll(BUILTIN_TOOLS)
-    .registerAll(createStructuredTools(blocks, screenshotDriver));
+    .registerAll(createStructuredTools(blocks, screenshotDriver))
+    // 演示文稿链路（slides 环境）的三个工具。与上面那组**并行**：
+    // 它们声明 `envTypes: ['slides']`，放进同一个注册表也不会污染网页链路。
+    .registerAll(createDeckTools(slideLayouts, screenshotDriver));
   const templates = createTemplateRegistry(blocks, [...userTemplates]);
   const decision = buildDecision();
   const llm = buildLlm();
@@ -304,6 +313,7 @@ async function main(): Promise<void> {
     registry,
     blocks,
     templates,
+    slideLayouts,
     persist,
     projectsDir: PROJECTS_ROOT,
     onLog: (message) => log(`  ${message}`),

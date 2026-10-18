@@ -71,6 +71,9 @@ export const IMAGE_BY_ENV: Readonly<Record<EnvType, string>> = {
   // 结构化网页只需要 Node 工具链，与 copy 镜像同构，直接复用同一个镜像，
   // 不为它单独维护一份 Dockerfile——多一份镜像就多一处会和别处漂移的地方。
   webpage: 'mediasandbox/copy:latest',
+  // 演示文稿同理：它也是 Node 侧拼字符串产 HTML，不需要浏览器或 Office。
+  // 真要导出 PDF 是使用方的后续动作，不该成为"做一页演示文稿"的前提。
+  slides: 'mediasandbox/copy:latest',
 };
 
 export interface DockerSandboxOptions {

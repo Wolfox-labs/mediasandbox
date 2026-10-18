@@ -166,6 +166,22 @@ export {
   STRUCTURED_TOOLS,
 } from './structured/tools.js';
 export { assembleStructured } from './structured/assembler.js';
+// ── 演示文稿链路（第二种结构化模态） ───────────────────────────────────────
+export {
+  BUILTIN_SLIDE_LAYOUTS,
+  builtinSlideLayoutIds,
+  createSlideRegistry,
+} from './structured/deck-spec.js';
+export { renderDeck, type RenderDeckOptions, type SlideLayoutId } from './structured/deck-renderer.js';
+export { makeSlotGenerator } from './structured/tools.js';
+export {
+  createAssembleDeckTool,
+  createDeckTools,
+  createFillSlideTool,
+  createScreenshotDeckTool,
+  DECK_TOOLS,
+} from './structured/deck-tools.js';
+export { assembleDeck } from './structured/deck-assembler.js';
 export {
   candidateEnvs,
   classifyEnvType,
@@ -176,6 +192,16 @@ export {
 
 // ── 计划层 ────────────────────────────────────────────────────────────────
 export * from './plan/types.js';
+export {
+  BlueprintError,
+  blueprintFacts,
+  describeAlignment,
+  planBlueprint,
+  type BlueprintOutcome,
+  type BlueprintSection,
+  type PageBlueprint,
+  type PlanBlueprintRequest,
+} from './plan/blueprint.js';
 export { PlanAssembler, type AssembleRequest, type AssembleResult } from './plan/assembler.js';
 export {
   PlanExecutor,

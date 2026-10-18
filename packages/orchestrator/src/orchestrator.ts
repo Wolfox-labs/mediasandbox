@@ -20,6 +20,7 @@ import type { LlmClient } from './llm/types.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { ToolError } from './tools/types.js';
 import { PlanAssembler, type AssembleResult } from './plan/assembler.js';
+import type { BlueprintOutcome } from './plan/blueprint.js';
 import type { BlockInstance, PageSpec } from './structured/page-spec.js';
 import type { StructureStep } from './structured/planner.js';
 import type { BlockRegistry } from './structured/block-spec.js';
@@ -116,6 +117,15 @@ export interface RunRequest {
    * 关闭时 image 环境退到零成本的 `solid-image`，两个都没有就如实失败。
    */
   readonly allowPaidGeneration?: boolean | undefined;
+  /**
+   * 关掉统筹规划（大语言模型出整体计划那一步）。
+   *
+   * 默认开启：配了生成层就规划。关掉它是为了**对照**——"有规划和没规划排出来的
+   * 页面差多少"是这套分工唯一能被检验的方式，所以必须留一个开关。
+   */
+  readonly useBlueprint?: boolean | undefined;
+  /** 规划超时。省略则交给生成层客户端。 */
+  readonly blueprintTimeoutMs?: number | undefined;
 }
 
 export interface RunOptions {
@@ -161,6 +171,13 @@ export type OrchestrationEvent =
        * 它的结构要等生成完才知道。
        */
       readonly structure?: { readonly page: PageSpec; readonly steps: readonly StructureStep[] } | undefined;
+      /**
+       * 统筹规划那一份计划（大语言模型出的）。
+       *
+       * 与 `structure` 同时推给前端，两者**并排**才是这套分工的样子：
+       * 上面是"打算讲哪几段"，下面是"实际选了哪几块"。
+       */
+      readonly blueprint?: BlueprintOutcome | undefined;
     }
   | { readonly type: 'execution_event'; readonly event: ExecutionEvent }
   | { readonly type: 'attempt_failed'; readonly detail: string; readonly kind: string; readonly at: number }
@@ -196,6 +213,13 @@ export interface RunResult {
   readonly structure?:
     | { readonly page: PageSpec; readonly steps: readonly StructureStep[] }
     | undefined;
+  /**
+   * 统筹规划的结果。**与 `structure` 并列**：一个是计划，一个是执行计划的结果。
+   *
+   * `ok: false` 也要带出来——"这次没有整体计划，原因是……"是用户需要知道的事实，
+   * 而不是一个可以省略的字段。
+   */
+  readonly blueprint?: BlueprintOutcome | undefined;
   /** 本次运行使用的沙盒。调用方据此读取产物、决定何时销毁。 */
   readonly handle: SandboxHandle;
   /** 每次尝试的记录，便于排查与前端展示。 */
@@ -360,6 +384,13 @@ export class Orchestrator {
      * 要能刷新页面后仍然拿得到——只靠订阅事件的话，错过那一刻就永远没了。
      */
     let lastStructure: AssembleResult['structure'];
+    /**
+     * 最后一次统筹规划的结果。
+     *
+     * 与 `lastStructure` 同理：计划是**产出**，要能出现在 `RunResult` 上，
+     * 而不是只在 `plan_assembled` 事件里闪一下。
+     */
+    let lastBlueprint: BlueprintOutcome | undefined;
     /** 换方案时要排除的工具——已试过且失败的主工具。 */
     const excludeTools = new Set<string>();
 
@@ -368,7 +399,7 @@ export class Orchestrator {
     try {
       for (;;) {
         if (signal?.aborted === true) {
-          return this.finish('failed', envType, lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, '调用方已取消', emit);
+          return this.finish('failed', envType, lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, '调用方已取消', emit, lastBlueprint);
         }
 
         attemptNumber += 1;
@@ -389,6 +420,7 @@ export class Orchestrator {
 
         let plan: ExecutionPlan;
         let structure: AssembleResult['structure'];
+        let blueprint: BlueprintOutcome | undefined;
         try {
           const assembler = new PlanAssembler(registry, decision, {
             excludeTools: [...excludeTools],
@@ -415,11 +447,22 @@ export class Orchestrator {
             ...(request.allowPaidGeneration !== undefined
               ? { allowPaidGeneration: request.allowPaidGeneration }
               : {}),
+            // 生成层句柄透传下去：网页链路要靠它先跑一次统筹规划。
+            // 不传的话规划那一步永远不会发生，而"没有规划"在结果里看起来
+            // 和"规划失败"一模一样——那正是要避免的含糊。
+            ...(llm !== undefined ? { llm } : {}),
+            ...(request.useBlueprint !== undefined ? { useBlueprint: request.useBlueprint } : {}),
+            ...(request.blueprintTimeoutMs !== undefined
+              ? { blueprintTimeoutMs: request.blueprintTimeoutMs }
+              : {}),
+            ...(signal !== undefined ? { signal } : {}),
             ...(decisionTimeoutMs !== undefined ? { decisionTimeoutMs } : {}),
           });
           plan = assembled.plan;
           structure = assembled.structure;
           lastStructure = assembled.structure;
+          blueprint = assembled.blueprint;
+          lastBlueprint = assembled.blueprint;
         } catch (error) {
           // **attemptNumber，不是写死的 1。**
           //
@@ -453,7 +496,7 @@ export class Orchestrator {
             });
             continue;
           }
-          return this.finish('escalated', envType, lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, decisionResult.detail, emit);
+          return this.finish('escalated', envType, lastExecution, lastPlan, lastStructure, handle, attempts, startedAt, decisionResult.detail, emit, lastBlueprint);
         }
 
         lastPlan = plan;
@@ -464,6 +507,7 @@ export class Orchestrator {
           plan,
           at: Date.now(),
           ...(structure !== undefined ? { structure } : {}),
+          ...(blueprint !== undefined ? { blueprint } : {}),
         });
 
         // ── 2. 执行计划 ────────────────────────────────────────────────
@@ -491,7 +535,7 @@ export class Orchestrator {
             status: 'succeeded',
             detail: `产出 ${execution.artifacts.length} 个产物`,
           });
-          return this.finish('succeeded', envType, execution, plan, structure, handle, attempts, startedAt, undefined, emit);
+          return this.finish('succeeded', envType, execution, plan, structure, handle, attempts, startedAt, undefined, emit, blueprint);
         }
 
         // ── 3. 失败 → 兜底 ────────────────────────────────────────────
@@ -549,6 +593,7 @@ export class Orchestrator {
           startedAt,
           classified.detail,
           emit,
+          blueprint,
         );
       }
     } finally {
@@ -568,6 +613,7 @@ export class Orchestrator {
     startedAt: number,
     reason: string | undefined,
     emit: (event: OrchestrationEvent) => void,
+    blueprint: BlueprintOutcome | undefined = undefined,
   ): RunResult {
     const durationMs = Date.now() - startedAt;
     emit({
@@ -585,6 +631,7 @@ export class Orchestrator {
       ...(execution !== undefined ? { execution } : {}),
       ...(plan !== undefined ? { plan } : {}),
       ...(finalStructure !== undefined ? { structure: finalStructure } : {}),
+      ...(blueprint !== undefined ? { blueprint } : {}),
       handle,
       attempts,
       durationMs,

@@ -9,6 +9,7 @@
 import type { Artifact } from '@mediasandbox/sandbox';
 import type {
   AttemptRecord,
+  BlueprintOutcome,
   OrchestrationEvent,
   PageSpec,
   RunResult,
@@ -54,6 +55,14 @@ export interface RunRecord {
    * 两条通道形状不一致的话，前端刷新一次就得写两套解析。
    */
   structure?: { readonly page: PageSpec; readonly steps: readonly StructureStep[] } | undefined;
+  /**
+   * **统筹规划那份计划**（大语言模型出的）。
+   *
+   * 与 `structure` 分开存：一个是"打算讲哪几段"，一个是"实际排了哪几块"。
+   * 合成一个字段就没法回答"决策模型有没有照计划走"——而那正是两个模型
+   * 分工之后唯一值得看的东西。
+   */
+  blueprint?: BlueprintOutcome | undefined;
   error?: string | undefined;
 }
 
@@ -229,6 +238,37 @@ export function compactStructure(structure: {
 }
 
 /**
+ * 压缩统筹规划的结果，供 WebSocket 推送与 REST 详情共用。
+ *
+ * 与 `compactStructure` 同一个理由：**原始模型输出**（`raw` 字段）几百到几千字，
+ * 对界面没有价值，但它会让每条消息都背上一个没人读的正文。留痕另有落盘，
+ * 要排查时从运行记录里取。
+ *
+ * `ok: false` 原样带 `detail`：规划失败的原因必须能显示出来，
+ * 否则用户看到的就是"这一栏空着"，而空着和没做是两件事。
+ */
+export function compactBlueprint(outcome: BlueprintOutcome): Record<string, unknown> {
+  if (!outcome.ok) return { ok: false, detail: outcome.detail };
+  const blueprint = outcome.blueprint;
+  return {
+    ok: true,
+    title: blueprint.title,
+    positioning: blueprint.positioning,
+    audience: blueprint.audience,
+    tone: blueprint.tone,
+    status: blueprint.status,
+    model: blueprint.model,
+    latencyMs: blueprint.latencyMs,
+    sections: blueprint.sections.map((section) => ({
+      purpose: section.purpose,
+      detail: section.detail,
+      blockIds: section.blockIds,
+    })),
+    notes: blueprint.notes,
+  };
+}
+
+/**
  * 把编排事件压缩成前端需要的最小形态。
  *
  * 不在 WebSocket 上直接推原始事件：`plan_assembled` 带整个计划对象，
@@ -256,6 +296,9 @@ export function toWireEvent(runId: string, event: OrchestrationEvent): Record<st
         // 结构是数据，本来就能先展示再执行；单链链路给不出这个，
         // 它的结构要等生成完才存在。
         ...(event.structure !== undefined ? { structure: compactStructure(event.structure) } : {}),
+        // 统筹规划与结构**同时**推出去：前端把"计划"排在"决策"上面，
+        // 两个模型的分工才看得出来。只推结构的话，计划就只是一段日志。
+        ...(event.blueprint !== undefined ? { blueprint: compactBlueprint(event.blueprint) } : {}),
       };
     case 'execution_event':
       return {

@@ -87,6 +87,22 @@ export const ENV_PRESETS: Readonly<Record<EnvType, EnvPreset>> = {
     requiredCommands: ['node'],
     baselineEnv: { ...COMMON_ENV, NODE_ENV: 'development' },
   },
+  // 演示文稿链路。目录骨架与 webpage 的区别是 **src/slides/**：
+  // 每一页的中间结构单独落一个文件，与整页 HTML 的 src/blocks/ 不冲突，
+  // 两条结构化链路可以同时跑在同一个沙盒里而不互相覆盖。
+  slides: {
+    envType: 'slides',
+    label: '演示文稿环境',
+    description:
+      '按版式组装 16:9 演示文稿：页序与每页版式由决策模型逐页决定，素材逐页填充，产物为可放映的一页一屏 HTML。',
+    directories: ['src', 'src/slides', 'artifacts', 'logs'],
+    seedFiles: {
+      'src/slides/.gitkeep': '',
+      'artifacts/.gitkeep': '',
+    },
+    requiredCommands: ['node'],
+    baselineEnv: { ...COMMON_ENV, NODE_ENV: 'development' },
+  },
 };
 
 export function getPreset(envType: EnvType): EnvPreset {

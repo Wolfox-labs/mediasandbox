@@ -17,6 +17,7 @@ import {
   createBlockRegistry,
   type BlockSpec,
 } from './block-spec.js';
+import { createSlideRegistry } from './deck-spec.js';
 import {
   appendBlock,
   blockTypesOf,
@@ -216,8 +217,24 @@ describe('block 池：候选集与分组查询', () => {
     const reg = createBlockRegistry();
     for (const group of BLOCK_GROUPS) {
       const specs = reg.filter({ group });
+      if (group === 'deck') {
+        // `deck` 组只属于演示文稿版式池。网页池里出现它就是两个池子串了，
+        // 后果是网页链路能选到"章节分隔页"——这一条是那条分界线的守卫。
+        assert.equal(specs.length, 0, '网页 block 池里不该有幻灯片版式');
+        continue;
+      }
       assert.ok(specs.length > 0, `${group} 组为空`);
       assert.ok(specs.every((s) => s.group === group));
+    }
+  });
+
+  it('演示文稿版式池只含 deck 组，且与网页池不重叠', () => {
+    const slides = createSlideRegistry();
+    assert.ok(slides.size > 0);
+    assert.ok(slides.specs().every((s) => s.group === 'deck'));
+    const webIds = new Set(createBlockRegistry().specs().map((s) => s.id));
+    for (const spec of slides.specs()) {
+      assert.ok(!webIds.has(spec.id), `版式 ${spec.id} 与网页 block 撞了 id`);
     }
   });
 

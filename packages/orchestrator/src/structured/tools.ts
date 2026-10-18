@@ -188,7 +188,7 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
  * **不在这里生成** —— 生图是逐张计费的，必须由显式的开关控制，
  * 不能因为"这个 slot 是图"就自动扣钱。
  */
-function makeSlotGenerator(
+export function makeSlotGenerator(
   llm: LlmClient,
   runtime: ToolRuntime,
 ): (request: {

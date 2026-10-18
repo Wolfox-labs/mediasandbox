@@ -43,6 +43,7 @@ export const ENV_QUESTION_ID = 'env_type';
 export const ENV_TYPE_LABELS: Readonly<Record<EnvType, string>> = {
   frontend: '网页（整页生成）：一次生成完整 HTML，快，但结构拿不出来、改不了',
   webpage: '网页（结构化制作）：逐块决定结构再填充，慢一点，但每块可改、可重做、可沉淀',
+  slides: '演示文稿：一页一个版式，多页组成一份 16:9 可放映的文稿，页序与版式可改',
   image: '图像作品：交付物是图片文件',
   copy: '文案：交付物是文字稿',
 };

@@ -17,6 +17,8 @@ import {
   BUILTIN_TOOLS,
   createBlockRegistry,
   createStructuredTools,
+  createDeckTools,
+  createSlideRegistry,
   createTemplateRegistry,
   DEFAULT_POLICY,
   StubDecisionClient,
@@ -112,6 +114,13 @@ export async function startServer(
   if (blocks !== undefined) {
     registry.registerAll(createStructuredTools(blocks));
   }
+  // 演示文稿链路。`structured: true` 同时装两条结构化链路：
+  // 它们各自声明 envTypes，混装在一个注册表里不会互相串。
+  const slideLayouts =
+    overrides.structured === true || blocks !== undefined ? createSlideRegistry() : undefined;
+  if (slideLayouts !== undefined) {
+    registry.registerAll(createDeckTools(slideLayouts));
+  }
   const templates =
     blocks !== undefined
       ? createTemplateRegistry(blocks, [
@@ -122,6 +131,7 @@ export async function startServer(
   const instance = createServer({
     registry,
     ...(blocks !== undefined ? { blocks } : {}),
+    ...(slideLayouts !== undefined ? { slideLayouts } : {}),
     ...(templates !== undefined ? { templates } : {}),
     ...(persist !== undefined ? { persist } : {}),
     ...(overrides.projectsDir !== undefined ? { projectsDir: overrides.projectsDir } : {}),

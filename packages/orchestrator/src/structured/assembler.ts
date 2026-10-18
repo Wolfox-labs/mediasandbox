@@ -20,6 +20,11 @@
 import type { ToolRegistry } from '../tools/registry.js';
 import type { DecisionClient } from '../decision/types.js';
 import { PlanError, validatePlan, type ExecutionPlan, type PlanInput, type PlanNode } from '../plan/types.js';
+import {
+  describeAlignment,
+  planBlueprint,
+  type BlueprintOutcome,
+} from '../plan/blueprint.js';
 import { createBlockRegistry, type BlockRegistry, type BlockSpec } from './block-spec.js';
 import { normalizePageSpec, validatePageSpec, type PageSpec } from './page-spec.js';
 import { StructurePlanner, type PlanStructureResult } from './planner.js';
@@ -75,6 +80,24 @@ export async function assembleStructured(args: {
   // 在候选集里却永远不存在。省略时退回内置池，保持"不配也能跑通"。
   const blocks = args.request.blocks ?? createBlockRegistry();
 
+  // ── 0. 统筹规划：大语言模型先出一份计划 ───────────────────────────────
+  //
+  // 放在逐块决策**之前**：决策模型的每一轮都带着这份计划（见 `buildContext`
+  // 里的 facts），于是它的选择是"按计划排"，而不是"每轮自由发挥"。
+  // 这一步不改结构——它只写"要讲哪几段"，选块仍然由决策层回答。
+  const blueprint = await resolveBlueprint(request, blocks);
+  const rationale: string[] = [];
+  if (blueprint !== undefined) {
+    rationale.push(
+      blueprint.ok
+        ? `统筹规划（${blueprint.blueprint.model}）：${blueprint.blueprint.status === 'lenient' ? '按非 JSON 返回宽松解析' : 'JSON 契约'}，` +
+            `${blueprint.blueprint.sections.length} 段 —— ${blueprint.blueprint.sections
+              .map((s) => s.purpose)
+              .join(' → ')}`
+        : `统筹规划不可用：${blueprint.detail}。本次直接逐块决策，没有整体计划`,
+    );
+  }
+
   // ── 1. 定稿结构：给定的照用，没给才逐块问决策模型 ────────────────────
   //
   // 「带指定 PageSpec 重跑」走上面那条：用户改完结构（或只想按同一结构再跑一次）时，
@@ -92,6 +115,7 @@ export async function assembleStructured(args: {
           // 没生成层的时候问"要不要生成式"是个空问题，白花一次决策往返。
           ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
           ...(request.template !== undefined ? { template: request.template } : {}),
+          ...(blueprint !== undefined && blueprint.ok ? { blueprint: blueprint.blueprint } : {}),
           ...(request.context.constraints !== undefined
             ? { constraints: request.context.constraints }
             : {}),
@@ -101,7 +125,12 @@ export async function assembleStructured(args: {
         });
 
   const page = planned.page;
-  const rationale = [...planned.rationale];
+  rationale.push(...planned.rationale);
+
+  // 计划与实际结构的对照。**只在真的规划过时算**——没有计划就无所谓对上不上。
+  if (blueprint !== undefined && blueprint.ok) {
+    rationale.push(describeAlignment(blueprint.blueprint, page.blocks.length).detail);
+  }
   rationale.push(
     `结构化链路：${page.blocks.length} 个 block 节点并发填充，扇入 assemble-page`,
   );
@@ -234,10 +263,70 @@ export async function assembleStructured(args: {
       steps: planned.steps,
       usage: planned.usage,
       decisionCalls: planned.decisionCalls,
+      ...(blueprint !== undefined
+        ? {
+            blueprint: blueprint.ok
+              ? {
+                  title: blueprint.blueprint.title,
+                  sections: blueprint.blueprint.sections.length,
+                  status: blueprint.blueprint.status,
+                  model: blueprint.blueprint.model,
+                }
+              : { unavailable: blueprint.detail },
+          }
+        : {}),
     },
     decisionLatencyMs: planned.decisionLatencyMs,
     structure: { page, steps: planned.steps },
+    ...(blueprint !== undefined ? { blueprint } : {}),
   };
+}
+
+/**
+ * 拿到统筹规划。
+ *
+ * 四种情况分开处理，不合并成"有/没有"：
+ *
+ *   1. 调用方已经给了一份 → 直接用，**不再花生成额度**
+ *   2. 没有生成层（`llm` 未配置）→ 返回 `undefined`，这不是失败，
+ *      零成本路径本来就没有大模型可调用
+ *   3. 调用方明确关掉 → 返回 ok:false 并说明"按要求关闭"，
+ *      让留痕里能看出"这里没有规划是人为的"
+ *   4. 有生成层 → 真跑一次；失败也返回 ok:false 并带上原因
+ *
+ * 第 3/4 种都返回 `ok: false` 而不是 `undefined`：`undefined` 的意思是
+ * "这条路不适用"，`ok:false` 是"试了但没成/被关掉"，两者在界面上要说不同的话。
+ */
+async function resolveBlueprint(
+  request: AssembleRequest,
+  blocks: BlockRegistry,
+): Promise<BlueprintOutcome | undefined> {
+  if (request.blueprint !== undefined) {
+    return { ok: true, blueprint: request.blueprint };
+  }
+  if (request.llm === undefined) return undefined;
+  if (request.useBlueprint === false) {
+    return { ok: false, detail: '本次按要求关闭了统筹规划' };
+  }
+
+  const candidateIds = resolveCandidates(request.candidateBlockIds, blocks);
+  return await planBlueprint({
+    llm: request.llm,
+    goal: request.goal,
+    envType: 'webpage',
+    blocks: candidateIds.map((id) => blocks.get(id)),
+    ...(request.context.constraints !== undefined
+      ? { constraints: request.context.constraints }
+      : {}),
+    ...(request.tone !== undefined ? { tone: request.tone } : {}),
+    ...(request.template !== undefined
+      ? { templateLabel: `${request.template.label}（${request.template.id}）` }
+      : {}),
+    ...(request.blueprintTimeoutMs !== undefined
+      ? { timeoutMs: request.blueprintTimeoutMs }
+      : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
+  });
 }
 
 /**
