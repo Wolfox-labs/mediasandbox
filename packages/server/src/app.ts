@@ -866,8 +866,88 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         );
         return;
       }
+
+      /*
+       * 两种给法，**同一入口**：
+       *
+       *   pageSpec: { ...完整结构 }         —— 客户端手里就有结构（改完结构立刻重跑）
+       *   pageSpec: { fromRunId: "run-…" } —— 只要"那一次运行的结构"
+       *
+       * 后者解决的是"结构在服务端、客户端不想先拉一遍"的场景：新开的客户端、
+       * 或者跨会话想把某次跑通的结构再来一遍。
+       *
+       * 两种都给是**歧义**，直接拒：不猜用户想要哪一份。
+       */
+      const rawPageSpec = body['pageSpec'];
+      const fromRunId =
+        typeof rawPageSpec === 'object' && rawPageSpec !== null && !Array.isArray(rawPageSpec)
+          ? (rawPageSpec as Record<string, unknown>)['fromRunId']
+          : undefined;
+
+      let pageSpecSource: unknown = rawPageSpec;
+      if (fromRunId !== undefined) {
+        if (typeof fromRunId !== 'string' || fromRunId.trim() === '') {
+          errorResponse(res, 400, 'pageSpec.fromRunId 必须是非空字符串');
+          return;
+        }
+        // 只认 `fromRunId` 一个字段：混着传 `blocks` 时不知道该用哪份结构。
+        const extraKeys = Object.keys(rawPageSpec as Record<string, unknown>).filter(
+          (key) => key !== 'fromRunId',
+        );
+        if (extraKeys.length > 0) {
+          errorResponse(
+            res,
+            400,
+            `pageSpec 同时带了 fromRunId 与 ${extraKeys.join('、')}`,
+            '要么只给 fromRunId（用那一次的结构），要么给完整结构，不要混着传',
+          );
+          return;
+        }
+
+        const source = store.get(fromRunId);
+        if (source === undefined) {
+          errorResponse(res, 404, `找不到运行 ${fromRunId}`, '结构只能从本服务记录过的运行里取');
+          return;
+        }
+        if (source.structure === undefined) {
+          errorResponse(
+            res,
+            409,
+            `运行 ${fromRunId} 没有结构化留痕`,
+            '只有 webpage 环境的结构化链路会产出结构；也可能是那次运行还没定稿',
+          );
+          return;
+        }
+        if (source.status === 'running' || source.status === 'queued') {
+          errorResponse(
+            res,
+            409,
+            `运行 ${fromRunId} 还在进行中，结构未定稿`,
+            '等它结束再来取那份结构',
+          );
+          return;
+        }
+        /*
+         * **必须把 status 复位成 pending**。
+         *
+         * 存下来的结构是一份**记录**：它记着"当时这些块都填好了"（`status: filled`），
+         * 但没有存每块的 slot 内容（那在产物与 `src/blocks/*.json` 里，复制进来会让
+         * `meta.json` 膨胀几十上百 KB）。直接拿它当"可执行的结构"会立刻被
+         * `validatePageSpec` 拒掉："已标记 filled，但必需 slot 缺失"。
+         *
+         * 复位成 pending 正是"照这个结构重新填一遍"的语义：块还在、顺序还在，
+         * 内容重新生成。已有的真实列表内容（模板预置 / 用户手填）在填充器里
+         * 走"整值保留"那一条，不会被无谓丢掉。
+         */
+        const sourcePage = source.structure.page;
+        pageSpecSource = {
+          ...sourcePage,
+          blocks: sourcePage.blocks.map((block) => ({ ...block, status: 'pending' as const })),
+        };
+      }
+
       try {
-        structureInput = parsePageSpecInput(body['pageSpec']);
+        structureInput = parsePageSpecInput(pageSpecSource);
       } catch (error) {
         if (error instanceof StructureInputError) {
           errorResponse(res, 400, error.message);
