@@ -84,6 +84,12 @@ const LAYOUT_ORDER: readonly string[] = [
   'two-col',
   'quote-slide',
   'image-slide',
+  // 结构型版式（数据/时间线/主张/图文左右）。排在中间偏后的位置：
+  // 它们信息形态强，放开头会盖过封面，放收尾又收不住。
+  'stats',
+  'timeline',
+  'manifesto',
+  'image-text',
   'closing',
 ];
 

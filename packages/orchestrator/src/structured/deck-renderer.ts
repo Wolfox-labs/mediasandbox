@@ -39,7 +39,11 @@ export type SlideLayoutId =
   | 'two-col'
   | 'quote-slide'
   | 'image-slide'
-  | 'closing';
+  | 'closing'
+  | 'stats'
+  | 'timeline'
+  | 'manifesto'
+  | 'image-text';
 
 export interface RenderDeckOptions {
   /** 文档标题。省略用页面目标。 */
@@ -243,8 +247,97 @@ const renderClosing: SlideRenderer = (block) => {
   );
 };
 
-/** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 */
-const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
+/**
+ * 把「数字|说明」这类条目拆成两段。
+ *
+ * 数据页与时间线都靠这个约定：**模型不用懂结构，只要按 `数字|说明` 写**。
+ * 分隔符认 `|` / 全角 `｜` / 冒号；都没有时按第一个空格拆，
+ * 再不行就整段当"大字号部分"、说明留空——总比把整句塞进 7cqw 的字里好。
+ */
+function splitHeadTail(item: string): { head: string; tail: string } {
+  const matched = /^(.{1,20}?)\s*[|｜:：]\s*(.+)$/.exec(item);
+  if (matched !== null) return { head: matched[1]!.trim(), tail: matched[2]!.trim() };
+  const parts = item.trim().split(/\s+/);
+  if (parts.length > 1) return { head: parts[0]!, tail: parts.slice(1).join(' ') };
+  return { head: item.trim(), tail: '' };
+}
+
+const renderStats: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const metrics = listOf(block, 'metrics');
+  const cells = metrics
+    .map((metric) => {
+      const { head, tail } = splitHeadTail(metric);
+      return (
+        `<div class="sk-stats__item">` +
+        `<div class="sk-stats__value">${inline(head)}</div>` +
+        (tail === '' ? '' : `<div class="sk-stats__label">${inline(tail)}</div>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-stats">` +
+    `<h2 class="sk-stats__title">${inline(heading)}</h2>` +
+    `<div class="sk-stats__grid" style="--sk-cols:${Math.min(Math.max(metrics.length, 1), 4)}">${cells}</div>` +
+    `</div>`
+  );
+};
+
+const renderTimeline: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const phases = listOf(block, 'phases');
+  const nodes = phases
+    .map((phase) => {
+      const { head, tail } = splitHeadTail(phase);
+      return (
+        `<div class="sk-timeline__node">` +
+        `<div class="sk-timeline__dot"></div>` +
+        `<div class="sk-timeline__when">${inline(head)}</div>` +
+        (tail === '' ? '' : `<div class="sk-timeline__what">${inline(tail)}</div>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-timeline">` +
+    `<h2 class="sk-timeline__title">${inline(heading)}</h2>` +
+    `<div class="sk-timeline__track">${nodes}</div>` +
+    `</div>`
+  );
+};
+
+const renderManifesto: SlideRenderer = (block) => {
+  const lines = listOf(block, 'lines');
+  const note = textOf(block, 'note');
+  const body = lines.map((line) => `<p class="sk-manifesto__line">${inline(line)}</p>`).join('');
+  return (
+    `<div class="sk-manifesto">${body}` +
+    (note === '' ? '' : `<p class="sk-manifesto__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
+const renderImageText: SlideRenderer = (block) => {
+  const image = imageOf(block, 'image');
+  const items = listOf(block, 'items')
+    .map((item) => `<li>${paragraphs(item)}</li>`)
+    .join('');
+  const media =
+    image === null
+      ? `<div class="sk-split__placeholder">（这一页没有配图）</div>`
+      : `<img src="${escapeHtml(image.ref)}" alt="${escapeHtml(image.alt)}" />`;
+  return (
+    `<div class="sk-split">` +
+    `<div class="sk-split__media">${media}</div>` +
+    `<div class="sk-split__body">` +
+    `<h2 class="sk-split__title">${inline(textOf(block, 'heading'))}</h2>` +
+    `<ul class="sk-split__items">${items}</ul>` +
+    `</div></div>`
+  );
+};
+
+/** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 */const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   cover: renderCover,
   agenda: renderAgenda,
   section: renderSection,
@@ -253,6 +346,10 @@ const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   'quote-slide': renderQuote,
   'image-slide': renderImage,
   closing: renderClosing,
+  stats: renderStats,
+  timeline: renderTimeline,
+  manifesto: renderManifesto,
+  'image-text': renderImageText,
 };
 
 /**
@@ -472,6 +569,73 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .sk-cover__subtitle{font-size:2.3cqw}
 .sk-closing__headline{font-size:4.8cqw}
 .sk-closing__note{font-size:2.1cqw}
+
+/* ── 新增结构版式：数据 / 时间线 / 主张 / 图文左右 ───────────────────────
+ *
+ * 这四个才是"看起来像设计过"的来源：信息形态本身不同，而不是同一块正文
+ * 换字号。数字敢占半页、时间线横着走、主张敢留白、图占半边。
+ */
+
+/* 数据页 */
+.sk-stats{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:3.4cqw}
+.sk-stats__title{margin:0;font-size:3.4cqw;font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-stats__grid{display:grid;grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:2.2cqw;align-items:start}
+.sk-stats__item{border-top:.24cqw solid var(--sk-accent,#3b6df5);padding-top:1.3cqw}
+.sk-stats__value{font-size:7.4cqw;line-height:.94;font-weight:800;letter-spacing:-.03em;color:inherit}
+.sk-stats__label{margin-top:1cqw;font-size:1.75cqw;line-height:1.45;color:var(--sk-muted,#8b93a1)}
+
+/* 时间线 */
+.sk-timeline{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:4cqw}
+.sk-timeline__title{margin:0;font-size:3.4cqw;font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-timeline__track{position:relative;display:flex;align-items:flex-start}
+.sk-timeline__track::before{content:"";position:absolute;left:.62cqw;right:0;top:.62cqw;height:1px;background:var(--sk-accent,#3b6df5);opacity:.45}
+.sk-timeline__node{flex:1;min-width:0;padding-right:1.8cqw}
+.sk-timeline__dot{position:relative;width:1.26cqw;height:1.26cqw;border-radius:50%;background:var(--sk-accent,#3b6df5);margin-bottom:1.7cqw}
+.sk-timeline__when{font-size:2.35cqw;font-weight:700;color:var(--sk-accent,#3b6df5);letter-spacing:.02em}
+.sk-timeline__what{margin-top:.7cqw;font-size:1.85cqw;line-height:1.5;color:inherit}
+
+/* 主张页 */
+.sk-manifesto{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:1.5cqw}
+.sk-manifesto__line{margin:0;font-size:5.4cqw;line-height:1.14;font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-manifesto__line:nth-child(2){padding-left:7cqw}
+.sk-manifesto__line:nth-child(3){padding-left:14cqw;color:var(--sk-accent,#3b6df5)}
+.sk-manifesto__note{margin:2.2cqw 0 0;font-size:1.7cqw;color:var(--sk-muted,#8b93a1)}
+
+/* 图文左右 */
+.sk-split{position:absolute;inset:0;display:grid;grid-template-columns:1.05fr 1fr}
+.sk-split__media{position:relative;overflow:hidden;background:var(--sk-surface,#eef1f6)}
+.sk-split__media img{width:100%;height:100%;object-fit:cover;display:block}
+.sk-split__placeholder{display:flex;align-items:center;justify-content:center;height:100%;font-size:1.6cqw;color:var(--sk-muted,#9aa3b2)}
+.sk-split__body{display:flex;flex-direction:column;justify-content:center;gap:1.8cqw;padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,7cqw)}
+.sk-split__title{margin:0;font-size:3.1cqw;line-height:1.22;font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-split__items{margin:0;padding-left:2cqw;display:flex;flex-direction:column;gap:1.15cqw}
+.sk-split__items li{font-size:1.95cqw;line-height:1.5}
+.sk-split__items li p{margin:0}
+
+/* ── 主题级视觉层：让"+底色"变成"有设计" ────────────────────────────────
+ *
+ * 纯 CSS 画的三层装饰（不引用任何外部资源，断网也成立）：
+ *   1. 右上角一团柔和光晕（用主题强调色）
+ *   2. 左下角一条极细的强调线
+ *   3. 一层 5% 的斜向条纹，给纯色底一点质感
+ *
+ * 三层都很淡：装饰是为了让版面"有层次"，不是为了抢内容。
+ * 用 pointer-events:none 保证点击验证不受影响——这点很关键，
+ * 交互测试要点的是翻页按钮，不能被装饰层挡住。
+ */
+.slide__frame::before,
+.slide__frame::after{content:"";position:absolute;pointer-events:none}
+.slide__frame::before{
+  inset:-10% -10% auto auto;width:62%;height:70%;
+  background:radial-gradient(closest-side,var(--sk-accent,#3b6df5),transparent 70%);
+  opacity:.16;filter:blur(.6cqw);
+}
+.slide__frame::after{
+  left:0;right:0;bottom:0;height:.18cqw;
+  background:linear-gradient(90deg,var(--sk-accent,#3b6df5),transparent 55%);
+  opacity:.55;
+}
+.slide__frame > *{position:absolute;z-index:1}
 
 /* 打印 / 导出 PDF：一页一张 */
 @media print{

@@ -143,6 +143,93 @@ export const BUILTIN_SLIDE_LAYOUTS: readonly BlockSpec[] = [
     placement: 'last',
     costHint: 'fast',
   },
+  /*
+   * ── 下面四个是"结构上就不一样"的版式 ────────────────────────────────
+   *
+   * 上面八个都是"标题 + 正文块"的变体：字大一点小一点、分栏一分二，
+   * 看多了就是同一份模板。真正让人觉得"这份演示文稿是设计过的"，
+   * 靠的是**信息形态不同**：数字要大、时间要横着走、主张要敢占满一页。
+   */
+  {
+    id: 'stats',
+    label: '数据页',
+    description:
+      '一排大数字，每个数字配一句说明。适合复盘、增长、经营分析——数字本身就该是版面主角。条目写法：数字在前、说明在后，用竖线分隔，例如「25%|协作工具使用率提升」',
+    group: 'deck',
+    slots: [
+      { name: 'heading', type: 'title', required: true, description: '这一页的标题' },
+      {
+        name: 'metrics',
+        type: 'list-text',
+        required: true,
+        description: '指标条目：数字|说明（例如 25%|协作工具使用率提升）',
+        countRange: { min: 2, max: 4 },
+      },
+    ],
+    canLead: true,
+    repeatable: true,
+    costHint: 'fast',
+  },
+  {
+    id: 'timeline',
+    label: '时间线页',
+    description:
+      '横向的几段推进：一条线串起三到五个节点，适合路线图、实施计划、复盘节奏。条目写法：时间在前、事件在后，用竖线分隔，例如「Q1|完成需求梳理」',
+    group: 'deck',
+    slots: [
+      { name: 'heading', type: 'title', required: true, description: '这一页的标题' },
+      {
+        name: 'phases',
+        type: 'list-text',
+        required: true,
+        description: '节点条目：时间|事件（例如 Q1|完成需求梳理）',
+        countRange: { min: 3, max: 5 },
+      },
+    ],
+    canLead: true,
+    repeatable: true,
+    costHint: 'fast',
+  },
+  {
+    id: 'manifesto',
+    label: '主张页',
+    description:
+      '整页只放两三句主张，字极大、逐行递进。适合开场立论或中场转折——一页只讲一件事时用它，别用来塞信息',
+    group: 'deck',
+    slots: [
+      {
+        name: 'lines',
+        type: 'list-text',
+        required: true,
+        description: '主张，一句一行，每行尽量不超过 14 字',
+        countRange: { min: 2, max: 3 },
+      },
+      { name: 'note', type: 'text', required: false, description: '底下一行小字：出处或补充' },
+    ],
+    canLead: true,
+    repeatable: true,
+    costHint: 'fast',
+  },
+  {
+    id: 'image-text',
+    label: '图文左右页',
+    description: '左半页一张主视觉、右半页讲三到五条。与「图文页」的区别是图占半页、文字在侧，信息更密',
+    group: 'deck',
+    slots: [
+      { name: 'heading', type: 'title', required: true, description: '这一页的标题' },
+      { name: 'image', type: 'image', required: false, description: '左半页的主视觉' },
+      {
+        name: 'items',
+        type: 'list-text',
+        required: true,
+        description: '右侧条目',
+        countRange: { min: 3, max: 5 },
+      },
+    ],
+    canLead: true,
+    repeatable: true,
+    costHint: 'medium',
+  },
 ];
 
 /**
