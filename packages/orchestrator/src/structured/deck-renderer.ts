@@ -27,6 +27,7 @@
  * 小屏上挤成一团的产物。
  */
 import { escapeHtml } from './renderer.js';
+import { deckThemeCssVars, resolveDeckTheme } from './deck-theme.js';
 import type { BlockInstance, ImageRef, PageSpec, SlotValue } from './page-spec.js';
 
 /** 一页的版式 id。与 `BUILTIN_SLIDE_LAYOUTS` 一一对应。 */
@@ -43,6 +44,13 @@ export type SlideLayoutId =
 export interface RenderDeckOptions {
   /** 文档标题。省略用页面目标。 */
   readonly title?: string | undefined;
+  /**
+   * 主题 id（决策模型选的视觉方向）。未知 id 回落到默认主题，不抛错。
+   *
+   * 主题是**纯视觉参数**：认不出来最坏是"长得不像预期"，
+   * 不该让整份文稿渲染不出来。
+   */
+  readonly themeId?: string | undefined;
 }
 
 // ── slot 取值 ───────────────────────────────────────────────────────────────
@@ -383,6 +391,88 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 /* 标注：页脚写清"第几页 / 共几页"与版式，便于排查 */
 .deck__anno{position:absolute;left:1.6cqw;bottom:1.2cqw;font-size:1.05cqw;color:#aab2c0}
 
+/* ── 主题联动 ────────────────────────────────────────────────────────────
+ *
+ * 上面每个版式写的是**尺度**（cqw 字号、间距、栅格）与**默认色**；
+ * 主题只在下面这一层覆盖"色 + 字体 + 内边距 + 圆角"。
+ *
+ * 为什么用后置覆盖、而不是把上面全部改成 var()：
+ * 版式样式是稳定的，改它容易调坏；主题是变量，会一直加。
+ * 把两者分成两层之后，**加主题永远不用回头改版式**，
+ * 也不会出现"4 主题 × 12 版式 = 48 份要各自维护的样式"。
+ */
+.slide__frame{background:var(--sk-bg,#fff);color:var(--sk-fg,#15181f);border-radius:var(--sk-radius,.6cqw)}
+.sk-cover,.sk-agenda,.sk-section,.sk-bullets,.sk-two,.sk-quote,.sk-image,.sk-closing{
+  padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,8cqw);background:transparent;color:inherit;
+}
+.sk-section,.sk-quote{background:var(--sk-surface,#f4f6fa)}
+.sk-cover__eyebrow{color:var(--sk-accent,#8fb0ff)}
+.sk-cover__subtitle{color:var(--sk-muted,#c3ccdb)}
+.sk-agenda__no{color:var(--sk-accent,#3b6df5)}
+.sk-agenda__item{border-bottom:1px solid var(--sk-surface,#e6e9ef)}
+.sk-agenda__text{color:inherit}
+.sk-section__no{color:var(--sk-accent,#d7ddea);opacity:.3}
+.sk-section__heading{color:inherit}
+.sk-section__note{color:var(--sk-muted,#5a6274)}
+.sk-bullets__head{border-left-color:var(--sk-accent,#3b6df5)}
+.sk-bullets__lede{color:var(--sk-muted,#5a6274)}
+.sk-bullets__item{color:inherit}
+.sk-bullets__item::before{background:var(--sk-accent,#3b6df5)}
+.sk-two__col--left{background:var(--sk-surface,#f1f4f9);color:inherit;border-left:.4cqw solid var(--sk-accent,#3b6df5)}
+.sk-two__col--right{background:transparent;color:inherit;border:1px solid var(--sk-surface,#eef7f1)}
+.sk-two__col--left h3,.sk-two__col--right h3{color:var(--sk-accent,#0f62d6)}
+.sk-quote__mark{color:var(--sk-accent,#e8d9b0);opacity:.38}
+.sk-quote__body{color:inherit}
+.sk-quote__source{color:var(--sk-muted,#6b7280)}
+.sk-image__figure{background:var(--sk-surface,#eef1f6);border-radius:var(--sk-radius,.8cqw)}
+.sk-image__placeholder{color:var(--sk-muted,#9aa3b2)}
+.sk-closing{background:transparent;color:inherit}
+.sk-closing__headline{color:inherit}
+.sk-closing__note{color:var(--sk-muted,#c3ccdb)}
+.sk-closing__contact{color:var(--sk-accent,#8fb0ff)}
+.sk-fallback,.sk-fallback li,.sk-fallback ul{color:inherit}
+
+/* 标题的字体/字重/字距由主题统一给——这是"气质"最直观的载体 */
+.sk-cover__title,.sk-agenda__title,.sk-section__heading,.sk-bullets__title,.sk-two__title,
+.sk-two__col h3,.sk-quote__body,.sk-image__title,.sk-closing__headline{
+  font-family:var(--sk-display,inherit);
+  font-weight:var(--sk-display-weight,700);
+  letter-spacing:var(--sk-display-tracking,normal);
+}
+
+/* ── 版面节奏 ────────────────────────────────────────────────────────────
+ *
+ * 第一版按"网页思维"给字号：一页 1270px 宽的内容区只用了左边 60%，
+ * 右边和下方大片留白，看着像没填完。16:9 的放映尺寸要**用满版面**。
+ *
+ * 所以这里统一把正文类版式放大并垂直居中——不是拍脑袋，是实测截图后
+ * 按"一页能读清、不空旷"调的：条目标题 4.2cqw≈53px、条目 2.55cqw≈32px，
+ * 在 1280×720 的放映尺寸下正好是"最后排也能看清"的量级。
+ */
+.sk-bullets{justify-content:center;gap:2cqw}
+.sk-bullets__title{font-size:3.9cqw;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sk-bullets__lede{font-size:2.05cqw}
+.sk-bullets__list{gap:1.45cqw}
+.sk-bullets__item{font-size:2.3cqw;line-height:1.4}
+/* 条目多时自动收一档：5 条以上还按大字号排，最后一条会被切在版面外 */
+.sk-bullets__item:nth-child(n+6){font-size:2.05cqw}
+.sk-bullets__item:nth-child(n+8){font-size:1.9cqw}
+.sk-agenda__title{font-size:4.4cqw}
+.sk-agenda__item{font-size:2.35cqw}
+.sk-agenda__no{font-size:1.65cqw}
+.sk-section__heading{font-size:5cqw}
+.sk-section__note{font-size:2.2cqw}
+.sk-two__title{font-size:3.9cqw}
+.sk-two__col h3{font-size:2.5cqw}
+.sk-two__col li{font-size:2.05cqw}
+.sk-quote__body{font-size:3.6cqw}
+.sk-quote__source{font-size:1.85cqw}
+.sk-image__title{font-size:3.6cqw}
+.sk-cover__title{font-size:6.8cqw;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.sk-cover__subtitle{font-size:2.3cqw}
+.sk-closing__headline{font-size:4.8cqw}
+.sk-closing__note{font-size:2.1cqw}
+
 /* 打印 / 导出 PDF：一页一张 */
 @media print{
   @page{size:1280px 720px;margin:0}
@@ -465,6 +555,9 @@ const DECK_SCRIPT = `<script>
 export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): string {
   const title = options.title ?? spec.goal;
   const slides = spec.blocks;
+  // 主题在**决策层**定（`deck_theme` 这一问），这里只负责把它的变量铺到页面上。
+  // `data-ms-theme` 让"这份文稿是哪种气质"在产物本身里可查，而不是只活在日志里。
+  const theme = resolveDeckTheme(options.themeId);
 
   const dots = slides
     .map((_, i) => {
@@ -496,6 +589,7 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
     `<meta name="viewport" content="width=device-width,initial-scale=1">\n` +
     `<title>${escapeHtml(title)}</title>\n<style>${DECK_CSS}</style>\n</head>\n<body>\n` +
     `<main class="deck" data-ms-project="${escapeHtml(spec.projectId)}" ` +
+    `data-ms-theme="${escapeHtml(theme.id)}" style="${deckThemeCssVars(theme)}" ` +
     `data-ms-slides="${slides.length}" data-ms-goal="${escapeHtml(spec.goal)}">\n` +
     `<nav class="deck__nav" data-ms-tabs="deck" role="tablist" aria-label="页序">${dots}</nav>\n` +
     `<div class="deck__stage">${pages}</div>\n` +

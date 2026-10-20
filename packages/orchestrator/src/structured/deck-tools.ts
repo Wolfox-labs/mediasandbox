@@ -23,6 +23,7 @@ import { readText } from '@mediasandbox/sandbox';
 import { DEFAULT_VIEWPORT, defaultScreenshotDriver, type ScreenshotDriver } from '../render/screenshot.js';
 import { createSlideRegistry } from './deck-spec.js';
 import { renderDeck } from './deck-renderer.js';
+import { resolveDeckTheme } from './deck-theme.js';
 import type { BlockRegistry } from './block-spec.js';
 import { deriveBrand, fillBlock } from './filler.js';
 import { validatePageSpec, type BlockInstance, type PageSpec } from './page-spec.js';
@@ -116,7 +117,7 @@ export function createFillSlideTool(layouts: BlockRegistry): ToolRegistration {
 
       const generate =
         useGenerative && runtime.llm !== undefined
-          ? makeSlotGenerator(runtime.llm, runtime)
+          ? makeSlotGenerator(runtime.llm, runtime, 'slides')
           : undefined;
 
       const counts: Record<string, number> = {};
@@ -174,6 +175,12 @@ export function createAssembleDeckTool(layouts: BlockRegistry): ToolRegistration
         { name: 'deckJson', type: 'text', required: true, description: '文稿骨架 JSON（不含已填内容）' },
         { name: 'slides', type: 'json', required: true, description: '按页序排列的已填充页列表' },
         { name: 'title', type: 'text', required: false, description: '文稿标题' },
+        {
+          name: 'themeId',
+          type: 'text',
+          required: false,
+          description: '视觉主题 id（决策模型选的）。未知 id 回落到默认主题',
+        },
       ],
       outputs: [
         { name: 'html', type: 'text', required: true, description: '完整文稿 HTML' },
@@ -224,20 +231,44 @@ export function createAssembleDeckTool(layouts: BlockRegistry): ToolRegistration
           ? runtime.inputs['title']
           : deck.goal;
 
-      const html = renderDeck(deck, { title });
+      const themeId =
+        typeof runtime.inputs['themeId'] === 'string' && runtime.inputs['themeId'] !== ''
+          ? runtime.inputs['themeId']
+          : undefined;
+
+      const html = renderDeck(deck, { title, ...(themeId !== undefined ? { themeId } : {}) });
       const file = 'artifacts/deck.html';
       await runtime.sandbox.writeFile(runtime.handle, file, html);
 
-      // 结构单独存一份：要转成别的格式、或者事后核对"当时排了哪几页"，靠它。
-      // 不塞进 HTML 的注释里——那既不好读，也会在被当作纯文本处理时丢掉。
+      /*
+       * 结构另存一份，**并把"是谁决定的"一起写进去**：
+       *   - `themeId` / `themeLabel`：视觉方向是哪次决策选的
+       *   - `layoutSequence`：页序——产物本身就能看出"决策模型排了什么"
+       *
+       * 不塞进 HTML 的注释里：那既不好读，也容易被当成纯文本处理时丢掉。
+       */
       const deckFile = 'artifacts/deck.json';
-      await runtime.sandbox.writeFile(runtime.handle, deckFile, JSON.stringify(deck, null, 2));
+      const resolvedTheme = resolveDeckTheme(themeId);
+      await runtime.sandbox.writeFile(
+        runtime.handle,
+        deckFile,
+        JSON.stringify(
+          {
+            ...deck,
+            themeId: resolvedTheme.id,
+            themeLabel: resolvedTheme.label,
+            layoutSequence: filled.map((page) => page.type),
+          },
+          null,
+          2,
+        ),
+      );
 
       const layoutSeq = filled.map((page) => page.type).join(' → ');
       return {
         outputs: { html, file, slideCount: filled.length },
         artifacts: await runtime.sandbox.collectArtifacts(runtime.handle),
-        summary: `组装演示文稿 ${filled.length} 页：${layoutSeq}`,
+        summary: `组装演示文稿 ${filled.length} 页：${layoutSeq}（主题 ${resolvedTheme.label}）`,
       };
     },
   };

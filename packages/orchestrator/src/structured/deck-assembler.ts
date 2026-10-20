@@ -25,10 +25,18 @@
  */
 import type { ToolRegistry } from '../tools/registry.js';
 import type { DecisionClient } from '../decision/types.js';
+import { argmaxDeterministic } from '../decision/types.js';
 import { PlanError, validatePlan, type ExecutionPlan, type PlanInput, type PlanNode } from '../plan/types.js';
 import { describeAlignment, planBlueprint, type BlueprintOutcome } from '../plan/blueprint.js';
 import { createSlideRegistry } from './deck-spec.js';
 import { DECK_TOOLS } from './deck-tools.js';
+import {
+  DECK_THEME_QUESTION,
+  DEFAULT_DECK_THEME_ID,
+  deckThemeCriteria,
+  resolveDeckTheme,
+  type DeckTheme,
+} from './deck-theme.js';
 import { normalizePageSpec, validatePageSpec, type PageSpec } from './page-spec.js';
 import { StructurePlanner, type PlanStructureResult } from './planner.js';
 import type { BlockRegistry, BlockSpec } from './block-spec.js';
@@ -80,6 +88,15 @@ export async function assembleDeck(args: {
         : `统筹规划不可用：${blueprint.detail}。本次直接逐页决策，没有整体计划`,
     );
   }
+
+  // ── 0.5 视觉方向：也是决策层的事 ───────────────────────────────────────
+  //
+  // 版式决定**信息结构**（这页讲几件事、怎么排），主题决定**视觉气质**
+  // （冷暖、轻重、疏密）。后者同样是"这次要什么"的封闭问题，代码不该替它答——
+  // 替它答的结果就是所有文稿长得一模一样。
+  //
+  // 代价只有一次 `choice`，而它换来的差别是用户一眼能看出来的。
+  const theme = await decideTheme(request, decision, rationale);
 
   // ── 1. 定稿页序：给定的照用，没给才逐页问决策模型 ──────────────────────
   const planner = new StructurePlanner(layouts, decision);
@@ -152,6 +169,9 @@ export async function assembleDeck(args: {
       deckJson: { kind: 'literal', value: skeleton },
       slides: slidesInput,
       title: { kind: 'literal', value: request.goal },
+      // 主题作为**字面量**传给渲染节点：它是这一次决策的结果，
+      // 不该在执行期再问一次（那样同一份计划可能渲染成两种样子）。
+      themeId: { kind: 'literal', value: theme.id },
     },
     dependsOn: [...pageNodeIds],
     retryable: false,
@@ -218,6 +238,62 @@ export async function assembleDeck(args: {
     structure: { page: deck, steps: planned.steps },
     ...(blueprint !== undefined ? { blueprint } : {}),
   };
+}
+
+/**
+ * 问一次"这次要什么视觉气质"，并把结果写进依据。
+ *
+ * ## 弃权与失败都回落到默认主题
+ *
+ * 主题是纯视觉参数：它不影响结构、不影响产物能不能用。所以这一问
+ * **失败即回落**（并如实记下原因），不该让它把整次运行打挂——
+ * 与其"因为选不出颜色而做不出文稿"，不如用默认主题做出来再说明。
+ */
+async function decideTheme(
+  request: AssembleRequest,
+  decision: DecisionClient,
+  rationale: string[],
+): Promise<DeckTheme> {
+  const fallback = resolveDeckTheme(DEFAULT_DECK_THEME_ID);
+  try {
+    const decided = await decision.decide(
+      {
+        goal: request.goal,
+        envType: 'slides',
+        ...(request.context.constraints !== undefined
+          ? { constraints: request.context.constraints }
+          : {}),
+        facts: { 交付格式: '多页演示文稿（一页一屏，16:9）' },
+      },
+      {
+        [DECK_THEME_QUESTION]: {
+          type: 'choice',
+          instructions:
+            '这份演示文稿该用哪种视觉气质？看场合与内容：技术方案要显得硬，' +
+            '品牌故事要读得下去，内部汇报要信息密度，对外宣讲要抓眼球。',
+          criteria: deckThemeCriteria(),
+        },
+      },
+      request.decisionTimeoutMs !== undefined ? { timeoutMs: request.decisionTimeoutMs } : {},
+    );
+    const answer = decided.answers[DECK_THEME_QUESTION];
+    if (answer === undefined || answer.type !== 'choice') {
+      rationale.push(`视觉主题：决策层未回答，回落默认「${fallback.label}」`);
+      return fallback;
+    }
+    const picked = answer.value ?? argmaxDeterministic(Object.keys(answer.probabilities), answer.probabilities);
+    const theme = resolveDeckTheme(picked ?? undefined);
+    rationale.push(
+      `视觉主题：${theme.label}` +
+        (answer.value === null ? '（决策层弃权，按概率回落）' : `（${theme.description.slice(0, 24)}…）`),
+    );
+    return theme;
+  } catch (error) {
+    rationale.push(
+      `视觉主题：决策层调用失败（${error instanceof Error ? error.message : String(error)}），回落默认「${fallback.label}」`,
+    );
+    return fallback;
+  }
 }
 
 /**

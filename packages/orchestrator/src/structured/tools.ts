@@ -191,6 +191,12 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
 export function makeSlotGenerator(
   llm: LlmClient,
   runtime: ToolRuntime,
+  /**
+   * 哪种模态。**必须传对**：提示词里说"你是网页文案撰写者"时，
+   * 幻灯片会拿到一整段网页口吻的导语——版式是幻灯片、文案是落地页，
+   * 看上去就像"模板没填完"。演示文稿要用自己的说法（短句、能读出来）。
+   */
+  kind: 'webpage' | 'slides' = 'webpage',
 ): (request: {
   readonly goal: string;
   readonly blockType: string;
@@ -204,11 +210,18 @@ export function makeSlotGenerator(
     if (slot.type === 'link' || slot.type === 'literal') return null;
 
     const wantsList = slot.type === 'list-text';
-    const system =
-      '你是网页文案撰写者。只输出成品内容本身，不要解释、不要标题前缀、不要 Markdown 代码块。';
+    const isDeck = kind === 'slides';
+    const system = isDeck
+      ? '你在写演示文稿上的文字：短、具体、能一眼读完。' +
+        '只输出成品内容本身——不要解释、不要标题前缀、不要 Markdown、不要编号。' +
+        '不要出现"这里展示""由填充器生成"这类元话语。'
+      : '你是网页文案撰写者。只输出成品内容本身，不要解释、不要标题前缀、不要 Markdown 代码块。';
+    const scene = isDeck ? '这份演示文稿的主题' : '页面目标';
     const user = wantsList
-      ? `页面目标：${goal}\n请为「${slot.description}」写 ${count} 条，每行一条，不要编号。`
-      : `页面目标：${goal}\n请写「${slot.description}」。要具体，不要空话。`;
+      ? `${scene}：${goal}\n请为「${slot.description}」写 ${count} 条，每行一条，不要编号，每条不超过 20 字。`
+      : isDeck
+        ? `${scene}：${goal}\n请写「${slot.description}」。一句话，不要空话，不要用"我们"开头。`
+        : `${scene}：${goal}\n请写「${slot.description}」。要具体，不要空话。`;
 
     runtime.log('调用生成层填充 slot', { blockId: request.blockId, slot: slot.name });
     const response = await llm.complete({
@@ -216,20 +229,92 @@ export function makeSlotGenerator(
         { role: 'system', content: system },
         { role: 'user', content: user },
       ],
-      temperature: 0.7,
+      temperature: isDeck ? 0.8 : 0.7,
+      ...(isDeck ? { maxTokens: wantsList ? 260 : 80 } : {}),
       signal: runtime.signal,
     });
     const text = response.text.trim();
     if (text === '') return null;
-    if (!wantsList) return { text };
+    if (!wantsList) {
+      const line = firstMeaningfulLine(text);
+      if (line === '') return null;
+      // 标题类只取第一行并截断：模型经常把整段话塞进标题槽，
+      // 于是封面标题变成三行，版式直接塌掉。
+      return { text: slot.type === 'title' ? line.slice(0, TITLE_LIMIT) : line.slice(0, TEXT_LIMIT) };
+    }
 
-    const items = text
-      .split('\n')
-      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.、)])\s*/, '').trim())
-      .filter((line) => line !== '');
-    // 条数不符就让调用方回落确定性内容：硬凑或硬截都会让版本参差。
-    return items.length === count ? { items } : null;
+    /*
+     * 列表型：**宽松收取**。
+     *
+     * 早先这里要求 `items.length === count`，一个不多一个不少。后果是
+     * 模型给的条数只要差一条，整块就回落到确定性填充器——而那份兜底内容
+     * 是"条目 1：与目标直接相关的一项"这种**元文本**，比少一条难看得多。
+     * 真正该守的只有两条：条数落在版式能容纳的区间内（由填充器校验），
+     * 以及每条都是**内容**而不是模型的自言自语。
+     */
+    const items = toListItems(text, count);
+    if (items.length < 2) return null;
+    return { items };
   };
+}
+
+/** 标题槽的字符上限。超过就会把版式挤坏。 */
+const TITLE_LIMIT = 40;
+/** 正文/引文槽的字符上限。 */
+const TEXT_LIMIT = 300;
+
+/**
+ * 清掉模型输出里的"非内容"：
+ *
+ *   - chatml / 特殊控制符（`<|im_end|>`、`<|im_start|>`）——本地模型常把它们
+ *     当正文吐出来，直接渲染就是页面上出现一串尖括号；
+ *   - 模型**自己续写的下一轮**（`<|im_start|>user 请写…`）——从第一个
+ *     `im_start` 起全部丢掉：那之后的内容不属于这一项；
+ *   - 空行与前后的引号/项目符号。
+ */
+function sanitizeGenerated(text: string): string {
+  return text
+    .replace(/<\|?im_start\|?>[\s\S]*$/i, ' ')
+    .replace(/<\|[^|>]*\|>/g, ' ')
+    .replace(/^[\s"'“”「」]+|[\s"'“”「」]+$/g, '')
+    .replace(/\r/g, '');
+}
+
+/** 取第一行有意义的内容（标题类槽用）。 */
+function firstMeaningfulLine(text: string): string {
+  const clean = sanitizeGenerated(text);
+  for (const line of clean.split('\n')) {
+    const value = line.replace(/^\s*(?:[-*•]|\d+[.、)])\s*/, '').trim();
+    if (value !== '' && !looksLikeInstruction(value)) return value;
+  }
+  return '';
+}
+
+/**
+ * 把模型的一整段输出切成"内容条目"。
+ *
+ * 丢掉的不是"格式不对的行"，而是**不像内容**的行：指令复述、要求说明、
+ * 只剩标点的行。宁可少一条，也不要把"请写章节名"印在页面上。
+ */
+function toListItems(text: string, count: number): string[] {
+  const items: string[] = [];
+  for (const line of sanitizeGenerated(text).split('\n')) {
+    const value = line
+      .replace(/^\s*(?:[-*•·]|\d+[.、)])\s*/, '')
+      .replace(/\*\*/g, '')
+      .trim();
+    if (value === '' || looksLikeInstruction(value)) continue;
+    if (value.length > TEXT_LIMIT) continue;
+    if (items.includes(value)) continue;
+    items.push(value);
+    if (items.length >= count) break;
+  }
+  return items;
+}
+
+/** 这一行像"模型在复述要求"而不是"内容"吗。 */
+function looksLikeInstruction(line: string): boolean {
+  return /^(?:请|写|注意|要求|格式|示例|例如|输出|不要|只能|需要)[\s:：]/.test(line) || /请写「|不要编号/.test(line);
 }
 
 /**

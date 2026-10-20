@@ -113,6 +113,9 @@ describe('演示文稿模态', () => {
       }
       assert.match(html, /role="tabpanel"/);
       assert.match(html, /aria-selected="true"/);
+      // 视觉主题是**决策层选的**，必须能在产物本身里查到，而不是只活在日志里
+      assert.match(html, /data-ms-theme="(midnight|editorial|mono|vivid)"/);
+      assert.match(html, /--sk-accent:/, '主题变量要铺到页面上');
       // 一页一张：打印规则必须在，否则导出的 PDF 会是一长条。
       assert.match(html, /@page\s*\{\s*size:\s*1280px 720px/);
       assert.match(html, /page-break-after:\s*always/);
@@ -126,6 +129,30 @@ describe('演示文稿模态', () => {
       const blueprint = detail.blueprint as { ok: boolean; sections: unknown[] };
       assert.equal(blueprint.ok, true);
       assert.equal(blueprint.sections.length, 3);
+
+      // ── 5. 决策留下的痕要出现在产物与依据里 ──────────────────────────
+      // deck.json 不只是结构：主题（视觉方向）与页序都是决策层定的。
+      const deckJson = (await (
+        await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/deck.json`)
+      ).json()) as { themeId: string; themeLabel: string; layoutSequence: string[] };
+      assert.equal(typeof deckJson.themeId, 'string');
+      assert.ok(deckJson.themeLabel.length > 0);
+      assert.deepEqual(
+        deckJson.layoutSequence,
+        pages.map((page) => page.type),
+        '产物里记的页序要与结构一致',
+      );
+
+      const events = ctx.store.get(runId)?.events ?? [];
+      const assembled = events.find((e) => e.type === 'plan_assembled');
+      assert.ok(assembled !== undefined && assembled.type === 'plan_assembled');
+      if (assembled !== undefined && assembled.type === 'plan_assembled') {
+        assert.match(
+          assembled.plan.rationale.join('\n'),
+          /视觉主题：/,
+          '主题是决策层选的，要留依据',
+        );
+      }
     } finally {
       await ctx.close();
     }

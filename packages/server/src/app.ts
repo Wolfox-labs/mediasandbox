@@ -1156,10 +1156,22 @@ export function createServer(deps: ServerDeps): CreateServerResult {
             ...(template !== undefined ? { template } : {}),
             ...(typeof body['maxBlocks'] === 'number' ? { maxBlocks: body['maxBlocks'] } : {}),
             ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
-            // 缺省是 **false**：不显式要求就不调生成层。零成本是默认值。
+            /*
+             * 文案是否走生成层。
+             *
+             * 网页默认 **false**（零成本是默认值）。**演示文稿默认 true**，
+             * 前提是这次部署配了生成层——理由很直接：确定性填充器只会写
+             * "这里展示与目标直接相关的说明，内容由确定性填充器生成"这种元文本，
+             * 放到幻灯片上是**废页**。演示文稿的价值几乎全在文案上，
+             * 默认关掉它等于默认产出废页。
+             *
+             * 显式传 `useGenerative: false` 仍然能关：想零成本对比效果时用得上。
+             */
             ...(typeof body['useGenerative'] === 'boolean'
               ? { useGenerative: body['useGenerative'] }
-              : {}),
+              : envType === 'slides' && deps.llm !== undefined
+                ? { useGenerative: true }
+                : {}),
             ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
             // 截图默认关：要求了才挂节点（与 useGenerative 同一条纪律）。
             ...(typeof body['screenshot'] === 'boolean' ? { screenshot: body['screenshot'] } : {}),
