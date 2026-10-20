@@ -255,10 +255,21 @@ const renderClosing: SlideRenderer = (block) => {
  * 再不行就整段当"大字号部分"、说明留空——总比把整句塞进 7cqw 的字里好。
  */
 function splitHeadTail(item: string): { head: string; tail: string } {
+  const looksNumeric = (value: string): boolean => /[\d%％]|(\d+(\.\d+)?\s*[xX倍])/.test(value);
   const matched = /^(.{1,20}?)\s*[|｜:：]\s*(.+)$/.exec(item);
-  if (matched !== null) return { head: matched[1]!.trim(), tail: matched[2]!.trim() };
+  if (matched !== null) {
+    const head = matched[1]!.trim();
+    const tail = matched[2]!.trim();
+    // 模型经常把顺序写反（"协作工具使用率 35%"）。数字那一段才是该放大的那一段，
+    // 所以这里按"谁像数字"决定，而不是按它写在前面还是后面。
+    return looksNumeric(head) || !looksNumeric(tail) ? { head, tail } : { head: tail, tail: head };
+  }
   const parts = item.trim().split(/\s+/);
-  if (parts.length > 1) return { head: parts[0]!, tail: parts.slice(1).join(' ') };
+  if (parts.length > 1) {
+    const first = parts[0]!;
+    const rest = parts.slice(1).join(' ');
+    return looksNumeric(first) || !looksNumeric(rest) ? { head: first, tail: rest } : { head: rest, tail: first };
+  }
   return { head: item.trim(), tail: '' };
 }
 

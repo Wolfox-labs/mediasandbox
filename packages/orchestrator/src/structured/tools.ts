@@ -276,6 +276,9 @@ function sanitizeGenerated(text: string): string {
   return text
     .replace(/<\|?im_start\|?>[\s\S]*$/i, ' ')
     .replace(/<\|[^|>]*\|>/g, ' ')
+    // 模型会把 slot 说明当内容抄进来（"底下一行小字：…"、"图注：…"）。
+    // 这是**元话语**，印在页面上等于把提示词泄漏给观众。
+    .replace(/^[\s"'“”「」]*(?:底下一行小字|图注|备注|说明|标题|正文|副标题|眉标|页脚)[:：]\s*/i, '')
     .replace(/^[\s"'“”「」]+|[\s"'“”「」]+$/g, '')
     .replace(/\r/g, '');
 }
