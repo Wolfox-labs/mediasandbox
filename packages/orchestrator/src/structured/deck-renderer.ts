@@ -794,6 +794,34 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .slide[data-side="right"] .sk-bullets__title{text-align:center}
 .slide[data-side="right"] .sk-stats__grid{gap:3.4cqw}
 .slide[data-side="right"] .sk-stats__item{border-top-width:.42cqw}
+
+/* 数据页的**第二种构图**：从"并排三列"变成"竖向排行"。
+ *
+ * 同一页信息、两种读法：并排适合快速比较三个数，竖向排行适合"名次"语义
+ * （第一名压在最后一行时最重）。这是纯 CSS 改结构呈现，不动 DOM，
+ * 所以不需要决策层为它多问一次，也不会让产物变得不可复现。
+ */
+.slide[data-side="right"] .sk-stats__grid{grid-template-columns:1fr;gap:1.1cqw}
+.slide[data-side="right"] .sk-stats__item{
+  display:flex;align-items:baseline;gap:2.2cqw;
+  border-top:0;border-bottom:1px solid var(--sk-surface,rgba(255,255,255,.12));
+  padding:.9cqw 0;
+}
+.slide[data-side="right"] .sk-stats__value{font-size:4.2cqw;min-width:7cqw}
+.slide[data-side="right"] .sk-stats__label{margin-top:0}
+
+/* 时间线的**第二种构图**：从"横向一条线"变成"竖向台阶"。
+ * 横向读的是节奏，竖向读的是先后与累积——同一组节点，两种叙事。
+ */
+.slide[data-side="right"] .sk-timeline__track{flex-direction:column;gap:1.3cqw}
+.slide[data-side="right"] .sk-timeline__track::before{
+  left:.62cqw;top:.6cqw;bottom:.6cqw;right:auto;width:1px;height:auto;
+}
+.slide[data-side="right"] .sk-timeline__node{
+  display:grid;grid-template-columns:.9cqw 8cqw 1fr;align-items:center;gap:1.6cqw;padding-right:0;
+}
+.slide[data-side="right"] .sk-timeline__dot{margin-bottom:0}
+.slide[data-side="right"] .sk-timeline__what{margin-top:0}
 .slide[data-side="right"] .sk-agenda__list{grid-template-columns:1fr}
 
 /* 打印 / 导出 PDF：一页一张 */
