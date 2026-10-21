@@ -778,6 +778,24 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .sk-chart__label{fill:var(--sk-muted,#8b93a1);font-size:13px}
 .sk-chart__note{margin:0;font-size:var(--fs-caption,1.7cqw);color:var(--sk-muted,#8b93a1)}
 
+/* ── 构图交替：让相邻两页的"呼吸"不一样 ──────────────────────────────────
+ *
+ * 只有版式一个维度时，连续两页信息页看起来仍是"同一张图换个字"。
+ * 这里按页序奇偶做**构图交替**（纯 CSS，不改结构）：
+ *
+ *   left  标题与内容靠左、强调线在左 —— 常规阅读节奏
+ *   right 标题居中、强调线在底 —— 换气口，读者会感到"翻了一页"
+ *
+ * 为什么按页序而不是让模型选：页序已由决策模型决定，奇偶只是把它的
+ * 选择**翻译成构图节奏**，不需要多一次决策往返，也不会让同一份结构
+ * 重渲染出两种样子。
+ */
+.slide[data-side="right"] .sk-bullets__head{border-left:0;border-bottom:.35cqw solid var(--sk-accent,#3b6df5);padding-left:0;padding-bottom:1.2cqw;text-align:center;align-items:center}
+.slide[data-side="right"] .sk-bullets__title{text-align:center}
+.slide[data-side="right"] .sk-stats__grid{gap:3.4cqw}
+.slide[data-side="right"] .sk-stats__item{border-top-width:.42cqw}
+.slide[data-side="right"] .sk-agenda__list{grid-template-columns:1fr}
+
 /* 打印 / 导出 PDF：一页一张 */
 @media print{
   @page{size:1280px 720px;margin:0}
@@ -881,7 +899,7 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
       return (
         `<section class="slide" id="deck-s${n}" role="tabpanel" aria-labelledby="deck-t${n}" ` +
         `data-ms-panel="deck:${n}" data-ms-layout="${escapeHtml(block.type)}" ` +
-        `data-tone="${toneForLayout(block.type)}"${i === 0 ? '' : ' hidden'}>` +
+        `data-tone="${toneForLayout(block.type)}" data-side="${i % 2 === 0 ? 'left' : 'right'}"${i === 0 ? '' : ' hidden'}>` +
         `<div class="slide__frame">${renderSlide(block)}` +
         `<span class="deck__anno" aria-hidden="true">${n} · ${escapeHtml(block.type)}</span>` +
         `<span class="deck__meta" aria-hidden="true">${n} / ${slides.length}</span>` +
