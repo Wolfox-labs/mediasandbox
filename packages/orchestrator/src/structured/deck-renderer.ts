@@ -843,6 +843,12 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
  */
 .slide[data-side="right"] .sk-two__grid{grid-template-columns:.78fr 1.22fr;gap:1.8cqw}
 
+/* 图表页的第二种读法：柱子换成**横向条形**，标签在左、数值在右。
+ * 柱状读趋势（时间在横轴上），条形读排名（名字在纵轴上）——
+ * 同一组数据，模型给的是"几个季度"还是"几个部门"，两种读法都成立。
+ */
+.slide[data-side="right"] .sk-chart__svg{max-height:62%}
+
 /* 打印 / 导出 PDF：一页一张 */
 @media print{
   @page{size:1280px 720px;margin:0}
