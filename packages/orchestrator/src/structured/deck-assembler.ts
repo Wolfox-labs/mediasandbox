@@ -31,8 +31,11 @@ import { describeAlignment, planBlueprint, type BlueprintOutcome } from '../plan
 import { createSlideRegistry } from './deck-spec.js';
 import { DECK_TOOLS } from './deck-tools.js';
 import {
+  DECK_COMPOSITION_QUESTION,
   DECK_THEME_QUESTION,
+  DEFAULT_DECK_COMPOSITION,
   DEFAULT_DECK_THEME_ID,
+  deckCompositionCriteria,
   deckThemeCriteria,
   resolveDeckTheme,
   type DeckTheme,
@@ -96,7 +99,8 @@ export async function assembleDeck(args: {
   // 替它答的结果就是所有文稿长得一模一样。
   //
   // 代价只有一次 `choice`，而它换来的差别是用户一眼能看出来的。
-  const theme = await decideTheme(request, decision, rationale);
+  const visual = await decideTheme(request, decision, rationale);
+  const theme = visual.theme;
 
   // ── 1. 定稿页序：给定的照用，没给才逐页问决策模型 ──────────────────────
   const planner = new StructurePlanner(layouts, decision);
@@ -172,6 +176,7 @@ export async function assembleDeck(args: {
       // 主题作为**字面量**传给渲染节点：它是这一次决策的结果，
       // 不该在执行期再问一次（那样同一份计划可能渲染成两种样子）。
       themeId: { kind: 'literal', value: theme.id },
+      composition: { kind: 'literal', value: visual.composition },
     },
     dependsOn: [...pageNodeIds],
     retryable: false,
@@ -253,8 +258,9 @@ async function decideTheme(
   request: AssembleRequest,
   decision: DecisionClient,
   rationale: string[],
-): Promise<DeckTheme> {
+): Promise<{ theme: DeckTheme; composition: 'parallel' | 'ranked' }> {
   const fallback = resolveDeckTheme(DEFAULT_DECK_THEME_ID);
+  const fallbackComposition: 'parallel' | 'ranked' = DEFAULT_DECK_COMPOSITION;
   try {
     const decided = await decision.decide(
       {
@@ -273,13 +279,39 @@ async function decideTheme(
             '品牌故事要读得下去，内部汇报要信息密度，对外宣讲要抓眼球。',
           criteria: deckThemeCriteria(),
         },
+        // 与主题同批问：两者都是"整体气质"层面的决定，同一次 prefill 里权衡。
+        [DECK_COMPOSITION_QUESTION]: {
+          type: 'choice',
+          instructions:
+            '整份文稿的节奏要多"齐"？正式汇报通常整齐划一，' +
+            '对外宣讲或创意提案更适合一页重一页轻。',
+          criteria: deckCompositionCriteria(),
+        },
       },
       request.decisionTimeoutMs !== undefined ? { timeoutMs: request.decisionTimeoutMs } : {},
     );
+
+    // 构图：与主题同批拿到，弃权/没答都按默认。
+    let composition: 'parallel' | 'ranked' = fallbackComposition;
+    const compAnswer = decided.answers[DECK_COMPOSITION_QUESTION];
+    if (compAnswer !== undefined && compAnswer.type === 'choice') {
+      const pickedComp =
+        compAnswer.value ?? argmaxDeterministic(Object.keys(compAnswer.probabilities), compAnswer.probabilities);
+      composition = pickedComp === 'parallel' ? 'parallel' : 'ranked';
+      rationale.push(
+        `构图节奏：${composition === 'parallel' ? '统一平静' : '有节奏起伏'}` +
+          (compAnswer.value === null ? '（弃权，按概率回落）' : ''),
+      );
+    } else {
+      rationale.push(
+        `构图节奏：决策层未回答，回落「${fallbackComposition === 'parallel' ? '统一平静' : '有节奏起伏'}」`,
+      );
+    }
+
     const answer = decided.answers[DECK_THEME_QUESTION];
     if (answer === undefined || answer.type !== 'choice') {
       rationale.push(`视觉主题：决策层未回答，回落默认「${fallback.label}」`);
-      return fallback;
+      return { theme: fallback, composition };
     }
     const picked = answer.value ?? argmaxDeterministic(Object.keys(answer.probabilities), answer.probabilities);
     const theme = resolveDeckTheme(picked ?? undefined);
@@ -287,12 +319,12 @@ async function decideTheme(
       `视觉主题：${theme.label}` +
         (answer.value === null ? '（决策层弃权，按概率回落）' : `（${theme.description.slice(0, 24)}…）`),
     );
-    return theme;
+    return { theme, composition };
   } catch (error) {
     rationale.push(
       `视觉主题：决策层调用失败（${error instanceof Error ? error.message : String(error)}），回落默认「${fallback.label}」`,
     );
-    return fallback;
+    return { theme: fallback, composition: fallbackComposition };
   }
 }
 

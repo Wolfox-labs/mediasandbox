@@ -138,6 +138,28 @@ export const DECK_THEMES: readonly DeckTheme[] = [
 /** 决策层用的问句 id。集中定义，避免散落的字符串。 */
 export const DECK_THEME_QUESTION = 'deck_theme';
 
+/**
+ * 构图的问句 id 与候选。
+ *
+ * 构图决定"整份文稿的节奏"：
+ *   - `parallel` 每页同一套排法（平静、像正式报告）
+ *   - `ranked`   偶数页换成另一种排法（排行 / 编号 / 主从），翻页有轻重
+ *
+ * 它与主题**同批问**：两者都是"整体气质"层面的决定，一次决策往返问两个
+ * 问题，比分成两批省一次 prefill，而且它们本来就该一起权衡。
+ */
+export const DECK_COMPOSITION_QUESTION = 'deck_composition';
+
+export function deckCompositionCriteria(): Record<string, string> {
+  return {
+    parallel: '统一平静：每页用同一种排法，读起来稳定，像一份正式报告',
+    ranked: '有节奏起伏：偶数页换成排行 / 编号 / 主从，翻页时轻重交替',
+  };
+}
+
+/** 弃权时用 `ranked`：有起伏的版本信息量更大，也更不像模板。 */
+export const DEFAULT_DECK_COMPOSITION: 'parallel' | 'ranked' = 'ranked';
+
 /** 默认主题：决策层弃权时用它，确定且可复现。 */
 export const DEFAULT_DECK_THEME_ID = 'midnight';
 

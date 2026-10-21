@@ -55,6 +55,15 @@ export interface RenderDeckOptions {
    * 不该让整份文稿渲染不出来。
    */
   readonly themeId?: string | undefined;
+  /**
+   * 整份文稿的构图节奏（决策层选的）。
+   *
+   *   `parallel` 每页同一套排法（平静、像正式报告）
+   *   `ranked`   偶数页换一种排法（排行 / 编号 / 主从），翻页有轻重
+   *
+   * 省略时按 `ranked` 处理：信息量更大的那一种。
+   */
+  readonly composition?: 'parallel' | 'ranked' | undefined;
 }
 
 // ── slot 取值 ───────────────────────────────────────────────────────────────
@@ -934,6 +943,8 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
   // 主题在**决策层**定（`deck_theme` 这一问），这里只负责把它的变量铺到页面上。
   // `data-ms-theme` 让"这份文稿是哪种气质"在产物本身里可查，而不是只活在日志里。
   const theme = resolveDeckTheme(options.themeId);
+  // 构图节奏也是决策层定的：`parallel` 每页同一套排法，`ranked` 偶数页换一种。
+  const composition = options.composition ?? 'ranked';
 
   const dots = slides
     .map((_, i) => {
@@ -952,7 +963,7 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
       return (
         `<section class="slide" id="deck-s${n}" role="tabpanel" aria-labelledby="deck-t${n}" ` +
         `data-ms-panel="deck:${n}" data-ms-layout="${escapeHtml(block.type)}" ` +
-        `data-tone="${toneForLayout(block.type)}" data-side="${i % 2 === 0 ? 'left' : 'right'}"${i === 0 ? '' : ' hidden'}>` +
+        `data-tone="${toneForLayout(block.type)}" data-side="${composition === 'ranked' && i % 2 === 1 ? 'right' : 'left'}"${i === 0 ? '' : ' hidden'}>` +
         `<div class="slide__frame">${renderSlide(block)}` +
         `<span class="deck__anno" aria-hidden="true">${n} · ${escapeHtml(block.type)}</span>` +
         `<span class="deck__meta" aria-hidden="true">${n} / ${slides.length}</span>` +

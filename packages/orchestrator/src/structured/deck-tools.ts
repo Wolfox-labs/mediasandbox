@@ -181,6 +181,12 @@ export function createAssembleDeckTool(layouts: BlockRegistry): ToolRegistration
           required: false,
           description: '视觉主题 id（决策模型选的）。未知 id 回落到默认主题',
         },
+        {
+          name: 'composition',
+          type: 'text',
+          required: false,
+          description: '构图节奏：parallel（统一）| ranked（偶数页换一种排法）',
+        },
       ],
       outputs: [
         { name: 'html', type: 'text', required: true, description: '完整文稿 HTML' },
@@ -236,7 +242,16 @@ export function createAssembleDeckTool(layouts: BlockRegistry): ToolRegistration
           ? runtime.inputs['themeId']
           : undefined;
 
-      const html = renderDeck(deck, { title, ...(themeId !== undefined ? { themeId } : {}) });
+      // 构图节奏（决策层选的）。只认这两个值，其它按"省略"处理。
+      const compositionRaw = runtime.inputs['composition'];
+      const composition =
+        compositionRaw === 'parallel' || compositionRaw === 'ranked' ? compositionRaw : undefined;
+
+      const html = renderDeck(deck, {
+        title,
+        ...(themeId !== undefined ? { themeId } : {}),
+        ...(composition !== undefined ? { composition } : {}),
+      });
       const file = 'artifacts/deck.html';
       await runtime.sandbox.writeFile(runtime.handle, file, html);
 
@@ -257,6 +272,7 @@ export function createAssembleDeckTool(layouts: BlockRegistry): ToolRegistration
             ...deck,
             themeId: resolvedTheme.id,
             themeLabel: resolvedTheme.label,
+            composition: composition ?? 'ranked',
             layoutSequence: filled.map((page) => page.type),
           },
           null,
