@@ -368,6 +368,54 @@ function toneForLayout(type: string): 'plain' | 'tinted' | 'accent' {
 }
 
 /** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 */
+/**
+ * 图表页：把「标签|数值」画成**内联 SVG 柱状图**。
+ *
+ * 为什么是 SVG：产物必须自包含、断网可看；SVG 是文本、打印成 PDF 仍是矢量，
+ * 也不需要任何外部库。读不出数字的条目直接丢弃并**不画空柱**——
+ * 画一根 0 高度的柱子比不画更误导。
+ */
+const renderChart: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const note = textOf(block, 'note');
+  const rows = listOf(block, 'bars')
+    .map((raw) => {
+      const { head, tail } = splitHeadTail(raw);
+      const label = /[\d%]/.test(head) ? tail : head;
+      const numRaw = /[\d%]/.test(head) ? head : tail;
+      const value = Number.parseFloat(numRaw.replace(/[^\d.]/g, ''));
+      return { label: label === '' ? raw : label, value: Number.isFinite(value) ? value : Number.NaN };
+    })
+    .filter((row) => Number.isFinite(row.value) && row.value > 0);
+  if (rows.length === 0) {
+    return `<div class="sk-chart"><h2 class="sk-chart__title">${inline(heading)}</h2></div>`;
+  }
+  const max = Math.max(...rows.map((row) => row.value));
+  const W = 1000;
+  const H = 320;
+  const gap = 26;
+  const barW = (W - gap * (rows.length - 1)) / rows.length;
+  const bars = rows
+    .map((row, i) => {
+      const h = Math.max(6, (row.value / max) * (H - 44));
+      const x = i * (barW + gap);
+      const y = H - h - 30;
+      return (
+        `<rect class="sk-chart__bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="6" />` +
+        `<text class="sk-chart__val" x="${(x + barW / 2).toFixed(1)}" y="${(y - 10).toFixed(1)}" text-anchor="middle">${inline(String(row.value))}</text>` +
+        `<text class="sk-chart__label" x="${(x + barW / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle">${inline(row.label)}</text>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-chart">` +
+    `<h2 class="sk-chart__title">${inline(heading)}</h2>` +
+    `<svg class="sk-chart__svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(heading)}">${bars}</svg>` +
+    (note === '' ? '' : `<p class="sk-chart__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
 const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   cover: renderCover,
   agenda: renderAgenda,
@@ -381,6 +429,7 @@ const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   timeline: renderTimeline,
   manifesto: renderManifesto,
   'image-text': renderImageText,
+  chart: renderChart,
 };
 
 /**
@@ -718,6 +767,16 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .sk-cover__subtitle,.sk-bullets__lede,.sk-section__note,.sk-closing__note{font-size:calc(var(--fs-body) * 1.04)}
 .sk-stats__label,.sk-timeline__what,.sk-quote__source,.sk-manifesto__note,
 .sk-bullets__item:nth-child(n+6),.sk-agenda__no{font-size:var(--fs-caption)}
+
+/* 图表页：柱子用主题强调色，数值与标签用统一字号档 */
+.sk-chart{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:2.6cqw}
+.sk-chart__title{margin:0;font-size:var(--fs-h2,2.8cqw);font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-chart__svg{width:100%;height:auto;max-height:56%;overflow:visible}
+.sk-chart__bar{fill:var(--sk-accent,#3b6df5);opacity:.92}
+.sk-chart__bar:nth-child(even){opacity:.62}
+.sk-chart__val{fill:var(--sk-fg,#fff);font-size:15px;font-weight:700}
+.sk-chart__label{fill:var(--sk-muted,#8b93a1);font-size:13px}
+.sk-chart__note{margin:0;font-size:var(--fs-caption,1.7cqw);color:var(--sk-muted,#8b93a1)}
 
 /* 打印 / 导出 PDF：一页一张 */
 @media print{

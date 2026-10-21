@@ -230,6 +230,27 @@ export const BUILTIN_SLIDE_LAYOUTS: readonly BlockSpec[] = [
     repeatable: true,
     costHint: 'medium',
   },
+  {
+    id: 'chart',
+    label: '图表页',
+    description:
+      '把数据画成柱状图：内联 SVG、自包含、不引用外部资源。适合「几个季度对比」「几项指标差距」这类要**看出趋势**的内容。条目写法：标签|数值，例如「Q1|32」「Q2|45」，数值可带 % 或单位',
+    group: 'deck',
+    slots: [
+      { name: 'heading', type: 'title', required: true, description: '这一页的标题' },
+      {
+        name: 'bars',
+        type: 'list-text',
+        required: true,
+        description: '数据条目：标签|数值（例如 Q1|32）',
+        countRange: { min: 3, max: 6 },
+      },
+      { name: 'note', type: 'text', required: false, description: '图下一行小字：口径或来源' },
+    ],
+    canLead: true,
+    repeatable: true,
+    costHint: 'fast',
+  },
 ];
 
 /**

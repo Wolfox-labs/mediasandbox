@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 演示用决策层：**按目标文本做关键词判断**，让演示链路自洽。
  *
  * ## 为什么需要它
@@ -90,6 +90,7 @@ const LAYOUT_ORDER: readonly string[] = [
   'timeline',
   'manifesto',
   'image-text',
+  'chart',
   'closing',
 ];
 
