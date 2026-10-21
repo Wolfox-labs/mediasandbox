@@ -116,6 +116,15 @@ describe('演示文稿模态', () => {
       // 视觉主题是**决策层选的**，必须能在产物本身里查到，而不是只活在日志里
       assert.match(html, /data-ms-theme="(midnight|editorial|mono|vivid)"/);
       assert.match(html, /--sk-accent:/, '主题变量要铺到页面上');
+      // 调性与构图都要真的进产物：这两样是"不像模板"的载体，
+      // 退化后肉眼只会觉得"又变单调了"，事后很难反查。
+      assert.match(html, /data-tone="(accent|tinted|plain)"/);
+      const tones = new Set([...html.matchAll(/data-tone="([a-z]+)"/g)].map((m) => m[1]));
+      assert.ok(tones.size >= 2, `文稿里至少要有两种调性，实际只有 ${[...tones].join(',')}`);
+      const sides = new Set([...html.matchAll(/data-side="([a-z]+)"/g)].map((m) => m[1]));
+      assert.deepEqual([...sides].sort(), ['left', 'right'], '构图要左右交替');
+      // 字号只允许来自六个统一档位：散落的 cqw 字号正是"字忽大忽小"的来源。
+      assert.match(html, /--fs-(display|h1|h2|body|caption|metric):/);
       // 一页一张：打印规则必须在，否则导出的 PDF 会是一长条。
       assert.match(html, /@page\s*\{\s*size:\s*1280px 720px/);
       assert.match(html, /page-break-after:\s*always/);
