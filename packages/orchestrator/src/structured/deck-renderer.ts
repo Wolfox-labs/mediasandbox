@@ -336,7 +336,7 @@ const renderImageText: SlideRenderer = (block) => {
     .join('');
   const media =
     image === null
-      ? `<div class="sk-split__placeholder">（这一页没有配图）</div>`
+      ? `<div class="sk-split__media-art" aria-hidden="true"></div>`
       : `<img src="${escapeHtml(image.ref)}" alt="${escapeHtml(image.alt)}" />`;
   return (
     `<div class="sk-split">` +
@@ -348,7 +348,27 @@ const renderImageText: SlideRenderer = (block) => {
   );
 };
 
-/** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 */const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
+/** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 *//**
+ * 每页的视觉调性。
+ *
+ * 为什么需要它：六页全是同一块深蓝底，看三页就疲劳——那正是"画面单一"的
+ * 直接来源。调性只做一件事：让**底色与装饰的强度**在页与页之间有起伏，
+ * 而不增加任何新结构：
+ *
+ *   - `accent` 强调页（封面/章节/主张/引用/结尾）：底色带主题色的斜向渐变
+ *   - `tinted` 信息页（数据/时间线/图文）：底部强调线加粗，装饰更实
+ *   - `plain`  阅读页（目录/要点）：装饰最弱，留给文字
+ *
+ * 规律是**由版式决定的**，不是随机：同一份结构重渲染永远得到同一个样子。
+ */
+function toneForLayout(type: string): 'plain' | 'tinted' | 'accent' {
+  if (['cover', 'section', 'manifesto', 'quote-slide', 'closing'].includes(type)) return 'accent';
+  if (['stats', 'timeline', 'image-text'].includes(type)) return 'tinted';
+  return 'plain';
+}
+
+/** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 */
+const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   cover: renderCover,
   agenda: renderAgenda,
   section: renderSection,
@@ -617,6 +637,25 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .sk-split__media{position:relative;overflow:hidden;background:var(--sk-surface,#eef1f6)}
 .sk-split__media img{width:100%;height:100%;object-fit:cover;display:block}
 .sk-split__placeholder{display:flex;align-items:center;justify-content:center;height:100%;font-size:1.6cqw;color:var(--sk-muted,#9aa3b2)}
+/*
+ * 没有配图时的左半页：**用几何图形画抽象底纹，不写字**。
+ *
+ * 早先这里画的是"占位框 + 目标文字"，目标被截断成
+ * "一家做企业协作软件的公司做季…" 印在半页白板上——那看起来像渲染坏了。
+ * 抽象底纹至少是一整页完整的视觉，也不假装自己有内容。
+ */
+.sk-split__media-art{
+  position:absolute;inset:0;
+  background:
+    radial-gradient(circle at 26% 26%,var(--sk-accent,#3b6df5) 0 11%,transparent 12%),
+    radial-gradient(circle at 66% 60%,var(--sk-accent,#3b6df5) 0 26%,transparent 27%),
+    radial-gradient(circle at 40% 82%,var(--sk-accent,#3b6df5) 0 7%,transparent 8%),
+    linear-gradient(135deg,var(--sk-surface,#eef1f6),transparent 72%);
+  opacity:.55;
+}
+.sk-split__media-art::after{
+  content:"";position:absolute;inset:2.6cqw;border:1px solid var(--sk-accent,#3b6df5);opacity:.3;
+}
 .sk-split__body{display:flex;flex-direction:column;justify-content:center;gap:1.8cqw;padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,7cqw)}
 .sk-split__title{margin:0;font-size:3.1cqw;line-height:1.22;font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
 .sk-split__items{margin:0;padding-left:2cqw;display:flex;flex-direction:column;gap:1.15cqw}
@@ -647,6 +686,38 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
   opacity:.55;
 }
 .slide__frame > *{position:absolute;z-index:1}
+
+/* ── 统一字号刻度 + 调性起伏 ────────────────────────────────────────────
+ *
+ * 两条都是针对"字忽大忽小、六页一个色"的实测问题：
+ *
+ * 1. **字号只从六个档里取**（display / h1 / h2 / body / caption / metric）。
+ *    之前每个版式自己写一个 cqw，条目页 2.3、数据页说明 1.75、时间线 1.85……
+ *    同样是"说明文字"，在相邻两页差了 30%，翻页时肉眼就觉得字在跳。
+ * 2. **调性按版式起伏**：强调页底色带主题色斜向渐变，信息页底线更实，
+ *    阅读页装饰最弱。规律由版式决定，所以重渲染永远是同一个样子。
+ */
+:where(.slide__frame){
+  --fs-display:5.2cqw;--fs-h1:4cqw;--fs-h2:2.8cqw;--fs-body:2.05cqw;--fs-caption:1.7cqw;--fs-metric:7.2cqw;
+}
+.slide[data-tone="accent"] .slide__frame{
+  background:linear-gradient(135deg,color-mix(in srgb,var(--sk-accent,#3b6df5) 34%,var(--sk-bg,#10151f)) 0%,
+    var(--sk-bg,#10151f) 62%);
+}
+.slide[data-tone="accent"] .slide__frame::before{opacity:.26}
+.slide[data-tone="tinted"] .slide__frame::after{height:.5cqw;opacity:.95}
+.slide[data-tone="plain"] .slide__frame::before{opacity:.08}
+
+.sk-manifesto__line{font-size:var(--fs-display)}
+.sk-cover__title,.sk-section__heading,.sk-closing__headline{font-size:var(--fs-h1)}
+.sk-bullets__title,.sk-agenda__title,.sk-two__title,.sk-stats__title,.sk-timeline__title,
+.sk-quote__body,.sk-image__title,.sk-split__title{font-size:var(--fs-h2)}
+.sk-stats__value{font-size:var(--fs-metric)}
+.sk-two__col h3,.sk-timeline__when{font-size:calc(var(--fs-body) * 1.18)}
+.sk-bullets__item,.sk-agenda__item,.sk-two__col li,.sk-split__items li{font-size:var(--fs-body)}
+.sk-cover__subtitle,.sk-bullets__lede,.sk-section__note,.sk-closing__note{font-size:calc(var(--fs-body) * 1.04)}
+.sk-stats__label,.sk-timeline__what,.sk-quote__source,.sk-manifesto__note,
+.sk-bullets__item:nth-child(n+6),.sk-agenda__no{font-size:var(--fs-caption)}
 
 /* 打印 / 导出 PDF：一页一张 */
 @media print{
@@ -750,7 +821,8 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
       const n = i + 1;
       return (
         `<section class="slide" id="deck-s${n}" role="tabpanel" aria-labelledby="deck-t${n}" ` +
-        `data-ms-panel="deck:${n}" data-ms-layout="${escapeHtml(block.type)}"${i === 0 ? '' : ' hidden'}>` +
+        `data-ms-panel="deck:${n}" data-ms-layout="${escapeHtml(block.type)}" ` +
+        `data-tone="${toneForLayout(block.type)}"${i === 0 ? '' : ' hidden'}>` +
         `<div class="slide__frame">${renderSlide(block)}` +
         `<span class="deck__anno" aria-hidden="true">${n} · ${escapeHtml(block.type)}</span>` +
         `<span class="deck__meta" aria-hidden="true">${n} / ${slides.length}</span>` +
