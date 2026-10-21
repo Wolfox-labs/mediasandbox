@@ -89,6 +89,13 @@ export function createFillSlideTool(layouts: BlockRegistry): ToolRegistration {
           required: false,
           description: '是否用生成层写文案。false 时全部确定性填充，零成本',
         },
+        {
+          name: 'written',
+          type: 'text',
+          required: false,
+          description:
+            '一次执笔写好的该页文案（JSON：slot 名 → 文本/字符串数组）。给了就优先用，没覆盖的 slot 才逐 slot 生成',
+        },
       ],
       outputs: [
         { name: 'slide', type: 'text', required: true, description: '填好的页 JSON' },
@@ -104,6 +111,23 @@ export function createFillSlideTool(layouts: BlockRegistry): ToolRegistration {
       const index =
         typeof indexRaw === 'number' && Number.isFinite(indexRaw) ? Math.round(indexRaw) : 0;
       const useGenerative = boolInput(runtime.inputs, 'useGenerative', false);
+
+      // 一次执笔的结果（可选）：整页文案已由上层写好，这里只负责放到位。
+      // 解析失败要明确报错，而不是静默当没有——那会让"为什么没用执笔文案"
+      // 变成一个只能翻日志才查得出来的问题。
+      const writtenRaw = runtime.inputs['written'];
+      let written: Readonly<Record<string, unknown>> | undefined;
+      if (typeof writtenRaw === 'string' && writtenRaw.trim() !== '') {
+        const parsed = parseJson<unknown>(writtenRaw, DECK_TOOLS.fillSlide, '执笔文案');
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new ToolError(
+            `工具 ${DECK_TOOLS.fillSlide} 的执笔文案必须是 JSON 对象（slot 名 → 文本/字符串数组）`,
+            'EXECUTION_FAILED',
+            DECK_TOOLS.fillSlide,
+          );
+        }
+        written = parsed as Record<string, unknown>;
+      }
 
       const slide = parseJson<BlockInstance>(slideJson, DECK_TOOLS.fillSlide, '页结构');
       if (!layouts.has(slide.type)) {
@@ -135,7 +159,10 @@ export function createFillSlideTool(layouts: BlockRegistry): ToolRegistration {
         block: slide,
         goal,
         brand: brand === '' ? deriveBrand(goal) : brand,
-        options: generate === undefined ? {} : { generate },
+        options: {
+          ...(generate !== undefined ? { generate } : {}),
+          ...(written !== undefined ? { written } : {}),
+        },
         index,
         counts,
       });
@@ -154,7 +181,7 @@ export function createFillSlideTool(layouts: BlockRegistry): ToolRegistration {
         artifacts: [],
         summary:
           `填充第 ${index + 1} 页(${slide.type})，${Object.keys(filled.block.slots).length} 个 slot，` +
-          `${filled.generativeCalls} 次生成调用`,
+          `执笔 ${filled.writtenSlots.length} 个 / 生成调用 ${filled.generativeCalls} 次`,
       };
     },
   };

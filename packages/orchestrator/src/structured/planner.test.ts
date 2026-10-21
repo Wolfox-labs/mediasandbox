@@ -966,6 +966,23 @@ describe('结构规划器：slot_source（每个 slot 由谁实现）', () => {
     assert.equal(plans['media'], undefined);
   });
 
+  it('一次执笔模式不问 slot_source：谁写不再由决策层决定', async () => {
+    const decision = picker(['hero']);
+    const planner = new StructurePlanner(createBlockRegistry(), decision);
+    const result = await planner.plan({
+      ...REQUEST,
+      candidateBlockIds: CANDS,
+      useGenerative: true,
+      askSlotSource: false,
+    });
+
+    assert.ok(
+      decision.batches.every((ids) => !ids.some((id) => id.startsWith('slot_source:'))),
+      '一次执笔时不该再逐 slot 问"由谁写"',
+    );
+    assert.equal(result.page.blocks[0]?.slotPlans, undefined, '不问就不该写 slotPlans');
+  });
+
   it('弃权时回落到确定性——零成本是默认值', async () => {
     const decision = new ScriptedDecision((id, question) => {
       if (id === STRUCTURE_QUESTIONS.nextBlock && question.type === 'choice') {

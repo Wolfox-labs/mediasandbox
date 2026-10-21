@@ -40,7 +40,8 @@ import {
   resolveDeckTheme,
   type DeckTheme,
 } from './deck-theme.js';
-import { normalizePageSpec, validatePageSpec, type PageSpec } from './page-spec.js';
+import { normalizePageSpec, validatePageSpec, type BlockInstance, type PageSpec } from './page-spec.js';
+import { writeDeck, type DeckWriteOutcome } from './deck-write.js';
 import { StructurePlanner, type PlanStructureResult } from './planner.js';
 import type { BlockRegistry, BlockSpec } from './block-spec.js';
 import type { AssembleRequest, AssembleResult } from '../plan/assembler.js';
@@ -115,6 +116,10 @@ export async function assembleDeck(args: {
           maxBlocks: request.maxBlocks ?? 12,
           candidateBlockIds: resolveCandidates(request.candidateBlockIds, layouts),
           ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
+          // 演示文稿的正文是**一次执笔**：不再逐 slot 问"这一格由谁写"。
+          // 那一问属于"谁写"，而决策模型只该做结构选择（见 docs/执笔与决策的分工.md）。
+          // 不问也意味着填充时没有 slotPlans，所有可写 slot 都交给执笔/兜底。
+          askSlotSource: false,
           ...(request.template !== undefined ? { template: request.template } : {}),
           ...(blueprint !== undefined && blueprint.ok ? { blueprint: blueprint.blueprint } : {}),
           ...(request.context.constraints !== undefined
@@ -126,6 +131,12 @@ export async function assembleDeck(args: {
         });
 
   const deck = planned.page;
+  // ── 1.5 一次执笔：整份文稿的文案一口气写完 ─────────────────────────────
+  //
+  // 放在页序定稿之后、建节点之前：只有这时才知道每页用什么版式、每个 slot
+  // 要几项。写好的文案作为**字面量**进入各页的 fill-slide 节点——它是这一次
+  // 执笔的结果，不该在执行期再问一遍（否则同一份计划会写出两种文案）。
+  const written = await resolveWrittenDeck(request, deck, theme, blueprint, layouts, rationale);
   rationale.push(...planned.rationale);
   if (blueprint !== undefined && blueprint.ok) {
     rationale.push(describeAlignment(blueprint.blueprint, deck.blocks.length).detail);
@@ -141,6 +152,11 @@ export async function assembleDeck(args: {
   for (const [index, page] of deck.blocks.entries()) {
     const id = nodeId(cursor, DECK_TOOLS.fillSlide);
     pageNodeIds.push(id);
+    const writtenPage = written?.ok === true ? written.deck.pages[index] : undefined;
+    const writtenJson =
+      writtenPage !== undefined && Object.keys(writtenPage.slots).length > 0
+        ? JSON.stringify(writtenPage.slots)
+        : undefined;
     nodes.push({
       id,
       toolId: DECK_TOOLS.fillSlide,
@@ -151,6 +167,10 @@ export async function assembleDeck(args: {
         brand: { kind: 'literal', value: request.brand ?? '' },
         index: { kind: 'literal', value: index },
         useGenerative: { kind: 'literal', value: request.useGenerative === true },
+        // 执笔写好的该页文案。缺省时 fill-slide 会回落到逐 slot 生成。
+        ...(writtenJson !== undefined
+          ? { written: { kind: 'literal', value: writtenJson } }
+          : {}),
       },
       dependsOn: [],
       retryable: true,
@@ -226,6 +246,19 @@ export async function assembleDeck(args: {
       steps: planned.steps,
       usage: planned.usage,
       decisionCalls: planned.decisionCalls,
+      ...(written !== undefined
+        ? {
+            copy: written.ok
+              ? {
+                  mode: 'one-shot',
+                  pages: written.deck.pages.filter((page) => Object.keys(page.slots).length > 0)
+                    .length,
+                  model: written.deck.model,
+                  latencyMs: written.deck.latencyMs,
+                }
+              : { mode: 'fallback', detail: written.detail },
+          }
+        : {}),
       ...(blueprint !== undefined
         ? {
             blueprint: blueprint.ok
@@ -243,6 +276,70 @@ export async function assembleDeck(args: {
     structure: { page: deck, steps: planned.steps },
     ...(blueprint !== undefined ? { blueprint } : {}),
   };
+}
+
+/**
+ * 一次执笔：把整份文稿的文案交给大模型一次写完。
+ *
+ * 没有生成层、或调用方明确关了生成时返回 `undefined`——这不是失败，
+ * 只是"这条路不适用"，不该在依据里留下"执笔失败"的噪声。
+ */
+async function resolveWrittenDeck(
+  request: AssembleRequest,
+  deck: PageSpec,
+  theme: DeckTheme,
+  blueprint: BlueprintOutcome | undefined,
+  layouts: BlockRegistry,
+  rationale: string[],
+): Promise<DeckWriteOutcome | undefined> {
+  if (request.useGenerative !== true || request.llm === undefined) return undefined;
+
+  const pages = deck.blocks.map((page, index) => ({
+    index,
+    spec: layouts.get(page.type),
+    counts: plannedCounts(page),
+  }));
+
+  const outcome = await writeDeck({
+    llm: request.llm,
+    goal: request.goal,
+    pages,
+    ...(blueprint !== undefined && blueprint.ok ? { blueprint: blueprint.blueprint } : {}),
+    themeLabel: theme.label,
+    themeDescription: theme.description,
+    ...(request.tone !== undefined ? { tone: request.tone } : {}),
+    ...(request.context.constraints !== undefined
+      ? { constraints: request.context.constraints }
+      : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
+  });
+
+  if (outcome.ok) {
+    const writtenPages = outcome.deck.pages.filter(
+      (page) => Object.keys(page.slots).length > 0,
+    ).length;
+    rationale.push(
+      `执笔：一次写出 ${writtenPages}/${deck.blocks.length} 页文案` +
+        `（模型 ${outcome.deck.model}，${outcome.deck.latencyMs}ms）`,
+    );
+  } else {
+    rationale.push(`执笔不可用：${outcome.detail}。本次回落到逐 slot 生成`);
+  }
+  return outcome;
+}
+
+/** 从 planner 放的形状占位里读出每个 slot 的项数（与 fill-slide 的 counts 同义）。 */
+function plannedCounts(page: BlockInstance): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const [name, value] of Object.entries(page.slots)) {
+    counts[name] =
+      value.kind === 'list'
+        ? value.items.length
+        : value.kind === 'list-image'
+          ? value.refs.length
+          : 1;
+  }
+  return counts;
 }
 
 /**

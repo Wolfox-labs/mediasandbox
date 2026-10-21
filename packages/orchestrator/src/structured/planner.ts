@@ -194,6 +194,14 @@ export interface PlanStructureRequest {
    * 这一问根本不发——没有生成层可选的时候问"要不要生成式"是空问题。
    */
   readonly useGenerative?: boolean | undefined;
+  /**
+   * 是否提 `slot_source`（"这个 slot 由生成层写还是确定性拼"）。默认 **true**。
+   *
+   * 演示文稿"一次执笔"模式传 `false`：整份文案由大模型一口气写完，
+   * "谁写"不再是一个需要决策的问题。少问一遍也少一轮决策往返。
+   * 此时块的 `slotPlans` 为空，填充器按"有执笔文案就用、没写到的才兜底"处理。
+   */
+  readonly askSlotSource?: boolean | undefined;
 }
 
 export interface PlanStructureResult {
@@ -477,7 +485,7 @@ export class StructurePlanner {
       // 两者都以"选中了哪块"为前提，彼此没有依赖，所以**同批**问出去。
       const listSlots = picked.slots.filter((s) => s.countRange !== undefined);
       const sourceSlots =
-        request.useGenerative === true
+        request.useGenerative === true && request.askSlotSource !== false
           ? picked.slots.filter((s) => GENERATIVE_ELIGIBLE.includes(s.type))
           : [];
       if (listSlots.length > 0 || sourceSlots.length > 0) {
@@ -799,7 +807,7 @@ export class StructurePlanner {
     // 补进来的块同样要问数量与"由谁实现"，否则它的列表型 slot 会缺项数。
     const listSlots = picked.slots.filter((s) => s.countRange !== undefined);
     const sourceSlots =
-      args.request.useGenerative === true
+      args.request.useGenerative === true && args.request.askSlotSource !== false
         ? picked.slots.filter((s) => GENERATIVE_ELIGIBLE.includes(s.type))
         : [];
     if (listSlots.length > 0 || sourceSlots.length > 0) {

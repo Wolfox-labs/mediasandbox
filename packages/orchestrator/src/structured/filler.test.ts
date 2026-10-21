@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createBlockRegistry, BUILTIN_BLOCKS } from './block-spec.js';
+import { createSlideRegistry } from './deck-spec.js';
 import {
   createPageSpec,
   validatePageSpec,
@@ -857,5 +858,173 @@ describe('填充器：内容形态要合乎块的性质', () => {
       navMax < featureMin,
       `导航最长 ${navMax} 字，特性最短 ${featureMin} 字——两者用了同一种形态`,
     );
+  });
+});
+
+describe('填充器：一次执笔优先，逐 slot 只是兜底', () => {
+  const slides = createSlideRegistry();
+  const bullets = slides.get('bullets');
+
+  function block(extra: Partial<BlockInstance> = {}): BlockInstance {
+    return {
+      id: 'b1',
+      type: 'bullets',
+      slots: {},
+      status: 'pending',
+      sources: {},
+      ...extra,
+    };
+  }
+
+  it('整页文案直接落位，不再逐 slot 调生成层', async () => {
+    let calls = 0;
+    const filled = await fillBlock({
+      spec: bullets,
+      block: block(),
+      goal: '做一份季度复盘演示文稿',
+      brand: '季度复盘',
+      options: {
+        written: {
+          heading: '增长来自复购',
+          lede: '新增用户持平，复购贡献了主要增量',
+          items: ['复购率 38%', '老客带新占比 21%', '退货率降到 4%'],
+        },
+        generate: async () => {
+          calls += 1;
+          return { text: '不该被调用' };
+        },
+      },
+      index: 0,
+      counts: { items: 3 },
+    });
+
+    assert.equal(calls, 0, '执笔已经写好的页不该再逐 slot 问一遍');
+    assert.deepEqual(filled.writtenSlots, ['heading', 'lede', 'items']);
+    assert.equal(filled.sources['heading'], 'generative');
+    const heading = filled.block.slots['heading'];
+    assert.equal(heading?.kind, 'text');
+    if (heading?.kind !== 'text') return;
+    assert.equal(heading.text, '增长来自复购');
+    const items = filled.block.slots['items'];
+    assert.equal(items?.kind, 'list');
+    if (items?.kind !== 'list') return;
+    assert.deepEqual(items.items, ['复购率 38%', '老客带新占比 21%', '退货率降到 4%']);
+  });
+
+  it('执笔没写到的 slot 才逐 slot 生成', async () => {
+    let calls = 0;
+    const filled = await fillBlock({
+      spec: bullets,
+      block: block(),
+      goal: '做一份季度复盘演示文稿',
+      brand: '季度复盘',
+      options: {
+        written: { heading: '只写了标题' },
+        generate: async (request) => {
+          calls += 1;
+          return request.slot.type === 'list-text'
+            ? { items: ['第一项', '第二项', '第三项'] }
+            : { text: '兜底导语' };
+        },
+      },
+      index: 0,
+      counts: { items: 3 },
+    });
+
+    assert.equal(calls, 2, '只该为 lede 与 items 兜底');
+    assert.deepEqual(filled.writtenSlots, ['heading']);
+    const lede = filled.block.slots['lede'];
+    assert.equal(lede?.kind, 'text');
+    if (lede?.kind !== 'text') return;
+    assert.equal(lede.text, '兜底导语');
+  });
+
+  it('列表条数不足时拒绝执笔值，回落到确定性内容', async () => {
+    const filled = await fillBlock({
+      spec: bullets,
+      block: block(),
+      goal: '做一份季度复盘演示文稿',
+      brand: '季度复盘',
+      options: { written: { items: ['只有一条'] } },
+      index: 0,
+      counts: { items: 3 },
+    });
+
+    assert.equal(filled.writtenSlots.includes('items'), false);
+    assert.ok(
+      filled.warnings.some((warning) => warning.includes('执笔文案的 slot items')),
+      '拒绝执笔值要留一条可排查的警告',
+    );
+    const items = filled.block.slots['items'];
+    assert.equal(items?.kind, 'list');
+    if (items?.kind !== 'list') return;
+    assert.equal(items.items.length, 3, '回落后应当由确定性内容补满');
+  });
+
+  it('决策层指定"确定性"的 slot 不被执笔覆盖', async () => {
+    const filled = await fillBlock({
+      spec: bullets,
+      block: block({ slotPlans: { heading: 'deterministic' } }),
+      goal: '做一份季度复盘演示文稿',
+      brand: '季度复盘',
+      options: { written: { heading: '执笔写的标题' } },
+      index: 0,
+      counts: { items: 3 },
+    });
+
+    assert.equal(filled.writtenSlots.includes('heading'), false);
+    const heading = filled.block.slots['heading'];
+    assert.equal(heading?.kind, 'text');
+    if (heading?.kind !== 'text') return;
+    assert.notEqual(heading.text, '执笔写的标题');
+    assert.equal(filled.sources['heading'], 'deterministic');
+  });
+
+  it('用户已经给过的内容不被整页执笔冲掉', async () => {
+    const filled = await fillBlock({
+      spec: bullets,
+      block: block({ slots: { heading: { kind: 'text', text: '用户自己写的标题' } } }),
+      goal: '做一份季度复盘演示文稿',
+      brand: '季度复盘',
+      options: { written: { heading: '执笔写的标题' } },
+      index: 0,
+      counts: { items: 3 },
+    });
+
+    const heading = filled.block.slots['heading'];
+    assert.equal(heading?.kind, 'text');
+    if (heading?.kind !== 'text') return;
+    assert.equal(heading.text, '用户自己写的标题');
+    assert.equal(filled.sources['heading'], 'user');
+    assert.equal(filled.writtenSlots.includes('heading'), false);
+  });
+
+  it('过长的文案被截断，不让版式被撑坏', async () => {
+    const filled = await fillBlock({
+      spec: bullets,
+      block: block(),
+      goal: '做一份季度复盘演示文稿',
+      brand: '季度复盘',
+      options: {
+        written: {
+          heading: '标'.repeat(60),
+          lede: '文'.repeat(400),
+          items: ['条'.repeat(400), '第二条', '第三条'],
+        },
+      },
+      index: 0,
+      counts: { items: 3 },
+    });
+
+    const heading = filled.block.slots['heading'];
+    const lede = filled.block.slots['lede'];
+    const items = filled.block.slots['items'];
+    assert.equal(heading?.kind, 'text');
+    assert.equal(lede?.kind, 'text');
+    assert.equal(items?.kind, 'list');
+    if (heading?.kind !== 'text' || lede?.kind !== 'text' || items?.kind !== 'list') return;
+    assert.equal(heading.text.length, 40);
+    assert.equal(lede.text.length, 300);
+    assert.equal(items.items[0]?.length, 200);
   });
 });

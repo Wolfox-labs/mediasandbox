@@ -42,6 +42,17 @@ export interface FillOptions {
   readonly generate?:
     | ((request: GenerateSlotRequest) => Promise<GenerateSlotResult | null>)
     | undefined;
+  /**
+   * **一次执笔**的整页文案：slot 名 → 原始文本 / 字符串数组。
+   *
+   * 与 `generate` 的区别是粒度：`generate` 一次写一个 slot（模型看不到邻居），
+   * `written` 是模型已经把这一页甚至整份文稿一口气写完的结果。填充器优先用
+   * `written`，只有它没覆盖到的 slot 才回落到 `generate` / 确定性内容。
+   *
+   * 形态由填充器按版式声明校验：列表条数不够、类型对不上的值会被**拒绝**并
+   * 回落，而不是硬塞进去——那样版式会在渲染前就崩掉。
+   */
+  readonly written?: Readonly<Record<string, unknown>> | undefined;
   /** 单个 slot 生成失败时是否让整块失败。默认 false——回落到确定性内容。 */
   readonly failOnGenerateError?: boolean | undefined;
 }
@@ -72,6 +83,8 @@ export interface FilledBlock {
   readonly sources: Readonly<Record<string, SlotSource>>;
   /** 生成层调用次数。零成本验收就靠它。 */
   readonly generativeCalls: number;
+  /** 来自"一次执笔"的 slot 名（用于区分整页写好的与逐 slot 生成的）。 */
+  readonly writtenSlots: readonly string[];
   /** 生成层失败并被回落的原因，逐条记录。 */
   readonly warnings: readonly string[];
 }
@@ -350,6 +363,7 @@ export async function fillBlock(args: {
   const sources: Record<string, SlotSource> = {};
   const warnings: string[] = [];
   let generativeCalls = 0;
+  const writtenApplied = new Set<string>();
 
   // ── 第一遍：确定性填满 ────────────────────────────────────────────────
   for (const slot of spec.slots) {
@@ -396,7 +410,36 @@ export async function fillBlock(args: {
     sources[slot.name] = 'deterministic';
   }
 
-  // ── 第二遍：生成式覆盖 ────────────────────────────────────────────────
+  // ── 第二遍：一次执笔的整页文案 ────────────────────────────────────────
+  //
+  // 这是"大模型是主要执笔"的落点：模型已经按整份文稿的上下文一口气写完，
+  // 这里只负责把字放进对应 slot。**不逐 slot 再问一遍**——再问就是把
+  // 刚写好的连贯文案重新切碎（`generate` 仍保留给没写到的 slot 兜底）。
+  //
+  // 三条不覆盖：
+  //   1. 决策层明确指定"确定性"的 slot（那一问仍然有效）
+  //   2. 上游/用户已经给了真实内容（模板、手改）——整页执笔不该把人的修改冲掉
+  //   3. 形态与版式声明不符的值——宁可回落到确定性，也不要产出一份非法页面
+  if (options.written !== undefined) {
+    for (const slot of spec.slots) {
+      const raw = options.written[slot.name];
+      if (raw === undefined) continue;
+      if (block.slotPlans?.[slot.name] === 'deterministic') continue;
+      if (sources[slot.name] === 'user') continue;
+      const applied = writtenSlotValue(slot, raw);
+      if (applied === null) {
+        warnings.push(
+          `执笔文案的 slot ${slot.name} 与版式「${spec.label}」的声明不符，已回落到确定性/逐 slot 生成`,
+        );
+        continue;
+      }
+      slots[slot.name] = applied;
+      sources[slot.name] = 'generative';
+      writtenApplied.add(slot.name);
+    }
+  }
+
+  // ── 第三遍：生成式覆盖 ────────────────────────────────────────────────
   if (options.generate !== undefined) {
     const context: Record<string, string> = { goal, brand };
     for (const slot of spec.slots) {
@@ -407,6 +450,8 @@ export async function fillBlock(args: {
       // 变成一次真正的决策。没问过时（零成本默认路径）保持原行为：text/title/code
       // 归生成层，link/literal 由下面的生成器自己拒掉。
       if (block.slotPlans !== undefined && block.slotPlans[slot.name] !== 'generative') continue;
+      // 执笔已经写好的 slot 不再逐 slot 调用：再写一遍等于把连贯的文案重新切碎。
+      if (writtenApplied.has(slot.name)) continue;
 
       const count = counts[slot.name] ?? countOf(slots[slot.name]);
       let result: GenerateSlotResult | null = null;
@@ -443,8 +488,62 @@ export async function fillBlock(args: {
     block: { ...block, slots, status: 'filled', sources, error: undefined },
     sources,
     generativeCalls,
+    writtenSlots: [...writtenApplied],
     warnings,
   };
+}
+
+/**
+ * 把执笔文案套到声明类型上。形态不符返回 null（调用方回落到确定性/逐 slot）。
+ *
+ * 与 `applyGenerated` 的区别：这里不做"信任模型"的宽松转换，列表条数必须
+ * 落在 `countRange` 内（多了截断、少了拒绝），文本按 slot 类型截断。
+ * 拒绝而不是硬塞，是因为非法取值会让 `validatePageSpec` 在渲染前抛错，
+ * 整份文稿都出不来；回落到确定性内容至少页面是完整的。
+ */
+function writtenSlotValue(slot: SlotSpec, raw: unknown): SlotValue | null {
+  if (slot.type === 'image' || slot.type === 'list-image') return null;
+  if (slot.type === 'link' || slot.type === 'literal') return null;
+  if (slot.type === 'list-text') {
+    const items = writtenList(raw);
+    if (items === undefined) return null;
+    const range = slot.countRange;
+    if (range !== undefined && items.length < range.min) return null;
+    const kept = range !== undefined ? items.slice(0, range.max) : items;
+    // 单条过长同样会把版式撑坏；与逐 slot 生成的上限保持一致。
+    return { kind: 'list', items: kept.map((item) => (item.length > 200 ? item.slice(0, 200) : item)) };
+  }
+  const text = writtenText(raw);
+  if (text === undefined) return null;
+  const limit = slot.type === 'title' ? 40 : slot.type === 'code' ? 2000 : 300;
+  return { kind: 'text', text: text.slice(0, limit) };
+}
+
+function writtenText(raw: unknown): string | undefined {
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    return text === '' ? undefined : text;
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
+  return undefined;
+}
+
+function writtenList(raw: unknown): string[] | undefined {
+  let items: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const text = writtenText(item);
+      if (text !== undefined) items.push(text);
+    }
+  } else {
+    const text = writtenText(raw);
+    if (text === undefined) return undefined;
+    items = text
+      .split('\n')
+      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.、)])\s*/, '').trim())
+      .filter((line) => line !== '');
+  }
+  return items.length > 0 ? items : undefined;
 }
 
 /** 取一个 slot 值的项数（非列表返回 1）。 */

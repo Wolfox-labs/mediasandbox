@@ -167,6 +167,78 @@ describe('演示文稿模态', () => {
     }
   });
 
+  it('一次执笔：整份文案一次写完，正文不再逐 slot 生成', async () => {
+    /*
+     * 这是"大模型是主要执笔"这条分工的端到端验收：
+     *   - 两页都是 agenda/bullets，文案来自**同一次**写好的 JSON
+     *   - 生成层只被调用一次（执笔本身），没有逐 slot 的补写
+     *   - 页面里能读到执笔写的那几句，而不是确定性填充的元文本
+     */
+    const WRITE_JSON = JSON.stringify({
+      pages: [
+        {
+          slots: {
+            title: '这次复盘讲三件事',
+            items: ['增长从哪来', '哪些没做到', '下季度怎么做'],
+          },
+        },
+        {
+          slots: {
+            heading: '增长来自复购',
+            lede: '新增用户持平，复购贡献了主要增量',
+            items: ['复购率 38%', '老客带新占比 21%', '退货率降到 4%'],
+          },
+        },
+      ],
+    });
+    const llm = new MockLlmClient({
+      defaultText: '执笔没有返回约定的 JSON。',
+      rules: [{ match: '演示文稿的执笔', text: WRITE_JSON }],
+    });
+    const ctx = await startServer({ structured: true, llm, decision: deckDecision() });
+
+    try {
+      const submit = await fetch(`${ctx.origin}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          goal: '做一份季度复盘演示文稿',
+          envType: 'slides',
+          maxBlocks: 2,
+          useBlueprint: false,
+        }),
+      });
+      assert.equal(submit.status, 202);
+      const { runId } = (await submit.json()) as { runId: string };
+
+      const detail = await waitForStatus(ctx.origin, runId);
+      assert.equal(detail.status, 'succeeded', `运行应当成功，实际 ${detail.status}`);
+      const pages = detail.structure?.page.blocks ?? [];
+      assert.deepEqual(
+        pages.map((page) => page.type),
+        ['agenda', 'bullets'],
+        '版式由决策层定，执笔不改结构',
+      );
+
+      // 整份文稿只该有一次执笔调用：没有逐 slot 的补写。
+      assert.equal(llm.calls.length, 1, '正文应当来自同一次执笔，而不是逐 slot 生成');
+
+      const html = await (
+        await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/deck.html`)
+      ).text();
+      assert.match(html, /这次复盘讲三件事/);
+      assert.match(html, /增长来自复购/);
+      assert.match(html, /复购率 38%/);
+
+      // 产物里的来源要如实标成"执笔写的"（detail.structure 保留的是填充前的结构）。
+      const deckJson = (await (
+        await fetch(`${ctx.origin}/api/runs/${runId}/artifacts/deck.json`)
+      ).json()) as { blocks: { sources?: Record<string, string> }[] };
+      assert.equal(deckJson.blocks[1]?.sources?.['heading'], 'generative');
+    } finally {      await ctx.close();
+    }
+  });
+
   it('版式池单独一条端点，不与 block 池混在一起', async () => {
     const ctx = await startServer({ structured: true });
     try {

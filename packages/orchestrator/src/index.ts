@@ -183,6 +183,16 @@ export {
 } from './structured/deck-tools.js';
 export { assembleDeck } from './structured/deck-assembler.js';
 export {
+  DEFAULT_DECK_WRITE_TIMEOUT_MS,
+  writeDeck,
+  type DeckWriteOutcome,
+  type DeckWritePagePlan,
+  type DeckWriteRequest,
+  type WrittenDeck,
+  type WrittenPage,
+  type WrittenSlotText,
+} from './structured/deck-write.js';
+export {
   candidateEnvs,
   classifyEnvType,
   ENV_QUESTION_ID,
