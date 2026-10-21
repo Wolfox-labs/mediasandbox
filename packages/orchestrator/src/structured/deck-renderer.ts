@@ -824,6 +824,25 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .slide[data-side="right"] .sk-timeline__what{margin-top:0}
 .slide[data-side="right"] .sk-agenda__list{grid-template-columns:1fr}
 
+/* 要点页的第二种构图：从"圆点列表"变成**编号清单**。
+ * 编号让"三件事"读起来有次序感，圆点更松散——同一组条目，两种语气。
+ */
+.slide[data-side="right"] .sk-bullets__list{counter-reset:sk-item;gap:1.2cqw}
+.slide[data-side="right"] .sk-bullets__item{
+  counter-increment:sk-item;padding-left:4.6cqw;
+  border-bottom:1px solid var(--sk-surface,rgba(255,255,255,.12));padding-bottom:.9cqw;
+}
+.slide[data-side="right"] .sk-bullets__item::before{
+  content:counter(sk-item,decimal-leading-zero);
+  width:auto;height:auto;border-radius:0;background:none;left:0;top:.15cqw;
+  color:var(--sk-accent,#3b6df5);font-size:2.05cqw;font-weight:700;
+}
+
+/* 两栏页的第二种构图：从"左右对等"变成**主从**（左窄右宽）。
+ * 对等用于对照，主从用于"背景 → 方案"这类有轻重的叙述。
+ */
+.slide[data-side="right"] .sk-two__grid{grid-template-columns:.78fr 1.22fr;gap:1.8cqw}
+
 /* 打印 / 导出 PDF：一页一张 */
 @media print{
   @page{size:1280px 720px;margin:0}
