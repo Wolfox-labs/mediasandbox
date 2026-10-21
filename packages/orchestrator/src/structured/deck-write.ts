@@ -195,7 +195,9 @@ function formatSlot(slot: SlotSpec, count: number | undefined): string {
     const range = slot.countRange;
     const amount =
       range !== undefined
-        ? `${range.min}~${range.max} 项`
+        ? count !== undefined && count > 0
+          ? `${count} 项（可用 ${range.min}~${range.max}）`
+          : `${range.min}~${range.max} 项`
         : `${count !== undefined && count > 0 ? count : 1} 项`;
     return `- ${slot.name}（${required}，字符串数组，${amount}）：${slot.description}`;
   }

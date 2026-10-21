@@ -82,7 +82,7 @@ describe('一次执笔：整份文稿一口气写完', () => {
     assert.match(prompt, /共 2 页/);
     assert.match(prompt, /第 1 页 \[cover \/ 封面页\]/);
     assert.match(prompt, /第 2 页 \[bullets \/ 要点页\]/);
-    assert.match(prompt, /items（必填，字符串数组，3~6 项）/);
+    assert.match(prompt, /items（必填，字符串数组，4 项（可用 3~6））/);
   });
 
   it('宽松收取：slot 直接放在页面对象上、列表用换行分隔也能读', async () => {
