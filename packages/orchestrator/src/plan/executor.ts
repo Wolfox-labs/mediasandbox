@@ -24,6 +24,7 @@ import {
   type PlanNode,
   type PortRef,
 } from './types.js';
+import type { NodeCache } from './cache.js';
 
 /** 节点执行状态。 */
 export type NodeStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
@@ -42,6 +43,8 @@ export interface NodeState {
   readonly errorInfo?: NodeErrorInfo | undefined;
   /** 该节点产出的文件。 */
   readonly artifacts: readonly Artifact[];
+  /** 本节点是**缓存命中**（没有真正执行）。 */
+  readonly cached?: boolean | undefined;
 }
 
 /** 执行进度事件。前端据此渲染实时状态。 */
@@ -49,7 +52,7 @@ export type ExecutionEvent =
   | { readonly type: 'plan_started'; readonly nodeCount: number; readonly at: number }
   | { readonly type: 'node_started'; readonly nodeId: string; readonly toolId: string; readonly attempt: number; readonly at: number }
   | { readonly type: 'node_log'; readonly nodeId: string; readonly message: string; readonly fields?: Readonly<Record<string, unknown>> | undefined; readonly at: number }
-  | { readonly type: 'node_succeeded'; readonly nodeId: string; readonly summary: string; readonly durationMs: number; readonly at: number }
+  | { readonly type: 'node_succeeded'; readonly nodeId: string; readonly summary: string; readonly durationMs: number; readonly at: number; readonly cached?: boolean | undefined }
   | { readonly type: 'node_failed'; readonly nodeId: string; readonly error: string; readonly attempt: number; readonly willRetry: boolean; readonly at: number }
   | { readonly type: 'node_skipped'; readonly nodeId: string; readonly reason: string; readonly at: number }
   | { readonly type: 'plan_finished'; readonly status: 'succeeded' | 'failed'; readonly durationMs: number; readonly at: number };
@@ -74,6 +77,11 @@ export interface ExecuteOptions {
    * 需要执行器内建重试时显式传入。
    */
   readonly maxRetries?: number | undefined;
+  /**
+   * 节点级结果缓存。传了就启用"命中即跳过"：
+   * 键由 `工具 id + 解析后的入参` 决定，因此改一个节点只会重跑它和它的下游。
+   */
+  readonly cache?: NodeCache | undefined;
 }
 
 export interface NodeOutcome {
@@ -140,6 +148,7 @@ export class PlanExecutor {
       onEvent,
       signal,
       maxRetries = 0,
+      cache,
     } = options;
 
     // 执行前先校验。计划是坏的就不该开始跑。
@@ -215,6 +224,7 @@ export class PlanExecutor {
                 results,
                 states,
                 emit,
+                ...(cache !== undefined ? { cache } : {}),
                 ...(signal !== undefined ? { signal } : {}),
               });
               if (outcome.result !== undefined) results.set(nodeId, outcome.result);
@@ -299,6 +309,7 @@ export class PlanExecutor {
     results: Map<string, ToolResult>;
     states: Map<string, NodeState>;
     emit: (event: ExecutionEvent) => void;
+    cache?: NodeCache | undefined;
     signal?: AbortSignal;
   }): Promise<NodeOutcome> {
     const {
@@ -312,6 +323,7 @@ export class PlanExecutor {
       results,
       states,
       emit,
+      cache,
     } = args;
 
     const nodeStartedAt = Date.now();
@@ -364,6 +376,44 @@ export class PlanExecutor {
     let lastErrorInfo: NodeErrorInfo | undefined;
     let attempts = 0;
 
+    // ── 缓存命中：直接复用上次的结果，不执行工具 ─────────────────────
+    //
+    // 键是 `工具 id + 解析后的入参`，所以"上游变了"会天然让下游的键也变，
+    // 不需要脏标记传播。取缓存失败（磁盘坏了、JSON 损坏）按未命中处理：
+    // 缓存是加速手段，不该变成新的故障点。
+    if (cache !== undefined && args.signal?.aborted !== true) {
+      const hit = await cache.get(node, inputs).catch(() => undefined);
+      if (hit !== undefined) {
+        const now = Date.now();
+        states.set(node.id, {
+          ...states.get(node.id)!,
+          status: 'succeeded',
+          attempts: 0,
+          finishedAt: now,
+          durationMs: 0,
+          summary: hit.summary,
+          artifacts: hit.artifacts,
+          cached: true,
+        });
+        emit({
+          type: 'node_succeeded',
+          nodeId: node.id,
+          summary: hit.summary,
+          durationMs: 0,
+          at: now,
+          cached: true,
+        });
+        return {
+          nodeId: node.id,
+          toolId: node.toolId,
+          status: 'succeeded',
+          result: { outputs: hit.outputs, artifacts: hit.artifacts, summary: hit.summary },
+          attempts: 0,
+          durationMs: 0,
+        };
+      }
+    }
+
     for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
       attempts = attempt;
       const attemptStartedAt = Date.now();
@@ -404,6 +454,10 @@ export class PlanExecutor {
         );
 
         const durationMs = Date.now() - attemptStartedAt;
+        // 先落缓存再报成功：下次同参数运行就能跳过这个节点。
+        if (cache !== undefined) {
+          await cache.put(node, inputs, result).catch(() => undefined);
+        }
         states.set(node.id, {
           ...states.get(node.id)!,
           status: 'succeeded',

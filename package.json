@@ -22,5 +22,15 @@
   "devDependencies": {
     "@types/node": "^24.9.2",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "supportedArchitectures": {
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "x64"
+      ]
+    }
   }
 }

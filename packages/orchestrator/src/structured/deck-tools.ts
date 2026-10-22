@@ -24,6 +24,7 @@ import { DEFAULT_VIEWPORT, defaultScreenshotDriver, type ScreenshotDriver } from
 import { createSlideRegistry } from './deck-spec.js';
 import { renderDeck } from './deck-renderer.js';
 import { resolveDeckTheme } from './deck-theme.js';
+import { externalizeImages } from './assets.js';
 import type { BlockRegistry } from './block-spec.js';
 import { deriveBrand, fillBlock } from './filler.js';
 import { validatePageSpec, type BlockInstance, type PageSpec } from './page-spec.js';
@@ -291,21 +292,20 @@ export function createAssembleDeckTool(layouts: BlockRegistry): ToolRegistration
        */
       const deckFile = 'artifacts/deck.json';
       const resolvedTheme = resolveDeckTheme(themeId);
-      await runtime.sandbox.writeFile(
-        runtime.handle,
-        deckFile,
-        JSON.stringify(
-          {
-            ...deck,
-            themeId: resolvedTheme.id,
-            themeLabel: resolvedTheme.label,
-            composition: composition ?? 'ranked',
-            layoutSequence: filled.map((page) => page.type),
-          },
-          null,
-          2,
-        ),
-      );
+      // 结构里的图片只留相对路径：`deck.html` 已经内联过一份，
+      // 结构再存一遍 base64 等于把产物体积翻倍。
+      const structure = await externalizeImages({
+        sandbox: runtime.sandbox,
+        handle: runtime.handle,
+        value: {
+          ...deck,
+          themeId: resolvedTheme.id,
+          themeLabel: resolvedTheme.label,
+          composition: composition ?? 'ranked',
+          layoutSequence: filled.map((page) => page.type),
+        },
+      });
+      await runtime.sandbox.writeFile(runtime.handle, deckFile, JSON.stringify(structure.value, null, 2));
 
       const layoutSeq = filled.map((page) => page.type).join(' → ');
       return {
