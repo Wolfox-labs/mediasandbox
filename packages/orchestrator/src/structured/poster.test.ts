@@ -56,7 +56,7 @@ describe('海报版式', () => {
     assert.ok(html.includes('社团招新'));
     assert.ok(html.includes('体育馆'));
     assert.ok(html.includes('来报名'));
-    assert.ok(html.includes('1080px') && html.includes('1440px'));
+    assert.ok(html.includes('--w: 1080px') && html.includes('--h: 1440px'));
 
     const escaped = renderPosterHtml(
       normalizeBrief({ headline: '<script>alert(1)</script>' }),

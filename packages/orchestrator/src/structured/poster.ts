@@ -133,6 +133,7 @@ export function renderPosterHtml(brief: PosterBrief, size: PosterSize): string {
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
+<meta name="poster-size" content="${size.id}" />
 <title>${escapeHtml(brief.headline)}</title>
 <style>
   :root {
@@ -141,6 +142,8 @@ export function renderPosterHtml(brief: PosterBrief, size: PosterSize): string {
     --accent: ${accent};
     --ink: ${ink};
     --base: ${size.baseFont}px;
+    --w: ${size.width}px;
+    --h: ${size.height}px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: var(--from); }
