@@ -11,6 +11,7 @@ import { cacheKeyFor, stableStringify } from '../plan/cache.js';
 import { PlanExecutor } from '../plan/executor.js';
 import { FileNodeCache } from './node-cache.js';
 import { dependenciesOf, toPlan, type WorkflowDef } from './types.js';
+import { deckWorkflow } from './presets.js';
 import { validateWorkflow, WorkflowError } from './validate.js';
 import { runWorkflow } from './runner.js';
 
@@ -57,6 +58,25 @@ function reg(
 function def(nodes: WorkflowDef['nodes']): WorkflowDef {
   return { id: 'wf', name: '测试工作流', envType: 'copy', nodes };
 }
+
+describe('工作流预设', () => {
+  it('演示文稿预设：每页一个填充节点，全部扇入组装', () => {
+    const workflow = deckWorkflow({ goal: '路演', layouts: ['cover', 'bullets', 'closing'] });
+    const fills = workflow.nodes.filter((node) => node.toolId === 'fill-slide');
+    assert.equal(fills.length, 3);
+    const assemble = workflow.nodes.find((node) => node.toolId === 'assemble-deck');
+    assert.deepEqual(dependenciesOf(assemble!), ['fill-b1', 'fill-b2', 'fill-b3']);
+    // 幻灯片环境没有 verify-artifact（它只支持 copy/image/frontend/webpage）。
+    assert.ok(!workflow.nodes.some((node) => node.toolId === 'verify-artifact'));
+  });
+
+  it('演示文稿预设：截图节点带 HTML 指纹，且显式依赖组装', () => {
+    const workflow = deckWorkflow({ goal: '路演', screenshot: true });
+    const shot = workflow.nodes.find((node) => node.toolId === 'screenshot-deck');
+    assert.deepEqual(shot?.inputs?.['html'], { from: 'assemble', port: 'html' });
+    assert.deepEqual(shot?.dependsOn, ['assemble']);
+  });
+});
 
 describe('工作流定义', () => {
   it('把 from 翻译成 ref / refs / literal，并按输入推导依赖', () => {

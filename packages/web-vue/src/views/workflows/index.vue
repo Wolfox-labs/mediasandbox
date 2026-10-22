@@ -57,6 +57,7 @@ const view = reactive({ scale: 1, x: 0, y: 0 });
 const run = ref<{ id: string; status: string; startedAt?: number } | null>(null);
 const nodeStates = ref<Record<string, NodeState>>({});
 const recentRuns = ref<{ id: string; status: string; goal: string; artifactCount: number }[]>([]);
+const queue = ref<{ running: number; waiting: number; maxConcurrent: number } | null>(null);
 const dirty = ref(false);
 const busy = ref(false);
 
@@ -319,8 +320,12 @@ function fitView(): void {
 async function loadRecentRuns(): Promise<void> {
   try {
     const response = await fetch('/api/runs');
-    const body = (await response.json()) as { runs?: { id: string; status: string; goal: string; artifactCount: number }[] };
+    const body = (await response.json()) as {
+      runs?: { id: string; status: string; goal: string; artifactCount: number }[];
+      queue?: { running: number; waiting: number; maxConcurrent: number };
+    };
     recentRuns.value = (body.runs ?? []).slice(0, 8);
+    queue.value = body.queue ?? null;
   } catch {
     /* 历史只是辅助信息，读不到不影响画布 */
   }
@@ -367,6 +372,9 @@ onBeforeUnmount(() => {
       </button>
 
       <div class="wf-list__title wf-list__title--gap">最近运行</div>
+      <div v-if="queue !== null" class="wf-queue">
+        队列：运行 {{ queue.running }} / 排队 {{ queue.waiting }}（上限 {{ queue.maxConcurrent }}）
+      </div>
       <button
         v-for="item in recentRuns"
         :key="item.id"
@@ -562,6 +570,15 @@ onBeforeUnmount(() => {
 .wf-list__hint {
   font-size: 12px;
   color: #475569;
+}
+.wf-queue {
+  font-size: 11px;
+  color: #7dd3fc;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px solid #1e3a5f;
+  border-radius: 6px;
+  background: #0e1b2e;
 }
 .wf-list__meta.is-succeeded {
   color: #34d399;
