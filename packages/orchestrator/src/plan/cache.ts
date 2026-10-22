@@ -104,3 +104,22 @@ export function hashString(text: string): string {
   const part = (n: number): string => (n >>> 0).toString(16).padStart(8, '0');
   return `${part(h1)}${part(h2)}`;
 }
+
+/**
+ * 强制某些节点"当作没缓存"。
+ *
+ * 这是"重跑此节点及其下游"的实现方式：不删缓存、不做脏标记，
+ * 只让点名节点的 `get` 直接落空。于是：
+ *   - 它自己重跑；
+ *   - 它的产出变了 → 下游的缓存键跟着变 → 下游自然重跑；
+ *   - 旁支的键没变 → 继续命中。
+ *
+ * 比"清空整份缓存"精确，也比"维护依赖图失效"简单——后者要在缓存层重建一遍 DAG。
+ */
+export function forceCacheMiss(cache: NodeCache, nodeIds: ReadonlySet<string>): NodeCache {
+  return {
+    get: (node, inputs) =>
+      nodeIds.has(node.id) ? Promise.resolve(undefined) : cache.get(node, inputs),
+    put: (node, inputs, result) => cache.put(node, inputs, result),
+  };
+}

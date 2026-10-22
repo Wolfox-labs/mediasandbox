@@ -9,6 +9,7 @@ import type { SandboxHandle, SandboxProvider } from '@mediasandbox/sandbox';
 import type { LlmClient } from '../llm/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { NodeCache } from '../plan/cache.js';
+import { forceCacheMiss } from '../plan/cache.js';
 import { PlanExecutor, type ExecutionEvent, type ExecutionResult } from '../plan/executor.js';
 import { toPlan, type WorkflowDef } from './types.js';
 import { validateWorkflow } from './validate.js';
@@ -26,6 +27,13 @@ export interface RunWorkflowOptions {
   readonly maxRetries?: number | undefined;
   /** 是否放行按次计费的工具。默认 false。 */
   readonly allowPaid?: boolean | undefined;
+  /**
+   * 强制这些节点不使用缓存（"重跑此节点及其下游"）。
+   *
+   * 它们重跑后产出变化，下游的缓存键自然改变，于是自动跟着重跑；
+   * 未点名的旁支继续命中缓存。
+   */
+  readonly forceNodes?: readonly string[] | undefined;
 }
 
 export interface WorkflowRunResult {
@@ -44,13 +52,17 @@ export async function runWorkflow(
   });
   const plan = toPlan(def);
   const executor = new PlanExecutor();
+  const cache =
+    options.cache !== undefined && options.forceNodes !== undefined && options.forceNodes.length > 0
+      ? forceCacheMiss(options.cache, new Set(options.forceNodes))
+      : options.cache;
   const execution = await executor.execute({
     plan,
     registry: options.registry,
     sandbox: options.sandbox,
     handle: options.handle,
     ...(options.llm !== undefined ? { llm: options.llm } : {}),
-    ...(options.cache !== undefined ? { cache: options.cache } : {}),
+    ...(cache !== undefined ? { cache } : {}),
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
     ...(options.nodeTimeoutMs !== undefined ? { nodeTimeoutMs: options.nodeTimeoutMs } : {}),

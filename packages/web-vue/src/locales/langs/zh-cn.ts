@@ -230,7 +230,8 @@ const local: App.I18n.Schema = {
     projects: '项目与产物',
     sandbox: '沙盒环境',
     tools: '工具链',
-    blocks: '元素池管理'
+    blocks: '元素池管理',
+    workflows: '工作流画布'
   },
   page: {
     login: {

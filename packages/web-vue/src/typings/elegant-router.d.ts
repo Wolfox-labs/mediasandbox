@@ -28,6 +28,7 @@ declare module "@elegant-router/types" {
     "sandbox": "/sandbox";
     "tools": "/tools";
     "blocks": "/blocks";
+    "workflows": "/workflows";
   };
 
   /**
@@ -74,6 +75,8 @@ declare module "@elegant-router/types" {
     | "tools"
 
     | "blocks"
+
+    | "workflows"
   >;
 
   /**
@@ -105,6 +108,8 @@ declare module "@elegant-router/types" {
     | "tools"
 
     | "blocks"
+
+    | "workflows"
   >;
 
   /**

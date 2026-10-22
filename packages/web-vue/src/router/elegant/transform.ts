@@ -174,7 +174,9 @@ const routeMap: RouteMap = {
   // 原因见 build/plugins/index.ts）。新增页面时这里要同步。
   "projects": "/projects",
   "sandbox": "/sandbox",
-  "tools": "/tools"
+  "tools": "/tools",
+  "blocks": "/blocks",
+  "workflows": "/workflows"
 };
 
 /**

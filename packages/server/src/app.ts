@@ -755,6 +755,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     provider: SandboxProvider;
     def: WorkflowDef;
     allowPaid?: boolean | undefined;
+    /** 强制重跑的节点（"重跑此节点及其下游"）。 */
+    forceNodes?: readonly string[] | undefined;
   }): Promise<void> {
     const { record, provider, def } = args;
     store.update(record.id, { status: 'running' });
@@ -771,6 +773,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         handle,
         ...(deps.llm !== undefined ? { llm: deps.llm } : {}),
         ...(cache !== undefined ? { cache } : {}),
+        ...(args.forceNodes !== undefined ? { forceNodes: args.forceNodes } : {}),
         ...(args.allowPaid !== undefined ? { allowPaid: args.allowPaid } : {}),
         ...(deps.nodeTimeoutMs !== undefined ? { nodeTimeoutMs: deps.nodeTimeoutMs } : {}),
         signal: args.controller.signal,
@@ -1110,6 +1113,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     store.registerController(record.id, controller);
 
     const workflowDef = def;
+    const forceNodes = Array.isArray(body['forceNodes'])
+      ? (body['forceNodes'] as unknown[])
+          .filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+          .slice(0, 50)
+      : undefined;
     const job: QueuedRun = {
       record,
       controller,
@@ -1120,6 +1128,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
           provider,
           def: workflowDef,
           ...(allowPaid ? { allowPaid } : {}),
+          ...(forceNodes !== undefined && forceNodes.length > 0 ? { forceNodes } : {}),
         }),
     };
 

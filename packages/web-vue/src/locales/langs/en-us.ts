@@ -234,7 +234,8 @@ const local: App.I18n.Schema = {
     projects: 'Projects',
     sandbox: 'Sandbox',
     tools: 'Toolchain',
-    blocks: 'Element Pool'
+    blocks: 'Element Pool',
+    workflows: 'Workflow Canvas'
   },
   page: {
     login: {

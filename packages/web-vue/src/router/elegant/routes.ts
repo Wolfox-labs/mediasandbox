@@ -124,5 +124,17 @@ export const generatedRoutes: GeneratedRoute[] = [
       title: 'blocks',
       i18nKey: 'route.blocks'
     }
+  },
+  {
+    // 工作流画布：节点是工具、边是端口引用，运行状态与缓存命中都在节点上。
+    name: 'workflows',
+    path: '/workflows',
+    component: 'layout.base$view.workflows',
+    meta: {
+      title: 'workflows',
+      i18nKey: 'route.workflows',
+      icon: 'mdi:graph-outline',
+      order: 9
+    }
   }
 ];
