@@ -271,7 +271,7 @@ export {
 export { validateWorkflow, WorkflowError, type WorkflowErrorCode } from './workflow/validate.js';
 export { runWorkflow, type RunWorkflowOptions, type WorkflowRunResult } from './workflow/runner.js';
 export { FileNodeCache, type FileNodeCacheOptions } from './workflow/node-cache.js';
-export { posterWorkflow, type PosterWorkflowOptions } from './workflow/presets.js';
+export { posterWorkflow, pageWorkflow, type PosterWorkflowOptions, type PageWorkflowOptions } from './workflow/presets.js';
 export { cacheKeyFor, hashString, stableStringify, type NodeCache, type CachedNodeResult } from './plan/cache.js';
 
 // ── 海报 ──────────────────────────────────────────────────────────────

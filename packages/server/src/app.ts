@@ -27,6 +27,7 @@ import {
   builtinBlockIds,
   extractTemplate,
   posterWorkflow,
+  pageWorkflow,
   runWorkflow,
   validateWorkflow,
   type BlockGroup,
@@ -889,6 +890,17 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       builtin: true,
       params: [{ name: 'goal', required: true, description: '海报要表达的目标' }],
     },
+    {
+      id: 'page',
+      name: '网页（整页模板）',
+      description: '按整页模板展开成固定结构：一次执笔 + 逐块填充 + 组装 + 校验',
+      envType: 'webpage' as const,
+      builtin: true,
+      params: [
+        { name: 'goal', required: true, description: '页面目标' },
+        { name: 'templateId', required: true, description: '整页模板 id（GET /api/templates 里 kind=page 的那些）' },
+      ],
+    },
   ];
 
   app.get('/api/workflows', (_req: Request, res: Response) => {
@@ -917,6 +929,25 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       if (id === 'poster') {
         const goalRaw = typeof req.query['goal'] === 'string' ? req.query['goal'].trim() : '';
         const def = posterWorkflow({ goal: goalRaw === '' ? '（未填写目标）' : goalRaw });
+        res.json({ workflow: { ...builtin, ...def, builtin: true, dynamic: true } });
+        return;
+      }
+      if (id === 'page') {
+        const templateId = typeof req.query['templateId'] === 'string' ? req.query['templateId'] : '';
+        const template =
+          templateId !== '' && deps.templates?.has(templateId) === true
+            ? deps.templates.get(templateId)
+            : undefined;
+        if (template === undefined || deps.blocks === undefined) {
+          errorResponse(res, 400, '查看网页预设需要 templateId（且该模板存在）');
+          return;
+        }
+        const goalRaw = typeof req.query['goal'] === 'string' ? req.query['goal'].trim() : '';
+        const def = pageWorkflow({
+          template,
+          goal: goalRaw === '' ? '（未填写目标）' : goalRaw,
+          blocks: deps.blocks,
+        });
         res.json({ workflow: { ...builtin, ...def, builtin: true, dynamic: true } });
         return;
       }
@@ -1010,6 +1041,35 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
         ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
         ...(sizeIds !== undefined && sizeIds.length > 0 ? { sizeIds } : {}),
+      });
+    } else if (id === 'page') {
+      const templateId = typeof body['templateId'] === 'string' ? body['templateId'].trim() : '';
+      if (goal === '' || templateId === '') {
+        errorResponse(res, 400, '运行网页工作流需要 goal 与 templateId');
+        return;
+      }
+      if (deps.templates === undefined || deps.blocks === undefined) {
+        errorResponse(res, 503, '本次部署未装配模板池或 block 池');
+        return;
+      }
+      if (!deps.templates.has(templateId)) {
+        errorResponse(
+          res,
+          400,
+          `未知模板: ${templateId}`,
+          `可用: ${deps.templates
+            .specs()
+            .filter((spec) => spec.kind === 'page')
+            .map((spec) => spec.id)
+            .join(', ')}`,
+        );
+        return;
+      }
+      def = pageWorkflow({
+        template: deps.templates.get(templateId),
+        goal,
+        blocks: deps.blocks,
+        ...(body['screenshot'] === true ? { screenshot: true } : {}),
       });
     } else {
       def = deps.workflows?.get(id);

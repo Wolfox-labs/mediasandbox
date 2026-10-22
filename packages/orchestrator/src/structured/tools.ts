@@ -911,6 +911,9 @@ export function createScreenshotPageTool(driver: ScreenshotDriver): ToolRegistra
       category: 'structured',
       inputs: [
         { name: 'file', type: 'text', required: false, description: '要截图的页面路径' },
+        // 只用于内容指纹：截图工具本来是从沙盒读文件，但缓存键只看入参，
+        // 不把页面内容接进来就会出现"页面变了、截图还是上一张"。
+        { name: 'html', type: 'text', required: false, description: '页面 HTML（仅用于缓存指纹）' },
         { name: 'width', type: 'number', required: false, description: '视口宽度' },
         { name: 'height', type: 'number', required: false, description: '视口高度' },
       ],

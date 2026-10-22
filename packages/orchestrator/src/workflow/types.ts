@@ -65,6 +65,14 @@ export interface WorkflowNodeDef {
   readonly inputs?: Readonly<Record<string, WorkflowInput>>;
   /** 人读的说明，也用于画布上的副标题。 */
   readonly note?: string;
+  /**
+   * 显式依赖：给"不靠端口取值、但必须先跑完"的节点用。
+   *
+   * 典型是 `verify-artifact` 与 `screenshot-page`——它们读的是沙盒里的文件，
+   * 入参里没有上游产出，所以从输入推导不出"必须等组装完成"。
+   * 没有这个字段，它们会被排进第一层，于是"还没组装就校验"，整条链路一跑就中止。
+   */
+  readonly dependsOn?: readonly string[];
   /** 画布坐标。只影响展示，不参与执行。 */
   readonly position?: { readonly x: number; readonly y: number };
 }
@@ -83,7 +91,7 @@ export interface WorkflowDef {
 
 /** 从节点输入推导出的依赖关系（执行器与画布都用它）。 */
 export function dependenciesOf(node: WorkflowNodeDef): string[] {
-  const deps: string[] = [];
+  const deps: string[] = [...(node.dependsOn ?? [])];
   const add = (id: string): void => {
     if (!deps.includes(id)) deps.push(id);
   };
