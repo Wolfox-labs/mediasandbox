@@ -18,6 +18,7 @@ import {
   ChromiumClickDriver,
   ChromiumScreenshotDriver,
   createDeckTools,
+  createPosterTools,
   createSlideRegistry,
   createStructuredTools,
   createTemplateRegistry,
@@ -41,6 +42,7 @@ import {
 } from '@mediasandbox/sandbox';
 import { createServer } from './app.js';
 import { JsonPersist } from './persist.js';
+import { WorkflowStore } from './workflows.js';
 import { loadPersistedPools, type LoadedPools } from './boot.js';
 import { probeBrowserDocker, type DockerClientApi } from './docker-probe.js';
 
@@ -326,10 +328,18 @@ async function main(): Promise<void> {
     .registerAll(createStructuredTools(blocks, screenshotDriver))
     // 演示文稿链路（slides 环境）的三个工具。与上面那组**并行**：
     // 它们声明 `envTypes: ['slides']`，放进同一个注册表也不会污染网页链路。
-    .registerAll(createDeckTools(slideLayouts, screenshotDriver));
+    .registerAll(createDeckTools(slideLayouts, screenshotDriver))
+    // 海报链路（image 环境）：执笔 / 排版 / 导出。
+    .registerAll(createPosterTools(screenshotDriver));
   const templates = createTemplateRegistry(blocks, [...userTemplates]);
   const decision = buildDecision();
   const llm = buildLlm();
+
+  // 工作流定义与节点缓存：都在数据目录下，和运行记录一样重启后还在。
+  // 缓存目录可以让"改一个节点只重跑它和下游"跨运行生效。
+  const workflowStore = new WorkflowStore(path.join(dataDir, 'workflows'));
+  await workflowStore.load((message, error) => log(`  ⚠ ${message}: ${String(error)}`));
+  const nodeCacheDir = path.join(dataDir, 'node-cache');
 
   // 产物是从沙盒工作区实时读的，所以结束后要留一段时间才能下载。
   // 但必须设上限，否则每跑一次就永久多一个工作区（Local 目录 / Docker 容器）。
@@ -353,6 +363,8 @@ async function main(): Promise<void> {
     templates,
     slideLayouts,
     persist,
+    workflows: workflowStore,
+    nodeCacheDir,
     projectsDir: PROJECTS_ROOT,
     onLog: (message) => log(`  ${message}`),
     decision,

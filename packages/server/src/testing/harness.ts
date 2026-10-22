@@ -19,8 +19,10 @@ import {
   createStructuredTools,
   createDeckTools,
   createSlideRegistry,
+  createPosterTools,
   createTemplateRegistry,
   DEFAULT_POLICY,
+  defaultScreenshotDriver,
   StubDecisionClient,
   ToolRegistry,
   type BlockRegistry,
@@ -30,6 +32,7 @@ import {
 } from '@mediasandbox/orchestrator';
 import { createServer } from '../app.js';
 import { JsonPersist } from '../persist.js';
+import type { WorkflowStore } from '../workflows.js';
 import type { LoadedPools } from '../boot.js';
 import { loadPersistedPools } from '../boot.js';
 
@@ -56,6 +59,12 @@ export async function startServer(
     maxRuns?: number;
     /** 装配结构化链路：block 池 + 模板池 + 两个结构化工具。 */
     structured?: boolean;
+    /** 装配海报链路（image 环境）：执笔 / 排版 / 导出。 */
+    poster?: boolean;
+    /** 工作流定义存储。给了才能列出自定义工作流并运行。 */
+    workflows?: WorkflowStore;
+    /** 节点级缓存目录。 */
+    nodeCacheDir?: string;
     /** 落盘目录。给了就启用持久化，并从这里读回历史运行记录。 */
     dataDir?: string;
     /** 预先装好的池子（模拟重启时的装载结果）。省略则用内置池。 */
@@ -121,6 +130,9 @@ export async function startServer(
   if (slideLayouts !== undefined) {
     registry.registerAll(createDeckTools(slideLayouts));
   }
+  if (overrides.poster === true) {
+    registry.registerAll(createPosterTools(defaultScreenshotDriver()));
+  }
   const templates =
     blocks !== undefined
       ? createTemplateRegistry(blocks, [
@@ -134,6 +146,8 @@ export async function startServer(
     ...(slideLayouts !== undefined ? { slideLayouts } : {}),
     ...(templates !== undefined ? { templates } : {}),
     ...(persist !== undefined ? { persist } : {}),
+    ...(overrides.workflows !== undefined ? { workflows: overrides.workflows } : {}),
+    ...(overrides.nodeCacheDir !== undefined ? { nodeCacheDir: overrides.nodeCacheDir } : {}),
     ...(overrides.projectsDir !== undefined ? { projectsDir: overrides.projectsDir } : {}),
     ...(overrides.projectsRetention !== undefined
       ? { projectsRetention: overrides.projectsRetention }

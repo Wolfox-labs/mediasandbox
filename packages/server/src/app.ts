@@ -19,11 +19,16 @@ import { ENV_TYPES } from '@mediasandbox/sandbox';
 import {
   BLOCK_GROUP_LABELS,
   BlockError,
+  FileNodeCache,
   Orchestrator,
   PageSpecError,
   TemplateError,
+  WorkflowError,
   builtinBlockIds,
   extractTemplate,
+  posterWorkflow,
+  runWorkflow,
+  validateWorkflow,
   type BlockGroup,
   type BlockInstance,
   type BlockRegistry,
@@ -37,9 +42,12 @@ import {
   type TemplateRegistry,
   type TemplateSpec,
   type ToolRegistry,
+  type ExecutionEvent,
+  type WorkflowDef,
 } from '@mediasandbox/orchestrator';
 import { RunStore, compactBlueprint, compactStructure, makeRunId, toWireEvent, type RunRecord } from './run-store.js';
 import { RunQueue, type QueuedRun } from './run-queue.js';
+import type { WorkflowStore } from './workflows.js';
 import { runInteractionVerification } from './interaction.js';
 import { JsonPersist } from './persist.js';
 import { BlockInputError, parseBlockSpec } from './block-input.js';
@@ -86,6 +94,14 @@ export interface ServerDeps {
    * 而"读回"不在 `RunStore` 需要的那个写穿接口里。
    */
   readonly persist?: JsonPersist | undefined;
+  /**
+   * 工作流定义存储。省略时 `/api/workflows` 只列内置预设，自定义工作流不可用。
+   */
+  readonly workflows?: WorkflowStore | undefined;
+  /**
+   * 节点级缓存目录。省略则不启用缓存——每次运行都真跑，行为与从前一致。
+   */
+  readonly nodeCacheDir?: string | undefined;
   /**
    * 交付物落定目录。
    *
@@ -725,6 +741,87 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     }
   }
 
+  /**
+   * 跑一次工作流。
+   *
+   * 与 `executeRun` 的唯一差别是"计划从哪来"：那边由编排器现场组装（结构是决策模型的产出），
+   * 这边直接用工作流定义转成的计划。沙盒、队列、事件、落定、回收全部共用同一套，
+   * 所以两条链路的状态语义与失败语义天然一致。
+   */
+  async function executeWorkflowRun(args: {
+    record: RunRecord;
+    controller: AbortController;
+    provider: SandboxProvider;
+    def: WorkflowDef;
+    allowPaid?: boolean | undefined;
+  }): Promise<void> {
+    const { record, provider, def } = args;
+    store.update(record.id, { status: 'running' });
+    let handle: SandboxHandle | undefined;
+    try {
+      handle = await provider.create(record.projectId, def.envType);
+      const cache =
+        deps.nodeCacheDir === undefined
+          ? undefined
+          : new FileNodeCache({ root: deps.nodeCacheDir, sandbox: provider, handle });
+      const result = await runWorkflow(def, {
+        registry: deps.registry,
+        sandbox: provider,
+        handle,
+        ...(deps.llm !== undefined ? { llm: deps.llm } : {}),
+        ...(cache !== undefined ? { cache } : {}),
+        ...(args.allowPaid !== undefined ? { allowPaid: args.allowPaid } : {}),
+        ...(deps.nodeTimeoutMs !== undefined ? { nodeTimeoutMs: deps.nodeTimeoutMs } : {}),
+        signal: args.controller.signal,
+        onEvent: (event) => {
+          // 执行器的事件是 OrchestrationEvent 的子集，但 `plan_finished` 这个字面量
+          // 在两套类型里字段不同（编排层那份带 attempts/switches）。这里只透传形状，
+          // 不改语义：前端解析的是同一套 type。
+          const wire = event as unknown as OrchestrationEvent;
+          store.appendEvent(record.id, wire);
+          broadcast(record.id, wire);
+        },
+      });
+
+      store.update(record.id, {
+        sandboxId: handle.id,
+        status: args.controller.signal.aborted ? 'cancelled' : result.execution.status,
+        finishedAt: Date.now(),
+        artifacts: [...result.execution.artifacts],
+        planSummary: def.nodes.map((node) => ({
+          nodeId: node.id,
+          toolId: node.toolId,
+          note: node.note ?? '',
+        })),
+      });
+
+      // 工作流只用执行器，不会自己发"整次运行结束"。补一条 run_finished：
+      // 前端靠它收掉进度条，缺了就会一直转。
+      const finishedEvent = {
+        type: 'run_finished',
+        status: result.execution.status,
+        attempts: 1,
+        switches: 0,
+        durationMs: result.execution.durationMs,
+        at: Date.now(),
+      } as unknown as OrchestrationEvent;
+      store.appendEvent(record.id, finishedEvent);
+      broadcast(record.id, finishedEvent);
+
+      await settleArtifacts(record, handle);
+    } catch (error) {
+      store.update(record.id, {
+        status: args.controller.signal.aborted ? 'cancelled' : 'failed',
+        finishedAt: Date.now(),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      finishedRuns.push({ runId: record.id, finishedAt: Date.now() });
+      await reclaimSandboxes();
+      await pruneSettledProjects(record);
+    }
+  }
+
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
@@ -777,6 +874,208 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         webpageBlocks: deps.blocks?.size ?? 0,
         slideLayouts: deps.slideLayouts?.size ?? 0,
       },
+    });
+  });
+
+  // ── 工作流：列表 / 读取 / 保存 / 删除 / 运行 ───────────────────────────
+  //
+  // 内置预设（海报）在代码里生成，参数来自每次请求；用户自建的存成 JSON 文件。
+  const BUILTIN_WORKFLOWS = [
+    {
+      id: 'poster',
+      name: '海报（多尺寸）',
+      description: '一次执笔，竖版 / 方形 / 横版 / A4 四个尺寸各出一张 PNG',
+      envType: 'image' as const,
+      builtin: true,
+      params: [{ name: 'goal', required: true, description: '海报要表达的目标' }],
+    },
+  ];
+
+  app.get('/api/workflows', (_req: Request, res: Response) => {
+    const custom = deps.workflows?.list() ?? [];
+    res.json({
+      workflows: [
+        ...BUILTIN_WORKFLOWS,
+        ...custom.map((def) => ({
+          id: def.id,
+          name: def.name,
+          description: def.description ?? '',
+          envType: def.envType,
+          builtin: false,
+          nodeCount: def.nodes.length,
+        })),
+      ],
+    });
+  });
+
+  app.get('/api/workflows/:id', (req: Request, res: Response) => {
+    const id = paramOf(req, 'id');
+    const builtin = BUILTIN_WORKFLOWS.find((item) => item.id === id);
+    if (builtin !== undefined) {
+      // 画布要看到真实节点，所以给一个"按当前参数展开"的图。
+      // 没有 goal 时用占位目标展开，只为展示结构，不代表可运行。
+      if (id === 'poster') {
+        const goalRaw = typeof req.query['goal'] === 'string' ? req.query['goal'].trim() : '';
+        const def = posterWorkflow({ goal: goalRaw === '' ? '（未填写目标）' : goalRaw });
+        res.json({ workflow: { ...builtin, ...def, builtin: true, dynamic: true } });
+        return;
+      }
+      res.json({ workflow: { ...builtin, nodes: [] } });
+      return;
+    }
+    const def = deps.workflows?.get(id);
+    if (def === undefined) {
+      errorResponse(res, 404, `找不到工作流: ${id}`);
+      return;
+    }
+    res.json({ workflow: def });
+  });
+
+  app.put('/api/workflows/:id', async (req: Request, res: Response) => {
+    const id = paramOf(req, 'id');
+    if (BUILTIN_WORKFLOWS.some((item) => item.id === id)) {
+      errorResponse(res, 409, `${id} 是内置预设，不能覆盖`, '另存为一个新 id 再改');
+      return;
+    }
+    if (deps.workflows === undefined) {
+      errorResponse(res, 503, '本次部署未启用工作流存储');
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const envType = body['envType'];
+    if (envType !== 'image' && envType !== 'webpage' && envType !== 'slides' && envType !== 'copy') {
+      errorResponse(res, 400, 'envType 必须是 image / webpage / slides / copy 之一');
+      return;
+    }
+    if (!Array.isArray(body['nodes'])) {
+      errorResponse(res, 400, 'nodes 必须是数组');
+      return;
+    }
+    const def: WorkflowDef = {
+      id,
+      name: typeof body['name'] === 'string' ? body['name'] : id,
+      ...(typeof body['description'] === 'string' ? { description: body['description'] } : {}),
+      envType,
+      nodes: body['nodes'] as WorkflowDef['nodes'],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    try {
+      // 保存前先校验：坏的图不该进存储，否则"列得出来、跑不起来"。
+      validateWorkflow(def, {
+        registry: deps.registry,
+        ...(body['allowPaidGeneration'] === true ? { allowPaid: true } : {}),
+      });
+    } catch (error) {
+      if (error instanceof WorkflowError) {
+        errorResponse(res, 400, error.message, `code=${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    await deps.workflows.save(def);
+    res.status(201).json({ workflow: def });
+  });
+
+  app.delete('/api/workflows/:id', async (req: Request, res: Response) => {
+    const id = paramOf(req, 'id');
+    if (BUILTIN_WORKFLOWS.some((item) => item.id === id)) {
+      errorResponse(res, 409, `${id} 是内置预设，不能删除`);
+      return;
+    }
+    const removed = (await deps.workflows?.remove(id)) ?? false;
+    if (!removed) {
+      errorResponse(res, 404, `找不到工作流: ${id}`);
+      return;
+    }
+    res.status(204).end();
+  });
+
+  app.post('/api/workflows/:id/run', async (req: Request, res: Response) => {
+    const id = paramOf(req, 'id');
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const goal = typeof body['goal'] === 'string' ? body['goal'].trim() : '';
+
+    let def: WorkflowDef | undefined;
+    if (id === 'poster') {
+      if (goal === '') {
+        errorResponse(res, 400, '运行海报工作流需要 goal');
+        return;
+      }
+      const sizeIds = Array.isArray(body['sizeIds'])
+        ? (body['sizeIds'] as unknown[]).filter((item): item is string => typeof item === 'string')
+        : undefined;
+      def = posterWorkflow({
+        goal,
+        ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
+        ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
+        ...(sizeIds !== undefined && sizeIds.length > 0 ? { sizeIds } : {}),
+      });
+    } else {
+      def = deps.workflows?.get(id);
+    }
+    if (def === undefined) {
+      errorResponse(res, 404, `找不到工作流: ${id}`);
+      return;
+    }
+
+    const allowPaid = body['allowPaidGeneration'] === true;
+    try {
+      validateWorkflow(def, { registry: deps.registry, ...(allowPaid ? { allowPaid } : {}) });
+    } catch (error) {
+      if (error instanceof WorkflowError) {
+        errorResponse(res, 400, error.message, `code=${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    const providerName =
+      typeof body['provider'] === 'string' ? body['provider'] : deps.defaultProvider;
+    const provider = deps.providers[providerName];
+    if (provider === undefined) {
+      errorResponse(res, 400, `未知 provider: ${providerName}`, `可用: ${Object.keys(deps.providers).join(', ')}`);
+      return;
+    }
+
+    const runId = makeRunId();
+    const record = store.create({
+      id: runId,
+      projectId: runId,
+      goal: goal === '' ? def.name : goal,
+      envType: def.envType,
+      provider: providerName,
+    });
+    const controller = new AbortController();
+    store.registerController(record.id, controller);
+
+    const workflowDef = def;
+    const job: QueuedRun = {
+      record,
+      controller,
+      execute: () =>
+        executeWorkflowRun({
+          record,
+          controller,
+          provider,
+          def: workflowDef,
+          ...(allowPaid ? { allowPaid } : {}),
+        }),
+    };
+
+    const admission = queue.enqueue(job);
+    if (!admission.accepted) {
+      store.remove(record.id);
+      errorResponse(res, 429, admission.reason, `当前 ${admission.snapshot.running} 个在跑、${admission.snapshot.waiting} 个在排队`);
+      return;
+    }
+    if (!admission.started) waiting.set(record.id, job);
+
+    res.status(202).json({
+      runId,
+      status: 'queued',
+      workflowId: def.id,
+      ...(admission.started ? {} : { queuePosition: admission.position }),
     });
   });
 
@@ -2216,6 +2515,57 @@ export function createServer(deps: ServerDeps): CreateServerResult {
   };
 }
 
+/**
+ * 从事件流折出节点状态。
+ *
+ * 为什么不在 `RunRecord` 里另存一份状态：状态是事件的**函数**，
+ * 存两份必然出现"事件说失败了、状态还说在跑"。折出来只有一份真相，
+ * 而且历史运行（事件已落盘）刷新后照样能画出当时的状态。
+ */
+function deriveNodeStates(
+  events: readonly OrchestrationEvent[],
+): Record<string, { status: string; durationMs?: number; summary?: string; cached?: boolean; error?: string }> {
+  const states: Record<
+    string,
+    { status: string; durationMs?: number; summary?: string; cached?: boolean; error?: string }
+  > = {};
+  for (const event of events) {
+    // 两种落盘形状都要认：
+    //   - 网页/演示文稿链路：执行器事件被包在 `execution_event` 信封里；
+    //   - 工作流链路：直接落执行器事件（它本来就没有外层 attempt 概念）。
+    // 只认一种的话，另一种运行在画布上会永远显示"未开始"。
+    const inner: ExecutionEvent | undefined =
+      event.type === 'execution_event'
+        ? event.event
+        : event.type.startsWith('node_')
+          ? (event as unknown as ExecutionEvent)
+          : undefined;
+    if (inner === undefined) continue;
+    switch (inner.type) {
+      case 'node_started':
+        states[inner.nodeId] = { status: 'running' };
+        break;
+      case 'node_succeeded':
+        states[inner.nodeId] = {
+          status: 'succeeded',
+          durationMs: inner.durationMs,
+          summary: inner.summary,
+          ...(inner.cached === true ? { cached: true } : {}),
+        };
+        break;
+      case 'node_failed':
+        states[inner.nodeId] = { status: 'failed', error: inner.error };
+        break;
+      case 'node_skipped':
+        states[inner.nodeId] = { status: 'skipped', error: inner.reason };
+        break;
+      default:
+        break;
+    }
+  }
+  return states;
+}
+
 /** 裁剪后的 run 视图。事件不在这里返回，走 WebSocket。 */
 function serializeRun(record: RunRecord): Record<string, unknown> {
   return {
@@ -2233,6 +2583,9 @@ function serializeRun(record: RunRecord): Record<string, unknown> {
     error: record.error,
     planSummary: record.planSummary,
     eventCount: record.events.length,
+    // 画布需要"每个节点现在是什么状态"，而事件只走 WebSocket。
+    // 这里从已存的事件里折一份出来：刷新页面、轮询都能拿到同一份真相。
+    nodeStates: deriveNodeStates(record.events),
     // 与 WebSocket 推的是**同一个压缩函数**：刷新前后形状一致，前端只写一套解析。
     structure:
       record.structure !== undefined ? compactStructure(record.structure) : null,
