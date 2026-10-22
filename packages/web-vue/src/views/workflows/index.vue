@@ -25,10 +25,12 @@
  */
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import { NButton, NEmpty, NInput, NSelect, NTag, useThemeVars } from 'naive-ui';
+import { NButton, NEmpty, NInput, NModal, NSelect, NTag, useThemeVars } from 'naive-ui';
 import type { WorkflowDef, WorkflowInput, WorkflowNodeDef } from './types';
 import { layoutNodes, type Point } from './layout';
-import { NODE_STATUS_STYLE, STATUS_STYLE, type NTagType } from '@/utils/format';
+import { api, isImageArtifact } from '@/api/client';
+import ArtifactPreview from '@/components/common/artifact-preview.vue';
+import { formatBytes, NODE_STATUS_STYLE, STATUS_STYLE, type NTagType } from '@/utils/format';
 
 interface WorkflowSummary {
   readonly id: string;
@@ -46,6 +48,13 @@ interface NodeState {
   summary?: string;
   error?: string;
   cached?: boolean;
+}
+
+/** 产物清单条目：形状与 `GET /api/runs/:id` 的 `artifacts` 一致。 */
+interface ArtifactItem {
+  readonly path: string;
+  readonly size: number;
+  readonly mimeHint: string;
 }
 
 type Tag = { label: string; type: NTagType };
@@ -100,6 +109,16 @@ const recentRuns = ref<{ id: string; status: string; goal: string; artifactCount
 const queue = ref<{ running: number; waiting: number; maxConcurrent: number } | null>(null);
 const dirty = ref(false);
 const busy = ref(false);
+
+/**
+ * 当前这次运行（或点开的那次历史运行）落下的产物。
+ *
+ * 之前这里只有一个「6 产物」的数字：跑完出了图，人得自己猜去哪儿拿。
+ * 现在直接列在检查器里、点开就地预览——**出图的地方就是看图的对方**。
+ */
+const artifacts = ref<readonly ArtifactItem[]>([]);
+/** 正在弹层预览的产物路径，空串表示关着。 */
+const previewPath = ref('');
 
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -184,6 +203,8 @@ async function loadDef(): Promise<void> {
     }
     selectedNodeId.value = body.workflow.nodes[0]?.id ?? '';
     nodeStates.value = {};
+    artifacts.value = [];
+    previewPath.value = '';
     dirty.value = false;
     // 不自动适配的话，节点会停在画布的原始坐标上，看上去"只露出一个"。
     await nextTick();
@@ -205,6 +226,8 @@ async function startRun(forceNodes?: readonly string[]): Promise<void> {
   busy.value = true;
   error.value = '';
   nodeStates.value = {};
+  artifacts.value = [];
+  previewPath.value = '';
   try {
     const body: Record<string, unknown> = {};
     if (selectedId.value === 'poster' || selectedId.value === 'page') body.goal = goal.value;
@@ -236,9 +259,11 @@ function watchRun(runId: string): void {
       const body = (await response.json()) as {
         status?: string;
         nodeStates?: Record<string, NodeState>;
+        artifacts?: ArtifactItem[];
         error?: string;
       };
       nodeStates.value = body.nodeStates ?? {};
+      artifacts.value = body.artifacts ?? [];
       if (run.value !== null) run.value.status = body.status ?? run.value.status;
       if (body.status !== undefined && body.status !== 'queued' && body.status !== 'running') {
         if (pollTimer !== undefined) clearInterval(pollTimer);
@@ -380,10 +405,19 @@ async function loadRecentRuns(): Promise<void> {
 async function openRun(runId: string): Promise<void> {
   const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
   if (!response.ok) return;
-  const body = (await response.json()) as { status?: string; nodeStates?: Record<string, NodeState> };
+  const body = (await response.json()) as {
+    status?: string;
+    nodeStates?: Record<string, NodeState>;
+    artifacts?: ArtifactItem[];
+  };
   nodeStates.value = body.nodeStates ?? {};
+  artifacts.value = body.artifacts ?? [];
+  previewPath.value = '';
   run.value = { id: runId, status: body.status ?? 'unknown' };
 }
+
+const isImage = (item: ArtifactItem): boolean => isImageArtifact(item);
+const artifactUrl = (path: string): string => api.artifactUrl(run.value?.id ?? '', path);
 
 onMounted(async () => {
   await loadWorkflows();
@@ -569,8 +603,59 @@ onBeforeUnmount(() => {
           </template>
         </template>
         <div v-else class="wf-inspector__hint">点一个节点看它的参数</div>
+
+        <template v-if="artifacts.length > 0">
+          <div class="wf-side__title wf-side__title--gap">产物 · {{ artifacts.length }}</div>
+          <div class="wf-artifacts">
+            <button
+              v-for="item in artifacts"
+              :key="item.path"
+              type="button"
+              class="wf-artifact"
+              :title="item.path"
+              @click="previewPath = item.path"
+            >
+              <img
+                v-if="isImage(item)"
+                :src="artifactUrl(item.path)"
+                class="wf-artifact__thumb"
+                alt=""
+                loading="lazy"
+              />
+              <span v-else class="wf-artifact__tag">{{ item.mimeHint.replace('text/', '') }}</span>
+              <span class="wf-artifact__name">{{ item.path.replace('artifacts/', '') }}</span>
+              <span class="wf-artifact__size">{{ formatBytes(item.size) }}</span>
+            </button>
+          </div>
+        </template>
       </aside>
     </div>
+
+    <NModal
+      :show="previewPath !== ''"
+      preset="card"
+      :title="previewPath"
+      style="width: min(1040px, calc(100vw - 48px))"
+      @update:show="
+        value => {
+          if (!value) previewPath = '';
+        }
+      "
+    >
+      <template v-if="previewPath !== ''" #header-extra>
+        <a
+          :href="artifactUrl(previewPath)"
+          target="_blank"
+          rel="noreferrer"
+          class="wf-artifact__open"
+        >
+          在新标签打开原图
+        </a>
+      </template>
+      <div v-if="previewPath !== ''" class="wf-preview">
+        <ArtifactPreview :run-id="run?.id ?? ''" :path="previewPath" height="72vh" />
+      </div>
+    </NModal>
   </div>
 </template>
 
@@ -840,5 +925,69 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* 产物：缩略图列表。宽度跟着检查器走，缩略图按 4:5 裁切，
+   点一下才弹层看大图——这一步是为了"跑完立刻能看见图"，不是为了浏览相册。 */
+.wf-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wf-artifact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.wf-artifact:hover {
+  border-color: var(--wf-border);
+  background: var(--wf-hover);
+}
+.wf-artifact__thumb {
+  width: 40px;
+  height: 50px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--wf-divider);
+  background: var(--wf-bg);
+}
+.wf-artifact__tag {
+  width: 40px;
+  flex: none;
+  font-size: 10px;
+  color: var(--wf-text-3);
+  text-align: center;
+}
+.wf-artifact__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--wf-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wf-artifact__size {
+  font-size: 10px;
+  color: var(--wf-text-3);
+  white-space: nowrap;
+}
+.wf-artifact__open {
+  font-size: 12px;
+  text-decoration: none;
+  color: var(--wf-primary);
+}
+.wf-preview {
+  height: 72vh;
 }
 </style>
