@@ -85,7 +85,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     meta: {
       title: 'workbench',
       i18nKey: 'route.workbench',
-      icon: 'mdi:creation-outline'
+      icon: 'mdi:creation-outline',
+      order: 2
     }
   },
   {
@@ -95,7 +96,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     meta: {
       title: 'projects',
       i18nKey: 'route.projects',
-      icon: 'mdi:folder-multiple-image'
+      icon: 'mdi:folder-multiple-image',
+      order: 3
     }
   },
   {
@@ -105,7 +107,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     meta: {
       title: 'sandbox',
       i18nKey: 'route.sandbox',
-      icon: 'mdi:cube-outline'
+      icon: 'mdi:cube-outline',
+      order: 4
     }
   },
   {
@@ -115,7 +118,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     meta: {
       title: 'tools',
       i18nKey: 'route.tools',
-      icon: 'mdi:tools'
+      icon: 'mdi:tools',
+      order: 5
     }
   },
   {
@@ -127,7 +131,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     meta: {
       title: 'blocks',
       i18nKey: 'route.blocks',
-      icon: 'mdi:view-grid-outline'
+      icon: 'mdi:view-grid-outline',
+      order: 6
     }
   },
   {
@@ -139,7 +144,7 @@ export const generatedRoutes: GeneratedRoute[] = [
       title: 'workflows',
       i18nKey: 'route.workflows',
       icon: 'mdi:graph-outline',
-      order: 9
+      order: 7
     }
   }
 ];
