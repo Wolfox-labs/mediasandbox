@@ -84,7 +84,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     component: 'layout.base$view.workbench',
     meta: {
       title: 'workbench',
-      i18nKey: 'route.workbench'
+      i18nKey: 'route.workbench',
+      icon: 'mdi:creation-outline'
     }
   },
   {
@@ -93,7 +94,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     component: 'layout.base$view.projects',
     meta: {
       title: 'projects',
-      i18nKey: 'route.projects'
+      i18nKey: 'route.projects',
+      icon: 'mdi:folder-multiple-image'
     }
   },
   {
@@ -102,7 +104,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     component: 'layout.base$view.sandbox',
     meta: {
       title: 'sandbox',
-      i18nKey: 'route.sandbox'
+      i18nKey: 'route.sandbox',
+      icon: 'mdi:cube-outline'
     }
   },
   {
@@ -111,7 +114,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     component: 'layout.base$view.tools',
     meta: {
       title: 'tools',
-      i18nKey: 'route.tools'
+      i18nKey: 'route.tools',
+      icon: 'mdi:tools'
     }
   },
   {
@@ -122,7 +126,8 @@ export const generatedRoutes: GeneratedRoute[] = [
     component: 'layout.base$view.blocks',
     meta: {
       title: 'blocks',
-      i18nKey: 'route.blocks'
+      i18nKey: 'route.blocks',
+      icon: 'mdi:view-grid-outline'
     }
   },
   {
