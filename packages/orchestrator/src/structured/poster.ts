@@ -147,6 +147,9 @@ export function renderPosterHtml(
   const hasBackground =
     options.background !== undefined && options.background.trim() !== '';
   const cssUrl = hasBackground ? JSON.stringify(options.background!.trim()) : '';
+  // `wide` 不只是给 CSS 用：有背景图时横版走"左文右图"，竖版走"上图下文"，
+  // 两者靠这个 class 分叉。
+  const bodyClass = [hasBackground ? 'has-bg' : '', wide ? 'wide' : ''].filter((name) => name !== '').join(' ');
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -199,6 +202,93 @@ export function renderPosterHtml(
     background-position: center, center;
     background-repeat: no-repeat, no-repeat;
   }
+  /* 竖版走"上图下文"，所以横向那层 92% 的压暗反而把上半幅图也压平了；
+     这里改成只压顶部一点点，剩下的交给下面的 ::after 底板。 */
+  body.has-bg:not(.wide)::before {
+    background-image:
+      linear-gradient(180deg,
+        color-mix(in srgb, var(--from) 52%, transparent) 0%,
+        color-mix(in srgb, var(--from) 10%, transparent) 34%,
+        transparent 46%),
+      url(${cssUrl});
+    background-size: cover, cover;
+    background-position: center, center;
+    background-repeat: no-repeat, no-repeat;
+  }
+  /* 有图时的**文字底板**：字必须始终压得住。
+     竖版是"上半幅图、下半幅字"——文字整体下沉，落在这层近实色底上；
+     横版是"左文右图"——左侧铺到 62% 几乎不透。 */
+  body.has-bg:not(.wide)::after {
+    content: "";
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: -100px;
+    height: 62%;
+    z-index: 0;
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      color-mix(in srgb, var(--from) 58%, transparent) 12%,
+      color-mix(in srgb, var(--from) 92%, transparent) 34%,
+      var(--from) 78%);
+  }
+  body.has-bg.wide::after {
+    content: "";
+    position: fixed;
+    top: -100px;
+    bottom: -100px;
+    left: 0;
+    width: 60%;
+    z-index: 0;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--from) 97%, transparent) 0%,
+      color-mix(in srgb, var(--from) 88%, transparent) 64%,
+      transparent 100%);
+  }
+  /* 文字下沉：让标题落在底板上，而不是压在图的主体上。 */
+  body.has-bg:not(.wide) .canvas {
+    justify-content: flex-end;
+    padding-bottom: calc(var(--base) * 1.35);
+  }
+  body.has-bg:not(.wide) .main {
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    gap: calc(var(--base) * 0.52);
+  }
+  /* 标题限宽：不限的话方形尺寸会排成一整行横跨到图的主体上。 */
+  body.has-bg h1 {
+    max-width: 92%;
+  }
+  body.has-bg:not(.wide) h1 {
+    font-size: calc(var(--base) * 1.28);
+  }
+  /* 横版：左文右图，动作条也收回左侧，别飘到图上去。 */
+  body.has-bg.wide .canvas {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: space-between;
+  }
+  body.has-bg.wide h1 {
+    max-width: 58%;
+  }
+  body.has-bg.wide .main {
+    flex: 0 0 auto;
+  }
+  body.has-bg.wide .foot {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: calc(var(--base) * 0.8);
+    min-width: 0;
+  }
+  /* 方形比竖版矮，底板占比小一点，让图多露出来。 */
+  @media (max-aspect-ratio: 1/1) {
+    body.has-bg:not(.wide)::after {
+      height: 58%;
+    }
+  }
   .logo {
     position: absolute;
     top: calc(var(--base) * 1.1);
@@ -207,6 +297,7 @@ export function renderPosterHtml(
     font-size: calc(var(--base) * 0.3);
     letter-spacing: 0.18em;
     color: color-mix(in srgb, var(--ink) 78%, transparent);
+    text-shadow: 0 1px 6px color-mix(in srgb, var(--from) 70%, transparent);
   }`
       : ''
   }
@@ -303,7 +394,7 @@ export function renderPosterHtml(
   }
 </style>
 </head>
-<body${hasBackground ? ' class="has-bg"' : ''}>
+<body${bodyClass === '' ? '' : ` class="${bodyClass}"`}>
   ${options.logo !== undefined && options.logo.trim() !== '' ? `<div class="logo">${escapeHtml(options.logo.trim())}</div>` : ''}
   <div class="canvas">
     <span class="ring a"></span>

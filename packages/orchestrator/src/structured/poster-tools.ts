@@ -284,9 +284,133 @@ export function createPosterBackgroundTool(): ToolRegistration {
   };
 }
 
+/**
+ * 画一张主视觉。
+ *
+ * 与 `poster-background` 的分工：那个是"找一张现成照片"，这个是"画一张"。
+ * 宣传海报要的是能承载标题的画面，而不是纪实照片，所以海报预设默认走这条；
+ * 搜图留作没接图像端点时的兜底。
+ *
+ * 提示词里**不要文字**：图像模型画中文几乎必错，文案交给 HTML 排版那一层，
+ * 这样字始终是清晰的、可改的。
+ */
+export function createPosterVisualTool(): ToolRegistration {
+  return {
+    spec: {
+      id: 'poster-visual',
+      label: '生成主视觉图',
+      description: '按文案用图像模型画一张不含文字的主视觉，作为海报背景',
+      envTypes: ['image'],
+      role: 'generate',
+      category: 'poster',
+      inputs: [
+        { name: 'brief', type: 'text', required: true, description: '海报文案 JSON（决定画什么）' },
+        { name: 'goal', type: 'text', required: false, description: '海报目标（补充场景信息）' },
+        { name: 'style', type: 'text', required: false, description: '追加的风格要求' },
+        { name: 'aspect', type: 'text', required: false, description: 'tall（默认）| wide | square' },
+      ],
+      outputs: [
+        { name: 'image', type: 'text', required: true, description: 'data URI；空串表示没生成出来' },
+        { name: 'prompt', type: 'text', required: true, description: '实际用的提示词（便于复现同一张图）' },
+      ],
+      costHint: 'slow',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      const rawBrief = requireString(runtime.inputs, 'brief', 'poster-visual');
+      if (runtime.llm?.generateImage === undefined) {
+        throw new ToolError(
+          '主视觉生成需要图像端点，但本次运行没有配置',
+          'EXECUTION_FAILED',
+          'poster-visual',
+        );
+      }
+      const goal = typeof runtime.inputs['goal'] === 'string' ? runtime.inputs['goal'] : '';
+      const style = typeof runtime.inputs['style'] === 'string' ? runtime.inputs['style'] : '';
+      const aspect = typeof runtime.inputs['aspect'] === 'string' ? runtime.inputs['aspect'] : 'tall';
+
+      let brief: Partial<PosterBrief> = {};
+      try {
+        brief = JSON.parse(rawBrief) as Partial<PosterBrief>;
+      } catch {
+        /* 文案不是 JSON 也要能画：退回只用 goal */
+      }
+
+      const prompt = buildVisualPrompt({ goal, style, aspect, brief });
+      runtime.log(`主视觉提示词：${prompt}`);
+
+      try {
+        const response = await runtime.llm.generateImage({
+          prompt,
+          n: 1,
+          // 单张 120s：本地代理偶发挂住时不能让整条链路等到节点超时。
+          signal:
+            runtime.signal === undefined
+              ? AbortSignal.timeout(120_000)
+              : AbortSignal.any([runtime.signal, AbortSignal.timeout(120_000)]),
+        });
+        const image = response.images[0];
+        if (image === undefined) {
+          return {
+            outputs: { image: '', prompt },
+            artifacts: [],
+            summary: '图像端点没有返回图，海报改用渐变底',
+          };
+        }
+        const base64 = Buffer.from(image.bytes).toString('base64');
+        return {
+          outputs: { image: `data:${image.mimeType};base64,${base64}`, prompt },
+          artifacts: [],
+          summary: `主视觉 ${response.model}：${Math.round(image.bytes.length / 1024)} KB`,
+        };
+      } catch (error) {
+        // 生图失败不拖垮整条链路：海报用渐变底照样出得来，原因留在运行日志里。
+        const reason = error instanceof Error ? error.message : String(error);
+        runtime.log(`主视觉生成失败：${reason}`);
+        return {
+          outputs: { image: '', prompt },
+          artifacts: [],
+          summary: `主视觉生成失败（${reason.slice(0, 80)}），改用渐变底`,
+        };
+      }
+    },
+  };
+}
+
+/** 把文案与目标拼成一条图像提示词。中文主题 + 英文风格词，模型两边都吃。 */
+export function buildVisualPrompt(args: {
+  readonly goal: string;
+  readonly style: string;
+  readonly aspect: string;
+  readonly brief: Partial<PosterBrief>;
+}): string {
+  const { goal, style, aspect, brief } = args;
+  const composition =
+    aspect === 'wide'
+      ? '横版 16:9 构图，主体在中右，左侧留出干净空间放标题'
+      : aspect === 'square'
+        ? '方形 1:1 构图，主体在中下，上方留出干净空间放标题'
+        : '竖版 3:4 构图，主体在中下偏右，上方三分之一留出干净空间放标题';
+
+  const lines = [
+    '为一张宣传海报画主视觉插画。',
+    goal === '' ? '' : `海报主题：${goal}`,
+    brief.headline === undefined ? '' : `画面要呼应标题「${brief.headline}」。`,
+    brief.subheadline === undefined ? '' : `情境：${brief.subheadline}`,
+    Array.isArray(brief.points) && brief.points.length > 0
+      ? `出现的元素：${brief.points.join('；')}。`
+      : '',
+    '风格：动画电影级插画，细腻笔触，体积光，通透的水色与暖色对比，画面有故事感。',
+    `构图：${composition}。`,
+    style,
+    '画面里不要出现任何文字、字母、数字、标志、水印、边框。',
+  ];
+  return lines.filter((line) => line !== '').join('\n');
+}
+
 export function createPosterTools(driver: ScreenshotDriver): readonly ToolRegistration[] {
   return [
     createPosterBriefTool(),
+    createPosterVisualTool(),
     createPosterBackgroundTool(),
     createPosterRenderTool(),
     createPosterExportTool(driver),

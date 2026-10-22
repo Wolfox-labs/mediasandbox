@@ -24,28 +24,39 @@ export interface PosterWorkflowOptions {
   readonly tone?: string | undefined;
   /** 要导出的尺寸 id；省略就是四个全出。 */
   readonly sizeIds?: readonly string[] | undefined;
-  /** 是否搜一张实景图当背景（只搜图、不生图）。 */
+  /** 用图像模型画主视觉（默认开）。一张图复用给所有尺寸。 */
+  readonly visual?: boolean | undefined;
+  /** 追加的主视觉风格要求。 */
+  readonly style?: string | undefined;
+  /** 是否搜一张实景图当背景（只搜图、不生图）。给了 visual 时忽略。 */
   readonly background?: boolean | undefined;
   /** 叠在图上的品牌落款。 */
   readonly logo?: string | undefined;
 }
 
 /**
- * 海报工作流：一次执笔，四个尺寸各排版一次、导出一次。
+ * 海报工作流：一次执笔，一张主视觉，四个尺寸各排版一次、导出一次。
  *
  * ```
- * brief ─┬─ render-story  ─ export-story
- *        ├─ render-square ─ export-square
- *        ├─ render-banner ─ export-banner
- *        └─ render-a4     ─ export-a4
+ * brief ─┬─ visual ─┬─ render-story  ─ export-story
+ *        │          ├─ render-square ─ export-square
+ *        │          ├─ render-banner ─ export-banner
+ *        │          └─ render-a4     ─ export-a4
+ *        └──────────────┘   （no-visual 时 render 直接吃 brief）
  * ```
  *
  * 四个分支互不依赖，执行器会并发跑；每个分支的 export 只依赖自己的 render。
+ * 主视觉只画一张、四个尺寸共用：多画三张要多花三份钱，而裁切已经能覆盖四种比例。
  */
 export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
   const sizes = (options.sizeIds ?? POSTER_SIZES.map((size) => size.id)).map((id) =>
     resolvePosterSize(id),
   );
+  const useVisual = options.visual === true;
+  // 搜图只在明确要"实景照片"、且没有开生图时用。
+  const useBackground = !useVisual && options.background === true;
+  // 全部尺寸都是横的才按横构图取景；混合尺寸（默认四种）按竖版。
+  const allWide = sizes.length > 0 && sizes.every((size) => size.width > size.height);
 
   const nodes: WorkflowNodeDef[] = [
     {
@@ -61,7 +72,22 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
     },
   ];
 
-  if (options.background === true) {
+  if (useVisual) {
+    nodes.push({
+      id: 'visual',
+      toolId: 'poster-visual',
+      inputs: {
+        brief: { from: 'brief', port: 'brief' },
+        goal: { value: options.goal },
+        aspect: { value: allWide ? 'wide' : 'tall' },
+        ...(options.style !== undefined && options.style !== '' ? { style: { value: options.style } } : {}),
+      },
+      note: '画一张主视觉',
+      position: { x: 320, y: 0 },
+    });
+  }
+
+  if (useBackground) {
     nodes.push({
       id: 'background',
       toolId: 'poster-background',
@@ -70,7 +96,7 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
         source: { value: 'web' },
       },
       note: '找一张背景图',
-      position: { x: 0, y: 160 },
+      position: { x: 320, y: 0 },
     });
   }
 
@@ -84,11 +110,12 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
         inputs: {
           brief: { from: 'brief', port: 'brief' },
           sizeId: { value: size.id },
-          ...(options.background === true ? { background: { from: 'background', port: 'image' } } : {}),
+          ...(useVisual ? { background: { from: 'visual', port: 'image' } } : {}),
+          ...(useBackground ? { background: { from: 'background', port: 'image' } } : {}),
           ...(options.logo !== undefined && options.logo !== '' ? { logo: { value: options.logo } } : {}),
         },
         note: `排版 ${size.label}`,
-        position: { x: 320, y: index * 140 },
+        position: { x: 640, y: index * 140 },
       },
       {
         id: exportId,
@@ -99,7 +126,7 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
           html: { from: renderId, port: 'html' },
         },
         note: `导出 ${size.label}`,
-        position: { x: 640, y: index * 140 },
+        position: { x: 960, y: index * 140 },
       },
     );
   });
@@ -107,7 +134,7 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
   return {
     id: 'poster',
     name: '海报（多尺寸）',
-    description: `${sizes.length} 个尺寸：${sizes.map((size) => size.label).join('、')}`,
+    description: `${sizes.length} 个尺寸：${sizes.map((size) => size.label).join('、')}${useVisual ? '（含 AI 主视觉）' : ''}`,
     envType: 'image',
     nodes,
   };

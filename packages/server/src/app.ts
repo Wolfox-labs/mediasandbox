@@ -956,7 +956,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       // 没有 goal 时用占位目标展开，只为展示结构，不代表可运行。
       if (id === 'poster') {
         const goalRaw = typeof req.query['goal'] === 'string' ? req.query['goal'].trim() : '';
-        const def = posterWorkflow({ goal: goalRaw === '' ? '（未填写目标）' : goalRaw });
+        const def = posterWorkflow({
+          goal: goalRaw === '' ? '（未填写目标）' : goalRaw,
+          // 画布上要能看见"主视觉"这一步：它默认就开，预览图也照实展开。
+          visual: req.query['visual'] !== 'false',
+        });
         res.json({ workflow: { ...builtin, ...def, builtin: true, dynamic: true } });
         return;
       }
@@ -1079,7 +1083,11 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
         ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
         ...(typeof body['logo'] === 'string' ? { logo: body['logo'] } : {}),
+        ...(typeof body['style'] === 'string' ? { style: body['style'] } : {}),
         ...(sizeIds !== undefined && sizeIds.length > 0 ? { sizeIds } : {}),
+        // 生图默认开：海报要的不是渐变底，而是能承载标题的画面。
+        // 显式传 `visual:false` 才退回纯排版/搜图。
+        visual: body['visual'] !== false,
         ...(body['background'] === true ? { background: true } : {}),
       });
     } else if (id === 'page') {

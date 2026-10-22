@@ -19,8 +19,22 @@ import {
   type LlmUsage,
 } from './types.js';
 
-export interface ProviderProfile {
-  /** 供应商标识，用于日志与配置选择。 */
+/**
+ * 按文件头认图片格式。
+ *
+ * 图像端点的 `b64_json` 不保证是自己声称的格式：实测 `gemini-3.1-flash-image`
+ * 返回的是 JPEG。标成 png 之后产物扩展名、data URI 前缀都会错。
+ */
+export function sniffImageMime(bytes: Uint8Array): string {
+  const at = (index: number): number => bytes[index] ?? 0;
+  if (at(0) === 0x89 && at(1) === 0x50 && at(2) === 0x4e && at(3) === 0x47) return 'image/png';
+  if (at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) return 'image/jpeg';
+  if (at(0) === 0x47 && at(1) === 0x49 && at(2) === 0x46 && at(3) === 0x38) return 'image/gif';
+  if (at(8) === 0x57 && at(9) === 0x45 && at(10) === 0x42 && at(11) === 0x50) return 'image/webp';
+  return 'image/png';
+}
+
+export interface ProviderProfile {  /** 供应商标识，用于日志与配置选择。 */
   readonly id: string;
   readonly baseUrl: string;
   /** 默认模型。请求里未指定时使用。 */
@@ -445,9 +459,13 @@ export class OpenAiCompatibleClient implements LlmClient {
         const record = entry as Record<string, unknown>;
         const b64 = record['b64_json'];
         if (typeof b64 === 'string' && b64 !== '') {
+          const bytes = Buffer.from(b64, 'base64');
           images.push({
-            bytes: Buffer.from(b64, 'base64'),
-            mimeType: 'image/png',
+            bytes,
+            // 不能硬编码 png：gemini-3.1-flash-image 的 b64 其实是 JPEG，
+            // 标错之后产物扩展名、data URI 前缀全是错的（浏览器仍能显示，
+            // 但 `artifacts/*.png` 里躺着 JPEG，下载/再处理时才炸）。
+            mimeType: sniffImageMime(bytes),
             source: 'b64',
           });
           continue;
@@ -494,8 +512,7 @@ export class OpenAiCompatibleClient implements LlmClient {
     }
   }
 
-  async health(): Promise<{ readonly ok: boolean; readonly detail: string }> {
-    const controller = new AbortController();
+  async health(): Promise<{ readonly ok: boolean; readonly detail: string }> {    const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5_000);
     try {
       const response = await this.fetchImpl(`${this.baseUrl}/models`, {
