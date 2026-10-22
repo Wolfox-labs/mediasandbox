@@ -334,6 +334,8 @@ export function createScreenshotDeckTool(driver: ScreenshotDriver): ToolRegistra
       category: 'structured',
       inputs: [
         { name: 'file', type: 'text', required: false, description: '要截图的文稿路径' },
+        // 内容指纹：截图读沙盒文件，但缓存键只看入参；不接 HTML 会出现"文稿换了、图还是旧的"。
+        { name: 'html', type: 'text', required: false, description: '文稿 HTML（仅用于缓存指纹）' },
         { name: 'width', type: 'number', required: false, description: '视口宽度' },
         { name: 'height', type: 'number', required: false, description: '视口高度' },
       ],

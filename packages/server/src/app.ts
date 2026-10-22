@@ -28,6 +28,7 @@ import {
   extractTemplate,
   posterWorkflow,
   pageWorkflow,
+  deckWorkflow,
   runWorkflow,
   validateWorkflow,
   type BlockGroup,
@@ -904,7 +905,31 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         { name: 'templateId', required: true, description: '整页模板 id（GET /api/templates 里 kind=page 的那些）' },
       ],
     },
-  ];
+    {
+      id: 'deck',
+      name: '演示文稿（版式序列）',
+      description: '按给定版式序列展开成固定页序：每页填充 + 组装 + 校验',
+      envType: 'slides' as const,
+      builtin: true,
+      params: [
+        { name: 'goal', required: true, description: '演示文稿目标' },
+        { name: 'layouts', required: false, description: '版式 id 序列，默认 cover → bullets → bullets → closing' },
+      ],
+    },
+  ] as const;
+
+  /** 版式序列：接受数组或逗号分隔字符串。 */
+  function parseLayoutList(raw: unknown): string[] | undefined {
+    const items = Array.isArray(raw)
+      ? raw
+      : typeof raw === 'string'
+        ? raw.split(',')
+        : [];
+    const list = items
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item !== '');
+    return list.length > 0 ? list : undefined;
+  }
 
   app.get('/api/workflows', (_req: Request, res: Response) => {
     const custom = deps.workflows?.list() ?? [];
@@ -932,6 +957,16 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       if (id === 'poster') {
         const goalRaw = typeof req.query['goal'] === 'string' ? req.query['goal'].trim() : '';
         const def = posterWorkflow({ goal: goalRaw === '' ? '（未填写目标）' : goalRaw });
+        res.json({ workflow: { ...builtin, ...def, builtin: true, dynamic: true } });
+        return;
+      }
+      if (id === 'deck') {
+        const goalRaw = typeof req.query['goal'] === 'string' ? req.query['goal'].trim() : '';
+        const layouts = parseLayoutList(req.query['layouts']);
+        const def = deckWorkflow({
+          goal: goalRaw === '' ? '（未填写目标）' : goalRaw,
+          ...(layouts !== undefined ? { layouts } : {}),
+        });
         res.json({ workflow: { ...builtin, ...def, builtin: true, dynamic: true } });
         return;
       }
@@ -1074,6 +1109,18 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         template: deps.templates.get(templateId),
         goal,
         blocks: deps.blocks,
+        ...(body['screenshot'] === true ? { screenshot: true } : {}),
+      });
+    } else if (id === 'deck') {
+      if (goal === '') {
+        errorResponse(res, 400, '运行演示文稿工作流需要 goal');
+        return;
+      }
+      const layouts = parseLayoutList(body['layouts']);
+      def = deckWorkflow({
+        goal,
+        ...(layouts !== undefined ? { layouts } : {}),
+        ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
         ...(body['screenshot'] === true ? { screenshot: true } : {}),
       });
     } else {

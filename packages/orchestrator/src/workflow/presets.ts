@@ -261,3 +261,100 @@ export function pageWorkflow(options: PageWorkflowOptions): WorkflowDef {
     nodes,
   };
 }
+
+export interface DeckWorkflowOptions {
+  readonly goal: string;
+  /** 版式序列，例如 ['cover','bullets','bullets','closing']。 */
+  readonly layouts?: readonly string[] | undefined;
+  readonly brand?: string | undefined;
+  readonly screenshot?: boolean | undefined;
+}
+
+/** 没有指定时用一套最朴素的页序：封面 → 两页要点 → 收尾。 */
+const DEFAULT_DECK_LAYOUTS = ['cover', 'bullets', 'bullets', 'closing'] as const;
+
+/**
+ * 演示文稿工作流：**版式序列 → 可执行 DAG**。
+ *
+ * 与网页预设同一条思路：页序与版式来自参数而不是决策模型，于是每次跑出来的
+ * 骨架完全一致。幻灯片与网页的区别只在工具与产物（deck.html / deck.json）。
+ */
+export function deckWorkflow(options: DeckWorkflowOptions): WorkflowDef {
+  const layouts = options.layouts !== undefined && options.layouts.length > 0
+    ? options.layouts
+    : [...DEFAULT_DECK_LAYOUTS];
+
+  const slides: BlockInstance[] = layouts.map((layout, index) => ({
+    id: `b${index + 1}`,
+    type: layout,
+    slots: {},
+    status: 'pending',
+    sources: {},
+  }));
+
+  const skeleton = {
+    projectId: 'workflow',
+    goal: options.goal,
+    candidateBlockIds: [...new Set(layouts)],
+    blocks: slides,
+    qualityScore: 1,
+    createdAt: 0,
+  };
+
+  const nodes: WorkflowNodeDef[] = [];
+  const refs: { nodeId: string; port: string }[] = [];
+  slides.forEach((slide, index) => {
+    const id = `fill-${slide.id}`;
+    nodes.push({
+      id,
+      toolId: 'fill-slide',
+      inputs: {
+        slideJson: { value: JSON.stringify(slide) },
+        goal: { value: options.goal },
+        ...(options.brand !== undefined ? { brand: { value: options.brand } } : {}),
+        index: { value: index },
+        useGenerative: { value: true },
+      },
+      note: `填充第 ${index + 1} 页（${slide.type}）`,
+      position: { x: 0, y: index * 120 },
+    });
+    refs.push({ nodeId: id, port: 'slide' });
+  });
+
+  nodes.push(
+    {
+      id: 'assemble',
+      toolId: 'assemble-deck',
+      inputs: {
+        deckJson: { value: JSON.stringify(skeleton) },
+        slides: { from: refs },
+        title: { value: options.goal },
+        composition: { value: 'ranked' },
+      },
+      note: '组装为完整文稿',
+      position: { x: 320, y: 0 },
+    },
+  );
+
+  if (options.screenshot === true) {
+    nodes.push({
+      id: 'screenshot',
+      toolId: 'screenshot-deck',
+      inputs: {
+        file: { value: 'artifacts/deck.html' },
+        html: { from: 'assemble', port: 'html' },
+      },
+      dependsOn: ['assemble'],
+      note: '把首页截成一张图',
+      position: { x: 960, y: 0 },
+    });
+  }
+
+  return {
+    id: 'deck',
+    name: '演示文稿（版式序列）',
+    description: `${slides.length} 页：${layouts.join(' → ')}`,
+    envType: 'slides',
+    nodes,
+  };
+}
