@@ -255,3 +255,34 @@ export {
   type DecisionContractOptions,
 } from './testing/decision-contract.js';
 export { MockLlmClient, type MockLlmOptions, type MockRule } from './testing/mock-llm.js';
+
+// ── 工作流：定义、校验、执行、缓存 ────────────────────────────────────
+export {
+  dependenciesOf,
+  isRef,
+  isRefs,
+  toPlan,
+  type RefSource,
+  type RefsSources,
+  type WorkflowDef,
+  type WorkflowInput,
+  type WorkflowNodeDef,
+} from './workflow/types.js';
+export { validateWorkflow, WorkflowError, type WorkflowErrorCode } from './workflow/validate.js';
+export { runWorkflow, type RunWorkflowOptions, type WorkflowRunResult } from './workflow/runner.js';
+export { FileNodeCache, type FileNodeCacheOptions } from './workflow/node-cache.js';
+export { posterWorkflow, type PosterWorkflowOptions } from './workflow/presets.js';
+export { cacheKeyFor, hashString, stableStringify, type NodeCache, type CachedNodeResult } from './plan/cache.js';
+
+// ── 海报 ──────────────────────────────────────────────────────────────
+export {
+  DEFAULT_PALETTE as DEFAULT_POSTER_PALETTE,
+  DEFAULT_POSTER_SIZE,
+  normalizeBrief,
+  POSTER_SIZES,
+  renderPosterHtml,
+  resolvePosterSize,
+  type PosterBrief,
+  type PosterSize,
+} from './structured/poster.js';
+export { createPosterTools } from './structured/poster-tools.js';

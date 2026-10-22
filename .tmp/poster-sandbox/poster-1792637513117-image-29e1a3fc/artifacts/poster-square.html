@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>抱走旧吉他，清空行李箱</title>
+<style>
+  :root {
+    --from: #1b2a26;
+    --to: #2d4a3e;
+    --accent: #facc15;
+    --ink: #fefce8;
+    --base: 58px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1080px; height: 1080px; overflow: hidden; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(120% 80% at 12% 0%, color-mix(in srgb, var(--accent) 26%, transparent) 0%, transparent 60%),
+      radial-gradient(90% 70% at 100% 100%, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 55%),
+      linear-gradient(155deg, var(--from) 0%, var(--to) 100%);
+  }
+  .canvas {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    padding: calc(var(--base) * 1.1);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: calc(var(--base) * 0.9);
+  }
+  .ring {
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .ring.a { width: calc(var(--base) * 9); height: calc(var(--base) * 9); right: calc(var(--base) * -2.4); top: calc(var(--base) * -3); }
+  .ring.b { width: calc(var(--base) * 5.4); height: calc(var(--base) * 5.4); left: calc(var(--base) * -1.8); bottom: calc(var(--base) * -1.6); opacity: 0.3; }
+  .main { position: relative; z-index: 1; display: flex; flex-direction: column; gap: calc(var(--base) * 0.75);  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(var(--base) * 0.28);
+    font-size: calc(var(--base) * 0.34);
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--accent) 88%, white 12%);
+  }
+  .eyebrow::before {
+    content: "";
+    width: calc(var(--base) * 0.5);
+    height: 2px;
+    background: var(--accent);
+    display: inline-block;
+  }
+  h1 {
+    font-size: calc(var(--base) * 1.55);
+    line-height: 1.12;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .sub {
+    font-size: calc(var(--base) * 0.46);
+    line-height: 1.55;
+    color: color-mix(in srgb, var(--ink) 78%, transparent);
+    max-width: 22ch;
+  }
+  ul { list-style: none; display: flex; flex-direction: column; gap: calc(var(--base) * 0.38); }
+  li {
+    display: flex;
+    align-items: baseline;
+    gap: calc(var(--base) * 0.42);
+    font-size: calc(var(--base) * 0.44);
+    line-height: 1.35;
+    color: color-mix(in srgb, var(--ink) 92%, transparent);
+  }
+  .dot {
+    font-size: calc(var(--base) * 0.3);
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    padding-bottom: 2px;
+  }
+  .foot {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center; justify-content: space-between;
+    gap: calc(var(--base) * 0.5);
+  }
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(var(--base) * 0.3);
+    padding: calc(var(--base) * 0.34) calc(var(--base) * 0.72);
+    border-radius: 999px;
+    background: var(--accent);
+    color: #06121f;
+    font-size: calc(var(--base) * 0.4);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .cta::after { content: "→"; }
+  .sig {
+    font-size: calc(var(--base) * 0.3);
+    letter-spacing: 0.12em;
+    color: color-mix(in srgb, var(--ink) 62%, transparent);
+  }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <span class="ring a"></span>
+    <span class="ring b"></span>
+    <div class="main">
+      <span class="eyebrow">Poster</span>
+      <h1>抱走旧吉他，清空行李箱</h1>
+      <p class="sub">全校师生本周六午后相聚南区操场，百余摊位等你来淘。</p>
+      <ul><li><span class="dot">01</span>周六14:00-18:00 南区田径场草坪</li><li><span class="dot">02</span>教材考研笔记、闲置数码一折起</li><li><span class="dot">03</span>现场提供免费打包袋与推车租借</li></ul>
+    </div>
+    <div class="foot">
+      <span class="cta">来操场淘好物</span>
+      <span class="sig">校学生会权益部主办 · 2024年5月18日</span>
+    </div>
+  </div>
+</body>
+</html>

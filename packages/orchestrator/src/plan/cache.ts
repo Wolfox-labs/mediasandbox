@@ -46,14 +46,19 @@ export interface NodeCache {
 /**
  * 缓存键：`<toolId>-<hash>`。
  *
- * 版本号写进键里：缓存格式一旦变动（比如产物列表结构改了），
- * 老键自然失效，不用手动清目录。
+ * 三个因子决定键，缺一不可：
+ *   1. **版本号**：缓存格式变了就 +1（老键自然失效，不用手动清目录）
+ *   2. **代码盐**：`MEDIASANDBOX_CACHE_SALT`。模板/渲染器改了但入参没变时，
+ *      只有显式换盐才能让旧缓存失效——这是刻意的：**代码变更不该悄悄复用旧产物**，
+ *      但也不该每次启动都全量重跑。
+ *   3. `工具 id + 解析后的入参`
  */
-export const NODE_CACHE_VERSION = 1;
+export const NODE_CACHE_VERSION = 2;
 
 export function cacheKeyFor(node: PlanNode, inputs: Readonly<Record<string, unknown>>): string {
   const payload = stableStringify({
     v: NODE_CACHE_VERSION,
+    salt: process.env['MEDIASANDBOX_CACHE_SALT'] ?? '',
     tool: node.toolId,
     inputs,
   });
