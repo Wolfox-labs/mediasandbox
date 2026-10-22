@@ -47,14 +47,24 @@ describe('模板：内置词表', () => {
     assert.ok(registry.size >= 3, '至少要有几种能覆盖常见目标形态');
   });
 
-  it('内置模板都是**起手前缀**，没有一个是排满整页的', () => {
+  it('内置模板分两类：起手前缀（≤2 块）与整页模板（以页脚收尾）', () => {
     for (const spec of builtinTemplates()) {
+      assert.equal(spec.builtin, true);
+      if (spec.kind === 'page') {
+        assert.ok(spec.blocks.length >= 3, `${spec.id} 整页模板段落太少`);
+        const last = spec.blocks.at(-1)!;
+        assert.equal(
+          blocks.get(last.type).placement,
+          'last',
+          `${spec.id} 整页模板必须以页脚收尾，当前末块是 ${last.type}`,
+        );
+        continue;
+      }
       assert.ok(spec.blocks.length >= 1, `${spec.id} 应当至少给一块起手`);
       assert.ok(
         spec.blocks.length <= 2,
         `${spec.id} 起手 ${spec.blocks.length} 块太多了——起手太长，模型就没得可排`,
       );
-      assert.equal(spec.builtin, true);
     }
   });
 

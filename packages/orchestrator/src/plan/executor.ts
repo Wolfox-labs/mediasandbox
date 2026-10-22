@@ -62,7 +62,7 @@ export interface ExecuteOptions {
   readonly sandbox: SandboxProvider;
   readonly handle: SandboxHandle;
   readonly llm?: LlmClient | undefined;
-  /** 单个节点的超时毫秒。默认 120_000。 */
+  /** 单个节点的超时毫秒。默认 300_000（生图单张可能 30–120s，必须留足余量）。 */
   readonly nodeTimeoutMs?: number | undefined;
   /** 同层并发上限。默认 4——沙盒里的工具多是 IO 密集，不需要开太多。 */
   readonly maxConcurrency?: number | undefined;
@@ -133,8 +133,10 @@ export class PlanExecutor {
       sandbox,
       handle,
       llm,
-      nodeTimeoutMs = 120_000,
-      maxConcurrency = 4,
+      nodeTimeoutMs = 300_000,
+      // 结构化链路一页 5~6 块，全在同一层：4 会让它分成"4 + 剩下一块"两波，
+      // 而最后一波往往只跑一块，等于整页多等一个 RTT。
+      maxConcurrency = 6,
       onEvent,
       signal,
       maxRetries = 0,

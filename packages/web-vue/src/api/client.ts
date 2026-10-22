@@ -448,6 +448,15 @@ export interface TemplateItem {
   readonly description: string;
   /** 内置模板（我们提供的）还是从项目里沉淀的。 */
   readonly builtin: boolean;
-  readonly blocks: readonly { readonly type: string }[];
+  /**
+   * `starter`：只给起手块，其余由决策层逐块决定。
+   * `page`：整页固定结构，段数/顺序/版式/收尾都写死，模型只写内容。
+   */
+  readonly kind?: 'starter' | 'page';
+  readonly blocks: readonly {
+    readonly type: string;
+    readonly layout?: string | null;
+    readonly counts?: Readonly<Record<string, number>> | null;
+  }[];
   readonly allowedBlockIds: readonly string[] | null;
 }

@@ -29,6 +29,7 @@ import StepGoal from './modules/step-goal.vue';
 import StepDecision from './modules/step-decision.vue';
 import StepInteraction from './modules/step-interaction.vue';
 import StepResult from './modules/step-result.vue';
+import RunProgress from './modules/run-progress.vue';
 
 defineOptions({ name: 'Workbench' });
 
@@ -236,6 +237,9 @@ function restart(): void {
         {{ connectionLabel }}
       </NTag>
     </nav>
+
+    <!-- 运行进度：进行中显示"做到哪一步、还剩多少、正在干嘛"，失败直接给原因 -->
+    <RunProgress />
 
     <!-- 当前步骤。每步自己有独立地址，这里只负责挑一个渲染。 -->
     <StepGoal v-if="currentStep === 'goal'" @next="go('decision')" />

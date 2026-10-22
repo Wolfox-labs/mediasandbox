@@ -65,9 +65,10 @@ const blueprintDetail = computed<string | undefined>(() => {
   return plan !== undefined && !plan.ok ? plan.detail : undefined;
 });
 
-const KIND_LABEL: Record<'select' | 'count_only' | 'quality', string> = {
+const KIND_LABEL: Record<'select' | 'count_only' | 'layout' | 'quality', string> = {
   select: '选块',
   count_only: '定数量',
+  layout: '选版式',
   quality: '质量评估'
 };
 
@@ -75,6 +76,7 @@ const KIND_LABEL: Record<'select' | 'count_only' | 'quality', string> = {
 const QUESTION_LABEL: Record<string, string> = {
   next_block: '下一块用哪个',
   continue_structuring: '还要继续排吗',
+  block_layout: '这块用哪种版式',
   structure_quality: '整页质量'
 };
 

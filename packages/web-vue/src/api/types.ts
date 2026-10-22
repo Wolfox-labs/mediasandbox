@@ -253,7 +253,7 @@ export interface StructureView {
   };
   readonly steps: readonly {
     readonly round: number;
-    readonly kind: 'select' | 'count_only' | 'quality';
+    readonly kind: 'select' | 'count_only' | 'layout' | 'quality';
     readonly questionIds: readonly string[];
     readonly pickedBlockId: string | null;
     readonly continueProbability: number | null;

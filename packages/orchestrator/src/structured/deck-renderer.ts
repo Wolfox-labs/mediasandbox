@@ -759,8 +759,17 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
   --fs-display:5.2cqw;--fs-h1:4cqw;--fs-h2:2.8cqw;--fs-body:2.05cqw;--fs-caption:1.7cqw;--fs-metric:7.2cqw;
 }
 .slide[data-tone="accent"] .slide__frame{
-  background:linear-gradient(135deg,color-mix(in srgb,var(--sk-accent,#3b6df5) 34%,var(--sk-bg,#10151f)) 0%,
-    var(--sk-bg,#10151f) 62%);
+  /* 这里原先是 color-mix(in srgb, var(--sk-accent) 34%, var(--sk-bg))，
+     但 --sk-bg 是**渐变**（8 套主题里 7 套都是），不是颜色。把渐变塞进
+     color-mix 的第二个参数会让整条 background 在计算值阶段失效，结果是
+     background:unset —— 页面变透明、露出 body 的深底。
+     封面/章节/主张/引用/结尾页全属这一档，所以主题背景在它们上面从来没生效过。
+
+     改成「一层半透明强调色 叠在 主题底 之上」：transparent 是合法颜色，
+     渐变底与纯色底都能这样叠。 */
+  background:
+    linear-gradient(135deg,color-mix(in srgb,var(--sk-accent,#3b6df5) 34%,transparent) 0%,transparent 62%),
+    var(--sk-bg,#10151f);
 }
 .slide[data-tone="accent"] .slide__frame::before{opacity:.26}
 .slide[data-tone="tinted"] .slide__frame::after{height:.5cqw;opacity:.95}
@@ -977,7 +986,10 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
     `<meta name="viewport" content="width=device-width,initial-scale=1">\n` +
     `<title>${escapeHtml(title)}</title>\n<style>${DECK_CSS}</style>\n</head>\n<body>\n` +
     `<main class="deck" data-ms-project="${escapeHtml(spec.projectId)}" ` +
-    `data-ms-theme="${escapeHtml(theme.id)}" style="${deckThemeCssVars(theme)}" ` +
+    // 主题变量里含字体名（如 `"PingFang SC"`），原样放进 `style="..."` 会被第一个双引号
+    // 截断，`--sk-display` 之后的变量全部丢失——字体、字重、字距、内边距、圆角都不生效。
+    // 所以这里必须转义：属性值内的 `&quot;` 解析回来仍是合法的 CSS 引号。
+    `data-ms-theme="${escapeHtml(theme.id)}" style="${escapeHtml(deckThemeCssVars(theme))}" ` +
     `data-ms-slides="${slides.length}" data-ms-goal="${escapeHtml(spec.goal)}">\n` +
     `<nav class="deck__nav" data-ms-tabs="deck" role="tablist" aria-label="页序">${dots}</nav>\n` +
     `<div class="deck__stage">${pages}</div>\n` +

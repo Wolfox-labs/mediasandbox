@@ -25,6 +25,7 @@
  */
 import type { BlockRegistry, BlockSpec, SlotSpec } from './block-spec.js';
 import type { BlockInstance, PageSpec, SlotValue } from './page-spec.js';
+import { deriveBrand } from './filler.js';
 
 export interface RenderOptions {
   /** 文档标题。缺省用 `spec.goal`。 */
@@ -101,6 +102,41 @@ function imagesOf(block: BlockInstance, name: string): { ref: string; alt: strin
   if (value.kind === 'image') return [{ ref: value.ref, alt: value.alt }];
   if (value.kind === 'list-image') return value.refs.map((r) => ({ ref: r.ref, alt: r.alt }));
   return [];
+}
+
+/**
+ * 版式 id。结构里没选过（或老数据没有这个字段）就用该类型的默认版式——
+ * 默认值由各渲染函数给，因为它们最清楚"没有偏好时哪种最稳妥"。
+ */
+function layoutOf(block: BlockInstance, fallback: string): string {
+  const layout = block.layout;
+  return layout === undefined || layout === '' ? fallback : layout;
+}
+
+/**
+ * 页面壳的锚点标签：取这一块真正的小节标题，而不是 block 类型名。
+ *
+ * 不是每种 block 都有可当标题的 slot（`tabs` / `form` 的标题在列表里），
+ * 表里没有的就不进导航——宁可少一个锚点，也不要在顶栏印一串 `b3 features`。
+ */
+const SECTION_HEADING_SLOT: Readonly<Record<string, string>> = {
+  hero: 'title',
+  features: 'heading',
+  gallery: 'heading',
+  text: 'heading',
+  table: 'heading',
+  code: 'heading',
+  video: 'heading',
+  form: 'heading',
+  accordion: 'heading',
+};
+
+function anchorLabel(block: BlockInstance): string {
+  const slotName = SECTION_HEADING_SLOT[block.type];
+  if (slotName === undefined) return '';
+  const raw = textOf(block, slotName).replace(/\s+/g, ' ').trim();
+  if (raw === '') return '';
+  return raw.length > 18 ? `${raw.slice(0, 17)}…` : raw;
 }
 
 /** 一行 "a | b" 拆成 [a, b]；没有分隔符时第二项为空。 */
@@ -184,15 +220,32 @@ const renderHero: BlockRenderer = (b) => {
   const actionHref = textOf(b, 'actionHref', '#');
   const media = imagesOf(b, 'media');
   const mediaHtml = media.length > 0 ? imageHtml(media[0]!.ref, media[0]!.alt, 'ms-hero__media') : '';
-  return (
-    `<header class="ms-hero">` +
+  // 版式只改摆法：分栏是"文在图侧"，居中通栏是"文在上、图在下"。
+  const layout = layoutOf(b, 'split');
+  const body =
     `<div class="ms-hero__body">` +
     `<h1 class="ms-hero__title">${inline(title)}</h1>` +
     (subtitle === '' ? '' : `<p class="ms-hero__subtitle">${inline(subtitle)}</p>`) +
     (actionText === ''
       ? ''
       : `<a class="ms-btn ms-btn--primary ms-hero__action" href="${escapeHtml(actionHref === '' ? '#' : actionHref)}">${inline(actionText)}</a>`) +
-    `</div>` +
+    `</div>`;
+
+  // 全幅背景：图当页面背景用，文字压在上面。没有图时退回居中通栏——
+  // 一块没有背景的"全幅"只是一段留白，比居中更差。
+  if (layout === 'immersive' && media.length > 0) {
+    const backdrop = media[0]!;
+    return (
+      `<header class="ms-hero ms-hero--immersive" role="img" aria-label="${escapeHtml(backdrop.alt)}">` +
+      `<div class="ms-hero__backdrop" style="background-image:url(${escapeHtml(backdrop.ref)})"></div>` +
+      body +
+      `</header>`
+    );
+  }
+
+  return (
+    `<header class="ms-hero ms-hero--${escapeHtml(layout)}">` +
+    body +
     (mediaHtml === '' ? '' : `<div class="ms-hero__visual">${mediaHtml}</div>`) +
     `</header>`
   );
@@ -201,6 +254,24 @@ const renderHero: BlockRenderer = (b) => {
 const renderFeatures: BlockRenderer = (b) => {
   const heading = textOf(b, 'heading');
   const items = listOf(b, 'items');
+  const layout = layoutOf(b, 'cards');
+  if (layout === 'rows') {
+    const rows = items
+      .map((item, i) => {
+        const [title, detail] = splitRow(item);
+        return (
+          `<li class="ms-features__row">` +
+          `<span class="ms-features__index">${String(i + 1).padStart(2, '0')}</span>` +
+          `<div class="ms-features__row-body">` +
+          `<h3 class="ms-features__item-title">${inline(title)}</h3>` +
+          (detail === '' ? '' : `<p class="ms-features__item-detail">${inline(detail)}</p>`) +
+          `</div>` +
+          `</li>`
+        );
+      })
+      .join('');
+    return section(heading, `<ul class="ms-features ms-features--rows">${rows}</ul>`, 'ms-features-section');
+  }
   const cards = items
     .map((item, i) => {
       const [title, detail] = splitRow(item);
@@ -213,24 +284,33 @@ const renderFeatures: BlockRenderer = (b) => {
       );
     })
     .join('');
-  return section(heading, `<ul class="ms-features">${cards}</ul>`, 'ms-features-section');
+  return section(heading, `<ul class="ms-features ms-features--${escapeHtml(layout)}">${cards}</ul>`, 'ms-features-section');
 };
 
 const renderGallery: BlockRenderer = (b) => {
   const heading = textOf(b, 'heading');
   const images = imagesOf(b, 'images');
+  const requested = layoutOf(b, 'grid');
+  // 拼贴版式需要"一大两小"：图不够三张时退回等宽网格，
+  // 否则网格里会留一个空洞，比整齐的网格更难看。
+  const layout = requested === 'collage' && images.length < 3 ? 'grid' : requested;
   const figures = images
     .map((img, i) => `<li class="ms-gallery__item" data-ms-index="${i}">${imageHtml(img.ref, img.alt)}</li>`)
     .join('');
-  return section(heading, `<ul class="ms-gallery">${figures}</ul>`, 'ms-gallery-section');
+  return section(
+    heading,
+    `<ul class="ms-gallery ms-gallery--${escapeHtml(layout)}">${figures}</ul>`,
+    'ms-gallery-section',
+  );
 };
 
 const renderCta: BlockRenderer = (b) => {
   const text = textOf(b, 'text', '现在开始');
   const buttonText = textOf(b, 'buttonText', '立即体验');
   const href = textOf(b, 'href', '#');
+  const layout = layoutOf(b, 'banner');
   return (
-    `<aside class="ms-cta">` +
+    `<aside class="ms-cta ms-cta--${escapeHtml(layout)}">` +
     `<p class="ms-cta__text">${inline(text)}</p>` +
     `<a class="ms-btn ms-btn--primary" href="${escapeHtml(href === '' ? '#' : href)}">${inline(buttonText)}</a>` +
     `</aside>`
@@ -520,7 +600,7 @@ const RENDERERS: Readonly<Record<string, BlockRenderer>> = {
  * 渲染器让整页失败，等于把"部分完成"这个性质抹掉了——而那正是结构化制作
  * 相对于"一次性生成一整页"的核心优势。
  */
-function renderBlock(block: BlockInstance, ctx: RenderContext): string {
+function renderBlock(block: BlockInstance, ctx: RenderContext, index: number): string {
   const parts: string[] = [];
 
   if (block.status === 'failed') {
@@ -565,9 +645,16 @@ function renderBlock(block: BlockInstance, ctx: RenderContext): string {
 
   // `data-ms-block` **无论如何都要有**：它是后续"定点重做"与"模拟点击定位"的锚点。
   // 不随 annotate 开关变化——关了标注不等于丢了锚点。
+  //
+  // `id` 只在有可读标题时给：页面壳的导航要按它跳转，没有标题的块不占锚点。
+  const label = anchorLabel(block);
+  const anchor = label === '' ? '' : ` id="ms-s${index + 1}"`;
   return (
-    `<div class="ms-block ms-block--${escapeHtml(block.type)}" data-ms-block="${escapeHtml(block.id)}" ` +
-    `data-ms-status="${escapeHtml(block.status)}" data-ms-type="${escapeHtml(block.type)}">` +
+    `<div class="ms-block ms-block--${escapeHtml(block.type)}"${anchor} ` +
+    `data-ms-block="${escapeHtml(block.id)}" ` +
+    `data-ms-status="${escapeHtml(block.status)}" data-ms-type="${escapeHtml(block.type)}"` +
+    (block.layout === undefined ? '' : ` data-ms-layout="${escapeHtml(block.layout)}"`) +
+    `>` +
     parts.join('') +
     (ctx.annotate ? annotationFor(block) : '') +
     `</div>`
@@ -629,7 +716,14 @@ body {
   font-size: 16px;
   line-height: 1.7;
   color: var(--ms-fg);
-  background: var(--ms-bg);
+  /* 底色不是纯色：一层很淡的实景底纹 + 两层主题色光晕。
+     底纹只在页面里已有真图时出现，且压到 8% 左右——它负责"空气感"，
+     不负责被看清，正文对比度优先。 */
+  background:
+    radial-gradient(1200px 620px at 82% -10%, color-mix(in srgb, var(--ms-accent) 14%, transparent), transparent 60%),
+    radial-gradient(900px 520px at -12% 18%, color-mix(in srgb, var(--ms-accent) 9%, transparent), transparent 55%),
+    var(--ms-bg);
+  background-attachment: fixed;
 }
 img, svg { max-width: 100%; display: block; }
 a { color: var(--ms-accent); }
@@ -637,9 +731,58 @@ h1, h2, h3 { line-height: 1.25; margin: 0 0 .6em; }
 p { margin: 0 0 1em; }
 ul { margin: 0; padding: 0; list-style: none; }
 
-.ms-page { display: block; }
+.ms-page { display: block; position: relative; }
+/* 实景底纹：模糊、低透明度、铺满视口。用伪元素而不是 body 的多层背景，
+   这样才能加 blur——不模糊的整张校园照透出来是"窗户竖条"，不是氛围。 */
+.ms-page::before {
+  content: "";
+  position: fixed;
+  inset: -4%;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--ms-bg-img, none) center / cover no-repeat;
+  filter: blur(14px) saturate(.9);
+  opacity: .16;
+}
 .ms-block { display: block; }
-.ms-section__heading { font-size: 1.5rem; }
+/* 相邻内容段交替底色：长页面往下滚时，段落之间有分界，不像一堵白墙。
+   用"主题色 5% + 表面色"的渐变而不是平涂，段落才有层次。 */
+.ms-block:nth-of-type(even) {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--ms-accent) 5%, color-mix(in srgb, var(--ms-surface) 95%, transparent)),
+    color-mix(in srgb, var(--ms-surface) 97%, transparent)
+  );
+  border-top: 1px solid color-mix(in srgb, var(--ms-line) 65%, transparent);
+}
+.ms-section__heading { font-size: 1.5rem; text-wrap: balance; }
+/* 小节标题前的一小段强调线：不需要额外文案，也能让每段有"被设计过"的起手 */
+.ms-section__heading::before {
+  content: ""; display: block; width: 2.25rem; height: 3px; border-radius: 2px;
+  background: var(--ms-accent); opacity: .8; margin-bottom: .7rem;
+}
+html { scroll-behavior: smooth; }
+[id^="ms-s"] { scroll-margin-top: 4.5rem; }
+
+/* ── 页面壳：顶栏 ─────────────────────────────────────────────────
+   位置固定、半透明，滚动时始终能看到"我在哪一页的哪一段"。
+   结构里已经有 nav 块时不渲染它（避免两条导航叠在一起）。 */
+.ms-topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--ms-bg);
+  background: color-mix(in srgb, var(--ms-bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--ms-line);
+}
+.ms-topbar__inner {
+  max-width: var(--ms-max); margin: 0 auto; padding: .65rem 1.5rem;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
+}
+.ms-topbar__brand { font-weight: 650; letter-spacing: -.01em; }
+.ms-topbar__links { display: flex; gap: 1.1rem; flex-wrap: wrap; }
+.ms-topbar__link { color: var(--ms-muted); text-decoration: none; font-size: .92rem; }
+.ms-topbar__link:hover { color: var(--ms-fg); }
 
 /* 骨架块铺满，内容块居中收窄——版式上分得开，读起来也不散 */
 .ms-nav {
@@ -657,11 +800,57 @@ ul { margin: 0; padding: 0; list-style: none; }
   max-width: var(--ms-max); margin: 0 auto; padding: 3.5rem 1.5rem;
 }
 @media (min-width: 60rem) {
-  .ms-hero { grid-template-columns: 1.1fr .9fr; align-items: center; padding: 5rem 1.5rem; }
+  /* 分栏：文字在左、主视觉在右。padding 与下方内容段统一，
+     避免上一版 5rem + 2.5rem 叠出一个空洞。 */
+  .ms-hero--split { grid-template-columns: 1.1fr .9fr; align-items: center; padding: 4.5rem 1.5rem; }
+  /* 镜像分栏：图在左、文字在右，用来打破相邻两段"都是左文右图"的重复 */
+  .ms-hero--mirror { grid-template-columns: .9fr 1.1fr; align-items: center; padding: 4.5rem 1.5rem; }
+  .ms-hero--mirror .ms-hero__visual { order: -1; }
 }
-.ms-hero__title { font-size: clamp(1.9rem, 4vw, 2.9rem); letter-spacing: -.02em; }
+.ms-hero--center {
+  position: relative;
+  isolation: isolate;
+  max-width: 56rem; text-align: center; padding-top: 4rem; padding-bottom: 3rem;
+}
+/* 居中首屏背后的一团主题色光晕：没有它，标题+图就是"白底贴图"。 */
+.ms-hero--center::before {
+  content: "";
+  position: absolute; left: 50%; top: -6rem;
+  width: min(72rem, 120%); height: 34rem;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    50% 55% at 50% 45%,
+    color-mix(in srgb, var(--ms-accent) 20%, transparent),
+    transparent 70%
+  );
+  z-index: -1; pointer-events: none;
+}
+.ms-hero--center .ms-hero__subtitle { margin-left: auto; margin-right: auto; }
+.ms-hero--center .ms-hero__visual { margin-top: .5rem; }
+.ms-hero__title { font-size: clamp(1.9rem, 4vw, 2.9rem); letter-spacing: -.02em; text-wrap: balance; }
 .ms-hero__subtitle { font-size: 1.1rem; color: var(--ms-muted); max-width: 34rem; }
 .ms-hero__visual { min-width: 0; }
+.ms-hero__visual img {
+  border-radius: calc(var(--ms-radius) * 1.6);
+  box-shadow: 0 30px 70px -32px rgba(15, 23, 42, .5);
+}
+
+/* 全幅背景：图铺满整屏，压一层暗色蒙层保证文字可读 */
+.ms-hero--immersive { position: relative; display: block; max-width: none; padding: 0; background: #0f1115; }
+.ms-hero--immersive .ms-hero__backdrop {
+  position: absolute; inset: 0;
+  background-size: cover; background-position: center;
+}
+.ms-hero--immersive .ms-hero__backdrop::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(8, 10, 14, .32), rgba(8, 10, 14, .74));
+}
+.ms-hero--immersive .ms-hero__body {
+  position: relative; z-index: 1;
+  max-width: var(--ms-max); margin: 0 auto; padding: 6.5rem 1.5rem;
+  color: #fff;
+}
+.ms-hero--immersive .ms-hero__subtitle { color: rgba(255, 255, 255, .86); }
 
 .ms-btn {
   display: inline-block; padding: .6rem 1.25rem; border-radius: var(--ms-radius);
@@ -674,37 +863,101 @@ ul { margin: 0; padding: 0; list-style: none; }
 .ms-features-section, .ms-gallery-section, .ms-text-section, .ms-table-section,
 .ms-code-section, .ms-video-section, .ms-form-section, .ms-accordion-section,
 .ms-generic {
-  max-width: var(--ms-max); margin: 0 auto; padding: 2.5rem 1.5rem;
+  max-width: var(--ms-max); margin: 0 auto; padding: 3rem 1.5rem;
 }
 .ms-features { display: grid; gap: 1rem; grid-template-columns: 1fr; }
-@media (min-width: 48rem) { .ms-features { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 48rem) {
+  /* 列数随条数自适应：4 条在宽屏上排成 4 列，不会孤一张挂到下一行。 */
+  .ms-features--cards { grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+}
 .ms-features__item {
   border: 1px solid var(--ms-line); border-radius: var(--ms-radius);
   padding: 1.25rem; background: var(--ms-surface);
+  position: relative; overflow: hidden;
+  transition: transform .15s ease, box-shadow .15s ease;
 }
+.ms-features__item::before {
+  content: ""; position: absolute; inset: 0 0 auto; height: 3px;
+  background: var(--ms-accent); opacity: .55;
+}
+.ms-features__item:hover { transform: translateY(-2px); box-shadow: 0 12px 26px rgba(0, 0, 0, .08); }
 .ms-features__index { font-family: ui-monospace, monospace; font-size: .8rem; color: var(--ms-muted); }
 .ms-features__item-title { font-size: 1.05rem; margin: .4rem 0 .3rem; }
 .ms-features__item-detail { margin: 0; color: var(--ms-muted); font-size: .95rem; }
+/* 列表行：序号在左、内容在右，行间用细线分隔——适合有先后的要点 */
+.ms-features--rows { gap: 0; border-top: 1px solid var(--ms-line); }
+.ms-features__row {
+  display: grid; grid-template-columns: 2.5rem 1fr; gap: 1rem;
+  padding: 1.15rem 0; border-bottom: 1px solid var(--ms-line);
+}
+.ms-features__row .ms-features__item-title { margin-top: 0; }
 
-.ms-gallery { display: grid; gap: 1rem; grid-template-columns: 1fr; }
-@media (min-width: 40rem) { .ms-gallery { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 64rem) { .ms-gallery { grid-template-columns: repeat(3, 1fr); } }
+/* Bento 混排：首条占 2×2，其余填满网格。6 条时正好铺满 3×3。 */
+.ms-features--bento { grid-template-columns: repeat(3, 1fr); grid-auto-rows: minmax(9rem, auto); }
+.ms-features--bento .ms-features__item:first-child {
+  grid-column: span 2; grid-row: span 2;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 2rem;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--ms-accent) 10%, var(--ms-surface)),
+    var(--ms-surface) 72%
+  );
+}
+.ms-features--bento .ms-features__item:first-child .ms-features__item-title { font-size: 1.35rem; }
+@media (max-width: 48rem) {
+  .ms-features--bento { grid-template-columns: 1fr; }
+  .ms-features--bento .ms-features__item:first-child { grid-column: auto; grid-row: auto; }
+}
+
+.ms-gallery { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+/* 瀑布流：按列纵向排布，允许图高不一致 */
+.ms-gallery--masonry { display: block; columns: 3; column-gap: 1rem; }
+.ms-gallery--masonry .ms-gallery__item { break-inside: avoid; margin-bottom: 1rem; }
+@media (max-width: 64rem) { .ms-gallery--masonry { columns: 2; } }
+@media (max-width: 40rem) { .ms-gallery--masonry { columns: 1; } }
+/* 一大两小拼贴：首图占 2×2，其余小图填满网格。 */
+.ms-gallery--collage { grid-template-columns: repeat(3, 1fr); grid-auto-rows: minmax(10rem, 1fr); }
+.ms-gallery--collage .ms-gallery__item { overflow: hidden; border-radius: var(--ms-radius); }
+.ms-gallery--collage .ms-gallery__item:first-child { grid-column: span 2; grid-row: span 2; }
+.ms-gallery--collage .ms-img { width: 100%; height: 100%; object-fit: cover; }
+.ms-gallery--collage .ms-figure { height: 100%; }
+.ms-gallery--collage .ms-figure__caption { display: none; }
+@media (max-width: 48rem) {
+  .ms-gallery--collage { grid-template-columns: 1fr; }
+  .ms-gallery--collage .ms-gallery__item:first-child { grid-column: auto; grid-row: auto; }
+}
+
 .ms-figure { margin: 0; }
 .ms-figure__caption { font-size: .85rem; color: var(--ms-muted); margin-top: .4rem; }
 
 .ms-cta {
   max-width: var(--ms-max); margin: 0 auto; padding: 2.75rem 1.5rem;
   display: flex; flex-wrap: wrap; align-items: center; gap: 1.25rem;
+}
+.ms-cta--banner {
   border-top: 1px solid var(--ms-line); border-bottom: 1px solid var(--ms-line);
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--ms-accent) 8%, var(--ms-surface)),
+    var(--ms-surface) 62%
+  );
+}
+.ms-cta--card {
+  flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  margin: 1.5rem auto; padding: 2.5rem 2rem;
+  border: 1px solid var(--ms-line); border-radius: calc(var(--ms-radius) * 1.6);
   background: var(--ms-surface);
 }
-.ms-cta__text { margin: 0; font-size: 1.25rem; font-weight: 600; flex: 1 1 18rem; }
+.ms-cta__text { margin: 0; font-size: 1.25rem; font-weight: 600; flex: 1 1 18rem; max-width: 44rem; }
+.ms-cta--card .ms-cta__text { flex: 0 1 auto; }
 
 .ms-footer {
   max-width: var(--ms-max); margin: 0 auto; padding: 2rem 1.5rem 3rem;
   display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between;
   color: var(--ms-muted); font-size: .9rem;
 }
+.ms-footer--shell { border-top: 1px solid var(--ms-line); margin-top: 1rem; }
 .ms-footer__copyright { margin: 0; }
 .ms-footer__links { display: flex; gap: 1rem; flex-wrap: wrap; }
 
@@ -833,17 +1086,83 @@ function tabsScript(): string {
 }
 
 /**
- * 把结构化页面渲染成完整 HTML 文档。
+ * 页面壳：结构里没有 `nav` 时补一条顶栏，没有 `footer` 时补一行页脚。
+ *
+ * **不覆盖用户/模型已经排出来的块**：页面里有 nav 就让它自己当顶栏，
+ * 再叠一条只会出现两个导航。壳只负责"缺了才补"，不负责重排。
+ * 顶栏里的锚点取每块的真实小节标题，所以它就是一份可以从上往下跳的目录。
+ */
+function topbarHtml(brand: string, anchors: readonly { id: string; label: string }[]): string {
+  const links = anchors
+    .slice(0, 6)
+    .map((anchor) => `<a class="ms-topbar__link" href="#${escapeHtml(anchor.id)}">${inline(anchor.label)}</a>`)
+    .join('');
+  return (
+    `<header class="ms-topbar">` +
+    `<div class="ms-topbar__inner">` +
+    `<span class="ms-topbar__brand">${inline(brand)}</span>` +
+    (links === '' ? '' : `<nav class="ms-topbar__links" aria-label="页面段落">${links}</nav>`) +
+    `</div>` +
+    `</header>`
+  );
+}
+
+function shellFooterHtml(brand: string): string {
+  // 不写年份：渲染器承诺**同样的输入逐字节相同**（见文件头第 3 条）。
+  return (
+    `<footer class="ms-footer ms-footer--shell">` +
+    `<p class="ms-footer__copyright">© ${inline(brand)}</p>` +
+    `</footer>`
+  );
+}
+
+/** 把结构化页面渲染成完整 HTML 文档。
  *
  * 输出是**自包含**的：一个字符串，写进文件就能直接打开，
  * 不依赖任何外部资源。这是"能在 network=none 的沙盒里跑起来"的前提。
  */
+/** 页面里第一张可当底纹的真图（data URI，且不太大，避免把页面撑爆）。 */
+function firstImageDataUri(spec: PageSpec): string | undefined {
+  const usable = (ref: unknown): ref is string =>
+    typeof ref === 'string' && ref.startsWith('data:image/') && ref.length < 1_500_000;
+  for (const block of spec.blocks) {
+    for (const value of Object.values(block.slots)) {
+      // 这里只是"找个底纹"，不该因为某个 slot 形态异常把整页弄挂。
+      if (typeof value !== 'object' || value === null) continue;
+      const slot = value as { kind?: unknown; ref?: unknown; refs?: unknown };
+      if (slot.kind === 'image' && usable(slot.ref)) return slot.ref;
+      if (slot.kind === 'list-image' && Array.isArray(slot.refs)) {
+        for (const ref of slot.refs) {
+          if (typeof ref !== 'object' || ref === null) continue;
+          const item = ref as { ref?: unknown };
+          if (usable(item.ref)) return item.ref;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
 export function renderPage(spec: PageSpec, options: RenderOptions = {}): string {
   const title = options.title ?? spec.goal;
   const ctx: RenderContext = { annotate: options.annotate === true, blocks: options.blocks };
 
-  const body = spec.blocks.map((block) => renderBlock(block, ctx)).join('\n');
+  const body = spec.blocks.map((block, index) => renderBlock(block, ctx, index)).join('\n');
   const needsTabsScript = spec.blocks.some((b) => b.type === 'tabs');
+  // 页面背景图：取页面里第一张不太大的真图，压成很淡的底纹。
+  // 只定义一次 CSS 变量，body 里引用，避免同一张 base64 在文档里写两遍。
+  const backgroundImage = firstImageDataUri(spec);
+
+  const hasNav = spec.blocks.some((b) => b.type === 'nav');
+  const hasFooter = spec.blocks.some((b) => b.type === 'footer');
+  const brand = deriveBrand(spec.goal);
+  const anchors = hasNav
+    ? []
+    : spec.blocks
+        .map((block, index) => ({ id: `ms-s${index + 1}`, label: anchorLabel(block) }))
+        .filter((anchor) => anchor.label !== '');
+  const topbar = hasNav ? '' : topbarHtml(brand, anchors);
+  const footer = hasFooter ? '' : shellFooterHtml(brand);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -854,13 +1173,16 @@ export function renderPage(spec: PageSpec, options: RenderOptions = {}): string 
 <meta name="generator" content="MediaSandbox 结构化制作链路">
 <meta name="ms-blocks" content="${escapeHtml(String(spec.blocks.length))}">
 <style>
+${backgroundImage === undefined ? '' : `:root{--ms-bg-img:url("${backgroundImage}")}`}
 ${pageStyles()}
 </style>
 </head>
 <body>
+${topbar}
 <main class="ms-page" data-ms-project="${escapeHtml(spec.projectId)}" data-ms-blocks="${escapeHtml(String(spec.blocks.length))}">
 ${body}
 </main>
+${footer}
 ${needsTabsScript ? tabsScript() : ''}
 </body>
 </html>

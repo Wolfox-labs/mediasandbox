@@ -51,6 +51,13 @@ export interface BlockInstance {
   /** 该 block 的每个 slot 由谁填充，供前端展示"这块是模型写的还是确定性拼的"。 */
   readonly sources: Readonly<Record<string, SlotSource>>;
   /**
+   * 决策层选定的版式 id（见 `BlockSpec.layouts`）。
+   *
+   * 省略表示"没问过"，渲染时按该 block 的默认版式（第一个）处理。
+   * 它只影响摆法，不影响 slot 内容——所以填充器完全不看它。
+   */
+  readonly layout?: string | undefined;
+  /**
    * 决策层对"每个 slot 由谁实现"的选择。省略表示**没有问过**（零成本默认路径），
    * 此时填充器按 slot 类型自动判。
    */
@@ -76,7 +83,7 @@ export type SlotSource =
  * `SlotSource` 是**实际发生了**（填充器回填的事实）。两者不该合并——
  * 合了就没法回答"模型说要生成式，但生成层挂了，最后是谁填的"。
  */
-export type SlotFillPlan = 'generative' | 'deterministic';
+export type SlotFillPlan = 'generative' | 'web' | 'deterministic';
 
 /** 整页的结构化表示。 */
 export interface PageSpec {
@@ -123,6 +130,8 @@ export type PageSpecErrorCode =
   | 'COUNT_OUT_OF_RANGE'
   /** 必需 slot 未填。 */
   | 'MISSING_REQUIRED_SLOT'
+  /** 版式 id 不在该 block 声明的版式里。 */
+  | 'UNKNOWN_LAYOUT'
   /** 插入 / 移动的目标位置越界。 */
   | 'INDEX_OUT_OF_RANGE';
 
@@ -253,10 +262,22 @@ export function validatePageSpec(
             'UNKNOWN_SLOT',
           );
         }
-        if (plan !== 'generative' && plan !== 'deterministic') {
+        if (plan !== 'generative' && plan !== 'web' && plan !== 'deterministic') {
           throw new PageSpecError(
             `block ${block.id} 的 slotPlans[${slotName}] 取值非法: ${String(plan)}`,
             'SLOT_TYPE_MISMATCH',
+          );
+        }
+      }
+
+      // 版式也是决策层的选择：写进结构的 id 必须真的存在，
+      // 否则渲染器会静默退回默认版式——"选了却没生效"，从页面上看不出来。
+      if (block.layout !== undefined) {
+        const declaredLayouts = blockSpec.layouts ?? [];
+        if (!declaredLayouts.some((layout) => layout.id === block.layout)) {
+          throw new PageSpecError(
+            `block ${block.id}(${block.type}) 的版式 ${block.layout} 未声明`,
+            'UNKNOWN_LAYOUT',
           );
         }
       }

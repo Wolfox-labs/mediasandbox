@@ -173,6 +173,7 @@ function buildMessages(request: PlanBlueprintRequest): {
     '5. blockIds 只能从给定的可选块 id 里挑，每段 1 到 2 个，按优先级排。',
     '6. positioning 是一句话定位，audience 是给谁看，tone 是语气。',
     '7. 语气按中文写作常识来写，不要写"我们将为你打造"这类空话。',
+    '8. 页面可以用真生成的配图（首屏主视觉、图集、正文配图）；需要画面支撑的段落就建议 hero / image / gallery，不要默认所有图片都是占位。',
   ].join('\n');
 
   const blockLines = request.blocks

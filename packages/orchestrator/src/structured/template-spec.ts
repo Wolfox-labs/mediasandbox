@@ -41,6 +41,16 @@ export interface TemplateBlock {
   /** 指向 `BlockSpec.id`。注册时校验存在性。 */
   readonly type: string;
   /**
+   * 固定版式。只有整页模板用：段落怎么摆不由决策层再选。
+   * 省略时按该 block 的默认版式。
+   */
+  readonly layout?: string | undefined;
+  /**
+   * 固定项数。整页模板用：列表型 slot 要几项由模板写死，
+   * 决策层不再回答"要几个"。
+   */
+  readonly counts?: Readonly<Record<string, number>> | undefined;
+  /**
    * 预置的 slot 值。
    *
    * 用途是"这个模板要求带上品牌名/版权行/固定链接"这类**事实性内容**，
@@ -69,6 +79,12 @@ export interface TemplateSpec {
    * 后者可以删，前者删了只是下次还在。
    */
   readonly builtin: boolean;
+  /**
+   * `starter`（默认）：只给起手前缀，剩下的块仍由决策层逐块决定。
+   * `page`：**页面模板**。段落数、顺序与收尾由模板固定（`blocks` 就是整页），
+   * 但**版式、每块内容、配图与否仍由决策层决定**——AI 在模板给的骨架上排版。
+   */
+  readonly kind?: 'starter' | 'page' | undefined;
 }
 
 export class TemplateError extends Error {
@@ -140,6 +156,40 @@ export function validateTemplate(spec: TemplateSpec, blocks: BlockRegistry): voi
   for (const id of spec.allowedBlockIds ?? []) {
     if (!blocks.has(id)) {
       fail(`模板 ${spec.id} 的 allowedBlockIds 引用了未注册的 block: ${id}`);
+    }
+  }
+
+  // 页面模板：段落数、顺序、收尾都写死，但版式与内容仍交给模型。
+  // 校验只保证"结构自己收好尾、版式/项数声明真实存在"。
+  if (spec.kind === 'page') {
+    if (spec.blocks.length < 2) {
+      fail(`页面模板 ${spec.id} 至少要有两块（含收尾），当前 ${spec.blocks.length} 块`);
+    }
+    const last = spec.blocks.at(-1)!;
+    if (blocks.get(last.type).placement !== 'last') {
+      fail(`页面模板 ${spec.id} 的末块必须是页脚（placement='last'），当前是 ${last.type}`);
+    }
+    for (const entry of spec.blocks) {
+      const blockSpec = blocks.get(entry.type);
+      if (entry.layout !== undefined) {
+        if (!(blockSpec.layouts ?? []).some((layout) => layout.id === entry.layout)) {
+          fail(`页面模板 ${spec.id} 的 ${entry.type} 指定了未声明的版式: ${entry.layout}`);
+        }
+      }
+      for (const [slotName, count] of Object.entries(entry.counts ?? {})) {
+        const slot = blockSpec.slots.find((s) => s.name === slotName);
+        if (slot === undefined || slot.countRange === undefined) {
+          fail(`页面模板 ${spec.id} 的 ${entry.type} 给非列表 slot 指定了项数: ${slotName}`);
+          continue;
+        }
+        const range = slot.countRange;
+        if (!Number.isInteger(count) || count < range.min || count > range.max) {
+          fail(
+            `页面模板 ${spec.id} 的 ${entry.type}.${slotName} 项数 ${count} ` +
+              `超出声明区间 ${range.min}..${range.max}`,
+          );
+        }
+      }
     }
   }
 }
@@ -336,6 +386,44 @@ const BUILTIN_TEMPLATES: readonly TemplateSpec[] = [
     description: '以图集为主，适合作品集与产品截图',
     blocks: [{ type: 'nav' }, { type: 'gallery' }],
     allowedBlockIds: ['nav', 'hero', 'gallery', 'image', 'text', 'quote', 'cta', 'footer'],
+    builtin: true,
+  },
+  // ── 整页模板：结构写死，AI 只写内容 ──────────────────────────────────
+  {
+    id: 'promo-page',
+    kind: 'page',
+    label: '宣传落地页（页面模板）',
+    description:
+      '固定六段：导航 → 首屏 → 六条特性 → 三图图集 → 行动号召 → 页脚。' +
+      '段数、顺序与收尾写死；首屏/特性/图集的版式由模型在提供的版式里选',
+    blocks: [
+      { type: 'nav' },
+      { type: 'hero' },
+      { type: 'features', counts: { items: 6 } },
+      { type: 'gallery', counts: { images: 3 } },
+      { type: 'cta' },
+      { type: 'footer' },
+    ],
+    allowedBlockIds: ['nav', 'hero', 'features', 'gallery', 'cta', 'footer'],
+    builtin: true,
+  },
+  {
+    id: 'product-page',
+    kind: 'page',
+    label: '产品介绍页（页面模板）',
+    description:
+      '固定七段：导航 → 首屏 → 四条特性 → 正文 → 配图 → 行动号召 → 页脚。' +
+      '段数、顺序与收尾写死，版式由模型选',
+    blocks: [
+      { type: 'nav' },
+      { type: 'hero' },
+      { type: 'features', counts: { items: 4 } },
+      { type: 'text' },
+      { type: 'image' },
+      { type: 'cta' },
+      { type: 'footer' },
+    ],
+    allowedBlockIds: ['nav', 'hero', 'features', 'text', 'image', 'cta', 'footer'],
     builtin: true,
   },
 ];

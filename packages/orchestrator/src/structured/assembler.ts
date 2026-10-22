@@ -32,6 +32,7 @@ import type { AssembleRequest, AssembleResult } from '../plan/assembler.js';
 
 /** 结构化链路用到的工具 id。 */
 const T = {
+  writePage: 'write-page-copy',
   fillBlock: 'fill-block',
   assemblePage: 'assemble-page',
   passthrough: 'passthrough-block',
@@ -42,6 +43,19 @@ const T = {
 /** 生成节点 id：按序号 + 工具 id，稳定可读。 */
 function nodeId(index: number, toolId: string): string {
   return `n${index + 1}-${toolId}`;
+}
+
+/** 统筹计划的纯文本摘要，给执笔当上下文。没有计划时返回空串。 */
+function describeBlueprint(blueprint: BlueprintOutcome | undefined): string {
+  if (blueprint === undefined || !blueprint.ok) return '';
+  const { title, positioning, sections } = blueprint.blueprint;
+  const parts: string[] = [];
+  if (title !== '') parts.push(`标题：${title}`);
+  if (positioning !== '') parts.push(`定位：${positioning}`);
+  if (sections.length > 0) {
+    parts.push(`段落：\n${sections.map((s, i) => `${i + 1}. ${s.purpose}`).join('\n')}`);
+  }
+  return parts.join('\n');
 }
 
 /**
@@ -85,7 +99,7 @@ export async function assembleStructured(args: {
   // 放在逐块决策**之前**：决策模型的每一轮都带着这份计划（见 `buildContext`
   // 里的 facts），于是它的选择是"按计划排"，而不是"每轮自由发挥"。
   // 这一步不改结构——它只写"要讲哪几段"，选块仍然由决策层回答。
-  const blueprint = await resolveBlueprint(request, blocks);
+  const blueprint = request.template === undefined ? await resolveBlueprint(request, blocks) : undefined;
   const rationale: string[] = [];
   if (blueprint !== undefined) {
     rationale.push(
@@ -96,6 +110,10 @@ export async function assembleStructured(args: {
               .join(' → ')}`
         : `统筹规划不可用：${blueprint.detail}。本次直接逐块决策，没有整体计划`,
     );
+  } else if (request.template !== undefined) {
+    // 固定模板已经把块序定死了，统筹规划只能重复一遍模板里写好的东西。
+    // 省掉这一趟：网页约 20 秒、演示文稿约 30 秒。
+    rationale.push('固定模板：跳过统筹规划（块序来自模板，不需要再让模型分段）');
   }
 
   // ── 1. 定稿结构：给定的照用，没给才逐块问决策模型 ────────────────────
@@ -153,6 +171,37 @@ export async function assembleStructured(args: {
   const fillNodeIds: string[] = [];
   const skeleton = serializeSkeleton(page);
 
+  // ── 1.5 一次执笔整页：一个节点写完整页文案 ──────────────────────────
+  //
+  // 逐 slot 调用是"11 次调用、两波并发"的根源：块内 4~5 个 slot 各自独立，
+  // 模型看不到邻居，行文还不连贯。这里先花一次调用写整页，
+  // 填充节点拿它的结果（`written`），只有没覆盖到的 slot 才回落到逐 slot。
+  let writeNodeId: string | undefined;
+  if (request.useGenerative === true) {
+    const writeBlocks =
+      redo === undefined ? page.blocks : page.blocks.filter((b) => redo.has(b.id));
+    if (writeBlocks.length > 0) {
+      writeNodeId = nodeId(cursor, T.writePage);
+      cursor += 1;
+      nodes.push({
+        id: writeNodeId,
+        toolId: T.writePage,
+        inputs: {
+          blocksJson: { kind: 'literal', value: JSON.stringify(writeBlocks) },
+          goal: { kind: 'literal', value: request.goal },
+          brand: { kind: 'literal', value: request.brand ?? '' },
+          planText: { kind: 'literal', value: describeBlueprint(blueprint) },
+        },
+        dependsOn: [],
+        retryable: true,
+        note: '一次执笔整页文案',
+      });
+      rationale.push(
+        `执笔：整页文案一次写完（1 次生成调用，替代 ${writeBlocks.length} 块的逐 slot 调用）`,
+      );
+    }
+  }
+
   for (const [index, block] of page.blocks.entries()) {
     // 没给 `redoBlockIds` 时全部照常填充；给了就只填被点名的。
     const mustFill = redo === undefined || redo.has(block.id);
@@ -172,10 +221,14 @@ export async function assembleStructured(args: {
             brand: { kind: 'literal', value: request.brand ?? '' },
             index: { kind: 'literal', value: index },
             useGenerative: { kind: 'literal', value: request.useGenerative === true },
+            ...(writeNodeId === undefined
+              ? {}
+              : { written: { kind: 'ref', nodeId: writeNodeId, port: 'written' } as const }),
           }
         : { blockJson: { kind: 'literal', value: blockJson } },
-      // **空依赖**：块之间没有数据依赖，让执行器并发跑。
-      dependsOn: [],
+      // **空依赖**（没有执笔节点时）：块之间没有数据依赖，让执行器并发跑。
+      // 有执笔节点时只依赖它一个——仍然是"块与块之间互不依赖"。
+      dependsOn: mustFill && writeNodeId !== undefined ? [writeNodeId] : [],
       // 透传不会失败，不该占重试额度。
       retryable: mustFill,
       note: mustFill

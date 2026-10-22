@@ -275,6 +275,13 @@ async function loadTemplates(): Promise<void> {
   try {
     const result = await api.templates();
     templates.value = result.templates;
+    // 默认选中一个**整页模板**：页面骨架先定死，模型只写内容。
+    // 没选过模板时不把用户丢进"自由发挥"，而是给一份固定排版。
+    if (store.isWebpage && store.templateMode === 'saved' && store.templateId === undefined) {
+      const pageTemplate =
+        result.templates.find(template => template.kind === 'page') ?? result.templates[0];
+      if (pageTemplate !== undefined) store.templateId = pageTemplate.id;
+    }
   } catch (error) {
     templates.value = [];
     templatesError.value = error instanceof ApiError ? error.message : '加载模板池失败';
@@ -663,7 +670,7 @@ onMounted(async () => {
       <!-- 高级参数 -->
       <NCollapse v-if="store.isStructured" class="wb__section">
         <NCollapseItem
-          :title="`高级参数（${store.isSlides ? '页数' : '区块'}上限、品牌、生成开关、沙盒）`"
+          :title="`高级参数（${store.isSlides ? '页数' : '区块'}上限、品牌、沙盒）`"
           name="advanced"
         >
           <div class="wb__row">
@@ -697,10 +704,6 @@ onMounted(async () => {
             <div class="wb__field wb__field--half">
               <span class="wb__label">开关</span>
               <div class="wb__switches">
-                <NSwitch v-model:value="store.useGenerative" size="small">
-                  <template #checked>文案走生成层</template>
-                  <template #unchecked>文案走生成层</template>
-                </NSwitch>
                 <NSwitch v-if="store.isWebpage" v-model:value="store.annotate" size="small">
                   <template #checked>标注每块来源</template>
                   <template #unchecked>标注每块来源</template>
@@ -711,8 +714,7 @@ onMounted(async () => {
                 </NSwitch>
               </div>
               <span class="wb__hint wb__hint--block">
-                「文案走生成层」默认关：开了才会按次调用生成模型。统筹规划不受它控制——
-                配了生成层就会跑一次。
+                文案固定由生成层逐块撰写（按 slot 调用，会消耗生成额度）；统筹规划在配了生成层时也会跑一次。
               </span>
             </div>
           </div>

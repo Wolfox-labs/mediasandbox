@@ -214,6 +214,10 @@ function buildLlm(): LlmClient | undefined {
     apiKey: imageApiKey,
     ...(model !== undefined ? { defaultModel: model } : {}),
     imageModel,
+    // 生图比文本慢得多（一张 30–120s），120s 的默认超时会把它误杀；
+    // 不自动重试：图像按张计费，重试等于再买一张。
+    timeoutMs: 300_000,
+    maxRetries: 0,
   });
 
   // 端点与密钥都相同就不必套路由器 —— 直接用一个客户端更省一层。

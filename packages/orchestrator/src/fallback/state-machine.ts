@@ -196,7 +196,9 @@ export interface FallbackPolicy {
 }
 
 export const DEFAULT_POLICY: FallbackPolicy = {
-  maxRetries: 3,
+  // 同方案只重试 1 次：整轮重跑会把已生成的图片/文案再买一遍，
+  // 超时类故障重跑一次仍超时，继续重试只是在烧钱。
+  maxRetries: 1,
   backoffBaseMs: 200,
   backoffCapMs: 2_000,
   maxSwitches: 1,

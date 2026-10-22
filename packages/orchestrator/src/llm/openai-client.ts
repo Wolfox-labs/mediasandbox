@@ -406,7 +406,11 @@ export class OpenAiCompatibleClient implements LlmClient {
         prompt: request.prompt,
         n: request.n ?? 1,
       };
-      if (request.size !== undefined) body['size'] = request.size;
+      // Gemini 图像模型经本地代理时不接受 `size`：带上它请求会一直挂到超时，
+      // 不带就正常出图。尺寸交给模型默认值，比"参数更完整但永远拿不到图"强。
+      if (request.size !== undefined && !model.toLowerCase().includes('gemini')) {
+        body['size'] = request.size;
+      }
 
       const response = await this.fetchImpl(`${this.baseUrl}/images/generations`, {
         method: 'POST',

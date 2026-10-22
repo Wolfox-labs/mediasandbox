@@ -23,7 +23,9 @@ import { getPreset } from '@mediasandbox/sandbox';
 import type { BlockRegistry, BlockSpec, SlotSpec } from './block-spec.js';
 import {
   type BlockInstance,
+  type ImageRef,
   type PageSpec,
+  type SlotFillPlan,
   type SlotSource,
   type SlotValue,
 } from './page-spec.js';
@@ -66,6 +68,8 @@ export interface GenerateSlotRequest {
   readonly count: number;
   /** 同块内已有的确定性内容，可作上下文。 */
   readonly context: Readonly<Record<string, string>>;
+  /** 决策层给这个 slot 选的实现方式（图片的有图/搜图/占位三种）。 */
+  readonly source?: SlotFillPlan | undefined;
 }
 
 export interface GenerateSlotResult {
@@ -75,6 +79,13 @@ export interface GenerateSlotResult {
   /** 图片字节。给了就写成 data URI。 */
   readonly imageBytes?: Uint8Array | undefined;
   readonly imageMime?: string | undefined;
+  /**
+   * 图集（`list-image`）：一次给出多张。
+   *
+   * 与 `imageBytes` 并存而不是替换它：单图槽仍用后者，图集用这个。
+   * 张数由调用方按 slot 的 `countRange` 与决策层给的项数控制。
+   */
+  readonly images?: readonly { readonly bytes: Uint8Array; readonly mime: string }[] | undefined;
 }
 
 /** 填充结果：填好的 block + 每个 slot 的来源。 */
@@ -449,7 +460,8 @@ export async function fillBlock(args: {
       // 这就是 `slot_source` 那一问存在的意义——"由谁实现"从"按 slot 类型硬编码"
       // 变成一次真正的决策。没问过时（零成本默认路径）保持原行为：text/title/code
       // 归生成层，link/literal 由下面的生成器自己拒掉。
-      if (block.slotPlans !== undefined && block.slotPlans[slot.name] !== 'generative') continue;
+      const plan = block.slotPlans?.[slot.name];
+      if (block.slotPlans !== undefined && plan !== 'generative' && plan !== 'web') continue;
       // 执笔已经写好的 slot 不再逐 slot 调用：再写一遍等于把连贯的文案重新切碎。
       if (writtenApplied.has(slot.name)) continue;
 
@@ -464,6 +476,7 @@ export async function fillBlock(args: {
           slot,
           count,
           context,
+          ...(plan === undefined ? {} : { source: plan }),
         });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -702,17 +715,26 @@ function applyGenerated(
   }
   if (slot.type === 'image') {
     if (result.imageBytes === undefined) return null;
-    const alt = result.text ?? slot.description;
+    // 生成图的"文字说明"若没显式给就以空 alt 处理：把 slot 的声明描述
+    // （"主视觉图"）当图注印出来，等于把内部词表泄漏到页面上。
+    const alt = result.text ?? '';
     return { kind: 'image', ref: bytesToDataUri(result.imageBytes, result.imageMime), alt };
   }
   if (slot.type === 'list-image') {
-    // 生成式图集一次给多张：约定用 `items` 的每个元素是提示词，`imageBytes` 是首张。
-    // 这里不做多图生成——由调用方按每个 slot 单独调用解决，避免一次调用产生不确定张数。
+    // 图集优先用一次给多张的 `images`；老的单张实现（`imageBytes`）仍兼容，
+    // 但它只能替换第一张，其余保持原值。
+    if (result.images !== undefined && result.images.length > 0) {
+      const refs: ImageRef[] = result.images.map((image, index) => ({
+        ref: bytesToDataUri(image.bytes, image.mime),
+        alt: result.text === undefined || result.text === '' ? '' : `${result.text} ${index + 1}`,
+      }));
+      return { kind: 'list-image', refs };
+    }
     if (result.imageBytes === undefined) return null;
     const existing = current?.kind === 'list-image' ? current.refs : [];
     const next = [...existing];
     if (next.length === 0) return null;
-    next[0] = { ref: bytesToDataUri(result.imageBytes, result.imageMime), alt: result.text ?? slot.description };
+    next[0] = { ref: bytesToDataUri(result.imageBytes, result.imageMime), alt: result.text ?? '' };
     return { kind: 'list-image', refs: next };
   }
   if (result.text === undefined) return null;

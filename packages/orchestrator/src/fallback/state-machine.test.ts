@@ -98,15 +98,13 @@ describe('FallbackStateMachine', () => {
     const sm = new FallbackStateMachine({ ...FAST, maxSwitches: 0 });
     const error = new DecisionError('暂时连不上', 'UNREACHABLE');
 
-    // maxRetries=3，所以第 1、2、3 次都是 retry
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const d = sm.onFailure(error, attempt);
-      assert.equal(d.action, 'retry', `第 ${attempt} 次应为 retry`);
-      assert.equal(d.state, 'retrying');
-    }
+    // maxRetries=1：只有第 1 次是 retry（整轮重跑会重复计费）
+    const d = sm.onFailure(error, 1);
+    assert.equal(d.action, 'retry');
+    assert.equal(d.state, 'retrying');
 
-    // 第 4 次超出上限，且不允许换方案 → 熔断
-    const final = sm.onFailure(error, 4);
+    // 第 2 次超出上限，且不允许换方案 → 熔断
+    const final = sm.onFailure(error, 2);
     assert.equal(final.action, 'escalate');
     assert.equal(final.state, 'circuit_open');
     assert.match(final.detail, /转人工/);
@@ -116,11 +114,9 @@ describe('FallbackStateMachine', () => {
     const sm = new FallbackStateMachine({ ...FAST, maxSwitches: 1 });
     const error = new ToolError('构建失败', 'EXECUTION_FAILED', 'build-frontend');
 
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      assert.equal(sm.onFailure(error, attempt).action, 'retry');
-    }
+    assert.equal(sm.onFailure(error, 1).action, 'retry');
 
-    const switchDecision = sm.onFailure(error, 4);
+    const switchDecision = sm.onFailure(error, 2);
     assert.equal(switchDecision.action, 'switch_plan');
     assert.equal(switchDecision.state, 'switching');
     assert.equal(sm.switchCount, 1);
@@ -171,8 +167,8 @@ describe('FallbackStateMachine', () => {
     const sm = new FallbackStateMachine({ ...FAST, maxSwitches: 1 });
     const error = new ToolError('失败', 'EXECUTION_FAILED', 'x');
 
-    for (let attempt = 1; attempt <= 3; attempt += 1) sm.onFailure(error, attempt);
-    const sw = sm.onFailure(error, 4);
+    assert.equal(sm.onFailure(error, 1).action, 'retry');
+    const sw = sm.onFailure(error, 2);
     assert.equal(sw.action, 'switch_plan');
 
     // 新方案第 1 次失败 → 又是 retry
@@ -184,11 +180,11 @@ describe('FallbackStateMachine', () => {
     const sm = new FallbackStateMachine({ ...FAST, maxSwitches: 1 });
     const error = new ToolError('失败', 'EXECUTION_FAILED', 'x');
 
-    for (let attempt = 1; attempt <= 3; attempt += 1) sm.onFailure(error, attempt);
-    assert.equal(sm.onFailure(error, 4).action, 'switch_plan');
+    assert.equal(sm.onFailure(error, 1).action, 'retry');
+    assert.equal(sm.onFailure(error, 2).action, 'switch_plan');
 
-    for (let attempt = 1; attempt <= 3; attempt += 1) sm.onFailure(error, attempt);
-    const final = sm.onFailure(error, 4);
+    assert.equal(sm.onFailure(error, 1).action, 'retry');
+    const final = sm.onFailure(error, 2);
     assert.equal(final.action, 'escalate');
     assert.equal(final.state, 'circuit_open');
   });
@@ -277,7 +273,7 @@ describe('FallbackStateMachine', () => {
     assert.match(d.detail, /plan-a/);
   });
 
-  it('默认策略符合约定：重试上限 3', () => {
-    assert.equal(DEFAULT_POLICY.maxRetries, 3);
+  it('默认策略符合约定：同方案只重试 1 次（避免重复计费）', () => {
+    assert.equal(DEFAULT_POLICY.maxRetries, 1);
   });
 });

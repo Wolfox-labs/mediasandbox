@@ -40,8 +40,9 @@ import { ToolError, type ToolRegistration, type ToolResult, type ToolRuntime } f
 import type { LlmClient } from '../llm/types.js';
 import { DEFAULT_VIEWPORT, defaultScreenshotDriver, type ScreenshotDriver } from '../render/screenshot.js';
 import { createBlockRegistry, type BlockRegistry } from './block-spec.js';
-import { deriveBrand, fillBlock } from './filler.js';
+import { deriveBrand, fillBlock, type GenerateSlotResult } from './filler.js';
 import { validatePageSpec, type BlockInstance, type PageSpec } from './page-spec.js';
+import { writePage, type PageWriteBlockPlan } from './page-write.js';
 import { renderPage } from './renderer.js';
 
 /** 读一个必需的字符串入参。 */
@@ -100,6 +101,12 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
           required: false,
           description: '是否用生成层写文案。false 时全部确定性填充，零成本',
         },
+        {
+          name: 'written',
+          type: 'text',
+          required: false,
+          description: '整页执笔结果里属于本块的 slot 文案 JSON（有就优先用，省掉逐 slot 调用）',
+        },
       ],
       outputs: [
         { name: 'block', type: 'text', required: true, description: '填好的 block JSON' },
@@ -124,6 +131,30 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
           'EXECUTION_FAILED',
           'fill-block',
         );
+      }
+
+      // 整页执笔的结果：有就优先用，只有它没覆盖到的 slot 才回落到逐 slot 生成。
+      const writtenRaw = runtime.inputs['written'];
+      let written: Readonly<Record<string, unknown>> | undefined;
+      if (typeof writtenRaw === 'string' && writtenRaw.trim() !== '') {
+        try {
+          const parsed = JSON.parse(writtenRaw) as unknown;
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const record = parsed as Record<string, unknown>;
+            // 执笔工具给的是整页 `{ blocks: { id: slots } }`；也兼容直接给本块 slot 表。
+            const grouped = record['blocks'];
+            if (grouped !== null && typeof grouped === 'object' && !Array.isArray(grouped)) {
+              const mine = (grouped as Record<string, unknown>)[block.id];
+              if (mine !== null && typeof mine === 'object' && !Array.isArray(mine)) {
+                written = mine as Record<string, unknown>;
+              }
+            } else {
+              written = record;
+            }
+          }
+        } catch {
+          runtime.log('执笔文案不是合法 JSON，已忽略并回落到逐 slot 生成');
+        }
       }
 
       // 生成式实现：只对"归生成层填"的 slot 类型调模型，其余仍是确定性。
@@ -156,7 +187,10 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
         // 页面上顶着的仍是一句在词中间切断的残句（「…含首屏、特」）。
         // 兜底只能有一处，否则改了 A 忘了 B，表现是"修了但没生效"。
         brand: brand === '' ? deriveBrand(goal) : brand,
-        options: generate === undefined ? {} : { generate },
+        options:
+          generate === undefined
+            ? {}
+            : { generate, ...(written !== undefined ? { written } : {}) },
         index,
         counts,
       });
@@ -175,7 +209,117 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
         artifacts: [],
         summary:
           `填充区块 ${block.id}(${block.type})，${Object.keys(filled.block.slots).length} 个 slot，` +
-          `${filled.generativeCalls} 次生成调用`,
+          `${filled.generativeCalls} 次生成调用` +
+          (filled.writtenSlots.length > 0 ? `，执笔 ${filled.writtenSlots.length} 个` : ''),
+      };
+    },
+  };
+}
+
+/**
+ * 一次执笔整页：把一页里所有可写 slot 交给模型一口气写完。
+ *
+ * 之前是**逐 slot** 调生成层：一页 5~6 块、11 个 slot 就是 11 次调用，
+ * 而且只有一个块的 4 个 slot 并行，剩下 7 个排在第二波。
+ * 这里改成页面级一次调用，填充器优先用它的结果，
+ * 只有没被覆盖到的 slot 才回落（见 `fill-block` 的 `written` 入参）。
+ */
+export function createWritePageTool(blocks: BlockRegistry): ToolRegistration {
+  return {
+    spec: {
+      id: 'write-page-copy',
+      label: '一次执笔整页文案',
+      description:
+        '按已定稿的块序与版式，一次写完整页所有可写 slot 的文案；不决定结构',
+      envTypes: ['webpage'],
+      role: 'generate',
+      category: 'structured',
+      inputs: [
+        { name: 'blocksJson', type: 'text', required: true, description: '整页 block 数组的 JSON' },
+        { name: 'goal', type: 'text', required: true, description: '页面目标' },
+        { name: 'brand', type: 'text', required: false, description: '站点名' },
+        { name: 'planText', type: 'text', required: false, description: '统筹计划的文本摘要' },
+      ],
+      outputs: [
+        { name: 'written', type: 'text', required: true, description: '块 id → slot 文案的 JSON' },
+        { name: 'counts', type: 'number', required: true, description: '写出文案的 slot 总数' },
+      ],
+      costHint: 'slow',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      if (runtime.llm === undefined) {
+        runtime.log('本次运行没有生成层，执笔跳过，全部走逐 slot/确定性填充');
+        return {
+          outputs: { written: '', counts: 0 },
+          artifacts: [],
+          summary: '没有生成层，执笔跳过',
+        };
+      }
+
+      const blocksJson = requireString(runtime.inputs, 'blocksJson', 'write-page-copy');
+      const goal = requireString(runtime.inputs, 'goal', 'write-page-copy');
+      const brand = typeof runtime.inputs['brand'] === 'string' ? runtime.inputs['brand'] : '';
+      const planText =
+        typeof runtime.inputs['planText'] === 'string' ? runtime.inputs['planText'] : '';
+
+      const parsed = parseJson<BlockInstance[]>(blocksJson, 'write-page-copy', 'blocks');
+      if (!Array.isArray(parsed)) {
+        throw new ToolError('工具 write-page-copy 的 blocksJson 不是数组', 'EXECUTION_FAILED', 'write-page-copy');
+      }
+
+      const plans: PageWriteBlockPlan[] = [];
+      for (const [index, block] of parsed.entries()) {
+        if (!blocks.has(block.type)) {
+          throw new ToolError(
+            `block ${block.id} 的类型未注册: ${block.type}`,
+            'EXECUTION_FAILED',
+            'write-page-copy',
+          );
+        }
+        const counts: Record<string, number> = {};
+        for (const [name, value] of Object.entries(block.slots)) {
+          counts[name] =
+            value.kind === 'list'
+              ? value.items.length
+              : value.kind === 'list-image'
+                ? value.refs.length
+                : 1;
+        }
+        plans.push({ index, block, spec: blocks.get(block.type), counts });
+      }
+
+      const outcome = await writePage({
+        llm: runtime.llm,
+        goal,
+        ...(brand === '' ? {} : { brand }),
+        blocks: plans,
+        ...(planText === '' ? {} : { planText }),
+        signal: runtime.signal,
+      });
+
+      if (!outcome.ok) {
+        runtime.log(`执笔未成功：${outcome.detail}。回落到逐 slot 生成`);
+        return {
+          outputs: { written: '', counts: 0 },
+          artifacts: [],
+          summary: `执笔未成功，已回落：${outcome.detail}`,
+        };
+      }
+
+      const grouped: Record<string, Record<string, unknown>> = {};
+      let writtenSlots = 0;
+      for (const block of outcome.page.blocks) {
+        grouped[block.id] = block.slots as Record<string, unknown>;
+        writtenSlots += Object.keys(block.slots).length;
+      }
+
+      const wroteBlocks = outcome.page.blocks.length;
+      return {
+        outputs: { written: JSON.stringify({ blocks: grouped }), counts: writtenSlots },
+        artifacts: [],
+        summary:
+          `执笔：一次写出 ${wroteBlocks}/${plans.length} 块、${writtenSlots} 个 slot 文案` +
+          `（${outcome.page.model}，${(outcome.page.latencyMs / 1000).toFixed(1)}s）`,
       };
     },
   };
@@ -203,25 +347,58 @@ export function makeSlotGenerator(
   readonly blockId: string;
   readonly slot: { readonly name: string; readonly type: string; readonly description: string };
   readonly count: number;
-}) => Promise<{ readonly text?: string; readonly items?: readonly string[] } | null> {
+  /** 同块已填好的内容，用来给生图写提示词（比如主标题）。 */
+  readonly context?: Readonly<Record<string, string>>;
+  /** 决策层选定的来源：生成 / 网上找图 / 占位（占位根本不会走到这里）。 */
+  readonly source?: 'generative' | 'web' | 'deterministic' | undefined;
+}) => Promise<GenerateSlotResult | null> {
   return async (request) => {
     const { slot, goal, count } = request;
-    if (slot.type === 'image' || slot.type === 'list-image') return null;
+    if (slot.type === 'image' || slot.type === 'list-image') {
+      // 生图：决策层已经把"这块图要不要真生成"问过了（`slot_source`）。
+      // 走到这里就说明它选了生成层，剩下的只是把提示词写清楚、按张调用。
+      return generateImagesForSlot(llm, runtime, {
+        goal,
+        blockType: request.blockType,
+        slotName: slot.name,
+        slotType: slot.type,
+        description: slot.description,
+        count,
+        context: request.context ?? {},
+        ...(request.source === undefined ? {} : { source: request.source }),
+      });
+    }
     if (slot.type === 'link' || slot.type === 'literal') return null;
 
     const wantsList = slot.type === 'list-text';
     const isDeck = kind === 'slides';
+    // features 的条目要"标题 + 一句说明"才撑得起卡片；只说"每行一条"时
+    // 模型往往只给标题，卡片下半截永远是空的。
+    const wantsTitleDetail = wantsList && request.blockType === 'features' && slot.name === 'items';
+    const contextLine = Object.values(request.context ?? {})
+      .filter((value) => value !== '')
+      .slice(0, 2)
+      .join(' / ');
     const system = isDeck
       ? '你在写演示文稿上的文字：短、具体、能一眼读完。' +
         '只输出成品内容本身——不要解释、不要标题前缀、不要 Markdown、不要编号。' +
-        '不要出现"这里展示""由填充器生成"这类元话语。'
-      : '你是网页文案撰写者。只输出成品内容本身，不要解释、不要标题前缀、不要 Markdown 代码块。';
+        '不要出现"这里展示""由填充器生成"这类元话语。' +
+        '不要套话（打造/赋能/引领/震撼/焕新/开启新篇章/让我们一起），每句至少含一个具体信息。'
+      : '你是网页文案撰写者。只输出成品内容本身，不要解释、不要标题前缀、不要 Markdown 代码块。' +
+        '不要输出字段名或提示词标签（如"主按钮：""副标题：""行动文字："）——那些是给排版看的，不是给访客看的。' +
+        '不要空话套话（打造/赋能/引领/震撼/焕新/开启新篇章/让我们一起），' +
+        '每句至少含一个具体信息（人名、地点、数字、事实）；标题不要复用页面目标里的整句。';
     const scene = isDeck ? '这份演示文稿的主题' : '页面目标';
+    const contextHint =
+      contextLine === '' ? '' : `本页已写内容（措辞不要重复）：${contextLine}\n`;
     const user = wantsList
-      ? `${scene}：${goal}\n请为「${slot.description}」写 ${count} 条，每行一条，不要编号，每条不超过 20 字。`
+      ? `${scene}：${goal}\n${contextHint}` +
+        `请为「${slot.description}」写 ${count} 条，每行一条，不要编号，每条不超过 20 字` +
+        (wantsTitleDetail ? '，每条写成「标题|一句说明」两段，用竖线分隔' : '') +
+        '；条目之间不要同义重复。'
       : isDeck
-        ? `${scene}：${goal}\n请写「${slot.description}」。一句话，不要空话，不要用"我们"开头。`
-        : `${scene}：${goal}\n请写「${slot.description}」。要具体，不要空话。`;
+        ? `${scene}：${goal}\n${contextHint}请写「${slot.description}」。一句话，不要空话，不要用"我们"开头。`
+        : `${scene}：${goal}\n${contextHint}请写「${slot.description}」。要具体，不要空话。`;
 
     runtime.log('调用生成层填充 slot', { blockId: request.blockId, slot: slot.name });
     const response = await llm.complete({
@@ -258,9 +435,308 @@ export function makeSlotGenerator(
   };
 }
 
+/**
+ * 一次最多生成几张图。
+ *
+ * 图集按张计费：决策层即使要 8 张，也只真生成 4 张，剩下的用占位——
+ * 上限在这里而不是提示词里，因为"模型答应了但账单没人看"是更糟的失败。
+ */
+const MAX_GENERATED_IMAGES = 2;
+
+interface ImageSlotRequest {
+  readonly goal: string;
+  readonly blockType: string;
+  readonly slotName: string;
+  readonly slotType: string;
+  readonly description: string;
+  readonly count: number;
+  readonly context: Readonly<Record<string, string>>;
+  /** 决策层的选择：生成 / 网上找图 / 占位。省略时按环境变量。 */
+  readonly source?: 'generative' | 'web' | 'deterministic' | undefined;
+}
+
+/**
+ * 给一个图片 slot 真生成图片。
+ *
+ * 两步：**先让文本模型写提示词，再按提示词逐张生图**。
+ * 提示词不写死成"一张好看的图"——它要结合页面目标与这一块已经写好的文案，
+ * 否则整页会出现四张风格各异的通用插画。
+ */
+async function generateImagesForSlot(
+  llm: LlmClient,
+  runtime: ToolRuntime,
+  request: ImageSlotRequest,
+): Promise<GenerateSlotResult | null> {
+  const decided = request.source;
+  const envMode = (process.env['MEDIASANDBOX_IMAGE_SOURCE'] ?? 'decision').toLowerCase();
+  // 决策层选了什么就听什么；它没选（自由模式/旧数据）时才看环境变量。
+  const mode: 'generate' | 'web' | 'mixed' =
+    decided === 'web'
+      ? 'web'
+      : decided === 'generative'
+        ? 'mixed' // 选"生成"时允许失败后回落搜图，别让一个坏请求拖垮整页
+        : envMode === 'bing'
+          ? 'web'
+          : envMode === 'mixed'
+            ? 'mixed'
+            : 'generate';
+  const wanted =
+    request.slotType === 'list-image'
+      ? Math.min(Math.max(request.count, 1), MAX_GENERATED_IMAGES)
+      : 1;
+
+  // 生成优先：明确选了生成；或混合模式下的首屏主视觉（那一张最值得独一无二）。
+  const generateFirst = mode === 'generate' || (mode === 'mixed' && request.slotType === 'image');
+  if (generateFirst && llm.generateImage !== undefined) {
+    const generated = await generateViaModel(llm, runtime, request, wanted);
+    if (generated.length > 0) {
+      return request.slotType === 'image'
+        ? { imageBytes: generated[0]!.bytes, imageMime: generated[0]!.mime }
+        : { images: generated };
+    }
+    runtime.log('生图未成功，改用 Bing 搜图');
+  }
+
+  // ── 网上找图（Bing）──────────────────────────────────────────────
+  // 先用关键词搜候选，再逐张下载。任何一张失败都不拖垮整块：
+  // 已经拿到的照用；一张都没拿到就回落占位（选"生成"的才已试过生图）。
+  {
+    // 查询词不能直接用 slot 的声明描述（"图片，每张一行提示词"搜不出东西）：
+    // 先去掉这些内部词，再补上这一块已经写好的标题/正文作为语境。
+    const generic = /(图片|配图|每张一行提示词|每行一条|主视觉图|提示词|一行一条)/g;
+    const contextText = Object.values(request.context)
+      .filter((value) => value !== '')
+      .slice(0, 1)
+      .join(' ');
+    const cleaned = `${contextText} ${request.description.replace(generic, ' ')}`
+      .replace(request.goal, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    // 按块类型补一个稳定的画面关键词：只靠"介绍/主视觉图"搜出来的往往是资讯配图。
+    const sceneWord =
+      request.blockType === 'hero'
+        ? '校园 主楼 全景'
+        : request.blockType === 'gallery'
+          ? '校园 风景'
+          : '';
+    const parts = [request.goal, cleaned, sceneWord]
+      .map((part) => part.trim())
+      .filter((part) => part !== '');
+    const query = [...new Set(parts)].join(' ').slice(0, 80);
+    // 候选多取一些：网图可能 403/不是图片，取 2× 数量才不至于一张失败就回落。
+    const urls = takeBingUrls(request.goal, await bingImageUrls(query), wanted * 2);
+    runtime.log(`Bing 搜图「${query}」：取 ${urls.length} 张（已避开本次用过的图）`);
+    const found: { bytes: Uint8Array; mime: string }[] = [];
+    for (const [index, url] of urls.entries()) {
+      if (found.length >= wanted) break;
+      runtime.log(`下载图片 ${index + 1}/${urls.length}`, { url });
+      const image = await withImageSlot(() => fetchImageBytes(url)).catch(() => null);
+      if (image !== null) {
+        found.push(image);
+        runtime.log(`图片 ${index + 1} 完成（${Math.round(image.bytes.length / 1024)} KB）`);
+      }
+    }
+    if (found.length > 0) {
+      return request.slotType === 'image'
+        ? { imageBytes: found[0]!.bytes, imageMime: found[0]!.mime }
+        : { images: found };
+    }
+  }
+
+  runtime.log('Bing 一张都没拿到，回落占位');
+  return null;
+}
+
+/** 走图像模型生成若干张；失败逐张回落，返回真正拿到的那些。 */
+async function generateViaModel(
+  llm: LlmClient,
+  runtime: ToolRuntime,
+  request: ImageSlotRequest,
+  wanted: number,
+): Promise<{ bytes: Uint8Array; mime: string }[]> {
+  if (llm.generateImage === undefined) return [];
+  const prompts = await craftImagePrompts(llm, runtime, { ...request, count: wanted });
+  const generated: { bytes: Uint8Array; mime: string }[] = [];
+  for (const [index, prompt] of prompts.entries()) {
+    runtime.log(`生图 ${index + 1}/${prompts.length}：${prompt}`);
+    try {
+      // 并发上限 2：本地代理同时排太多图会互相拖慢，最后一起超时。
+      const response = await withImageSlot(() =>
+        llm.generateImage!({
+          prompt,
+          // 单图（首屏主视觉）用横向，图集用方形：横向适合当页面主视觉/背景，
+          // 方形裁成网格更不容易变形。
+          size: request.slotType === 'list-image' ? '1024x1024' : '1536x1024',
+          n: 1,
+          // 单张 90s 上限：本地代理偶发挂住时，不能让首屏一直等到节点超时，
+          // 到点就切 Bing/占位，页面至少能出。
+          signal: AbortSignal.any([
+            ...(runtime.signal === undefined ? [] : [runtime.signal]),
+            AbortSignal.timeout(90_000),
+          ]),
+        }),
+      );
+      const image = response.images[0];
+      if (image === undefined) continue;
+      generated.push({ bytes: image.bytes, mime: image.mimeType });
+      runtime.log(
+        `生图 ${index + 1}/${prompts.length} 完成（${Math.round(image.bytes.length / 1024)} KB）`,
+      );
+    } catch (error) {
+      // 生图失败不拖垮整块：这一张回落占位，原因留在运行日志里。
+      runtime.log(
+        `生图失败，回落占位：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return generated;
+}
+
+/** 同时在跑的图片请求上限。生图/下载都走它，避免把本地代理打爆。 */
+const MAX_CONCURRENT_IMAGES = 2;
+let activeImageTasks = 0;
+const imageWaiters: (() => void)[] = [];
+
+async function withImageSlot<T>(task: () => Promise<T>): Promise<T> {
+  if (activeImageTasks >= MAX_CONCURRENT_IMAGES) {
+    await new Promise<void>((resolve) => imageWaiters.push(resolve));
+  }
+  activeImageTasks += 1;
+  try {
+    return await task();
+  } finally {
+    activeImageTasks -= 1;
+    imageWaiters.shift()?.();
+  }
+}
+
+const BING_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0 Safari/537.36 Edg/124.0';
+
+/**
+ * 同一个目标下已经用过的图片 URL。
+ *
+ * 作用是**跨 slot 去重**：首屏和两个图集可能命中同一批搜索结果，
+ * 不去重就会出现"首屏和图集第一张是同一栋楼"。按 goal 分组：
+ * 换一个目标就该允许复用图片。
+ */
+const bingUsedByGoal = new Map<string, Set<string>>();
+
+/** 从候选里**同步预留**若干张（先标记已用，再下载），避免并发节点拿到同一张。 */
+function takeBingUrls(goal: string, urls: readonly string[], count: number): string[] {
+  let used = bingUsedByGoal.get(goal);
+  if (used === undefined) {
+    used = new Set<string>();
+    bingUsedByGoal.set(goal, used);
+  }
+  const picked: string[] = [];
+  for (const url of urls) {
+    if (picked.length >= count) break;
+    if (used.has(url)) continue;
+    used.add(url);
+    picked.push(url);
+  }
+  return picked;
+}
+
+/** 从 Bing 图片搜索结果里抠出原图地址。只做一次搜索，结果在进程内缓存。 */
+const bingUrlCache = new Map<string, string[]>();
+
+async function bingImageUrls(query: string): Promise<string[]> {
+  const cached = bingUrlCache.get(query);
+  if (cached !== undefined) return cached;
+  const url = `https://www.bing.com/images/search?q=${encodeURIComponent(query)}&form=HDRSC2&first=1`;
+  const response = await fetch(url, {
+    headers: { 'user-agent': BING_UA, 'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Bing 搜索失败 HTTP ${response.status}`);
+  const html = (await response.text()).replaceAll('&quot;', '"').replaceAll('&amp;', '&');
+  const urls: string[] = [];
+  // 结果页里原图地址长这样：murl":"https://...（部分版本是 \"murl\":\"...\"）
+  for (const match of html.matchAll(/"murl"\s*:\s*"(https?:[^"]+)"/g)) {
+    const candidate = match[1];
+    if (candidate !== undefined && !urls.includes(candidate)) urls.push(candidate);
+  }
+  bingUrlCache.set(query, urls);
+  return urls;
+}
+
+async function fetchImageBytes(url: string): Promise<{ bytes: Uint8Array; mime: string }> {
+  const response = await fetch(url, {
+    headers: { 'user-agent': BING_UA, referer: 'https://www.bing.com/' },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok) throw new Error(`图片下载失败 HTTP ${response.status}`);
+  const mime = response.headers.get('content-type') ?? '';
+  if (!mime.startsWith('image/')) throw new Error(`不是图片：${mime}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 2_000) throw new Error(`图片太小（${bytes.length} B）`);
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('图片超过 8 MB');
+  return { bytes, mime: mime.split(';')[0]! };
+}
+
+/** 让文本模型写提示词；失败就用兜底提示词，不让"没问题可问"变成没图。 */
+async function craftImagePrompts(
+  llm: LlmClient,
+  runtime: ToolRuntime,
+  request: ImageSlotRequest,
+): Promise<string[]> {
+  const contextLine = Object.values(request.context)
+    .filter((value) => value !== '')
+    .slice(0, 3)
+    .join(' / ');
+  const fallback =
+    `${request.goal}——${request.description}；高品质游戏宣传主视觉，电影级光影，` +
+    '构图干净、有留白，画面中不出现任何文字、水印或标志';
+
+  try {
+    const response = await llm.complete({
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你在为网页撰写图像生成提示词。只输出提示词本身，一行一条，' +
+            '不要编号、不要解释、不要引号。',
+        },
+        {
+          role: 'user',
+          content:
+            `页面目标：${request.goal}\n` +
+            `这一块的文案：${contextLine === '' ? '（暂无）' : contextLine}\n` +
+            `需要为「${request.description}」准备 ${request.count} 张配图。\n` +
+            `写出 ${request.count} 条中文提示词：每条 40 字以内，写清画面主体、构图、光线与风格；` +
+            '画面中不要出现任何文字、水印、logo；整体质感统一为高品质游戏宣传主视觉。',
+        },
+      ],
+      temperature: 0.9,
+      maxTokens: 240,
+      signal: runtime.signal,
+    });
+    const lines = response.text
+      .split('\n')
+      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.、)])\s*/, '').trim())
+      .filter((line) => line !== '');
+    if (lines.length > 0) {
+      return Array.from({ length: request.count }, (_, index) => {
+        const base = lines[index] ?? lines[index % lines.length]!;
+        return request.count === 1 ? base : `${base}（第 ${index + 1} 张，换一个视角）`;
+      });
+    }
+  } catch (error) {
+    runtime.log(
+      `生图提示词生成失败，用兜底提示词：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  return Array.from({ length: request.count }, (_, index) =>
+    request.count === 1 ? fallback : `${fallback}（第 ${index + 1} 张，换一个视角）`,
+  );
+}
+
 /** 标题槽的字符上限。超过就会把版式挤坏。 */
-const TITLE_LIMIT = 40;
-/** 正文/引文槽的字符上限。 */
+const TITLE_LIMIT = 40;/** 正文/引文槽的字符上限。 */
 const TEXT_LIMIT = 300;
 
 /**
@@ -278,7 +754,9 @@ function sanitizeGenerated(text: string): string {
     .replace(/<\|[^|>]*\|>/g, ' ')
     // 模型会把 slot 说明当内容抄进来（"底下一行小字：…"、"图注：…"）。
     // 这是**元话语**，印在页面上等于把提示词泄漏给观众。
-    .replace(/^[\s"'“”「」]*(?:底下一行小字|图注|备注|说明|标题|正文|副标题|眉标|页脚)[:：]\s*/i, '')
+    .replace(/^[\s"'“”「」]*(?:底下一行小字|图注|备注|说明|标题|正文|副标题|眉标|页脚|主按钮|行动按钮|按钮文字|按钮文案|按钮|行动文字|CTA)[:：]\s*/i, '')
+    // 模型也爱把字段名挂在正文后面（"原神宣传网页｜标题"）。
+    .replace(/[\s｜|]+(?:标题|副标题|正文|按钮|按钮文字|说明|文案)\s*$/i, '')
     .replace(/^[\s"'“”「」]+|[\s"'“”「」]+$/g, '')
     .replace(/\r/g, '');
 }
@@ -550,6 +1028,7 @@ export function createStructuredTools(
   screenshotDriver: ScreenshotDriver = defaultScreenshotDriver(),
 ): readonly ToolRegistration[] {
   return [
+    createWritePageTool(blocks),
     createFillBlockTool(blocks),
     createAssemblePageTool(blocks),
     createPassthroughBlockTool(),

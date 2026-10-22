@@ -67,7 +67,11 @@ class ScriptedDecision implements DecisionClient {
     this.batches.push(ids);
     const answers: Record<string, Answer> = {};
     for (const [id, question] of Object.entries(questions)) {
-      if (question.type === 'choice') this.criteria.push(Object.keys(question.criteria));
+      // 只记"选哪块"的候选集。版式题的候选是 split/center 这类，
+      // 混进来会让"候选集被模板收窄"的断言把它们当成 block。
+      if (question.type === 'choice' && id !== STRUCTURE_QUESTIONS.blockLayout) {
+        this.criteria.push(Object.keys(question.criteria));
+      }
       answers[id] = this.responder(id, question, callIndex);
     }
     return {
@@ -351,7 +355,14 @@ describe('结构规划器：四个原语都用上了', () => {
     await planner.plan({ ...REQUEST, candidateBlockIds: CANDIDATES });
 
     const countBatches = decision.batches.filter(
-      (ids) => ids.length > 0 && ids.every((id) => id.startsWith(`${STRUCTURE_QUESTIONS.slotCount}:`)),
+      (ids) =>
+        ids.some((id) => id.startsWith(`${STRUCTURE_QUESTIONS.slotCount}:`)) &&
+        ids.every(
+          (id) =>
+            id.startsWith(`${STRUCTURE_QUESTIONS.slotCount}:`) ||
+            id.startsWith(`${STRUCTURE_QUESTIONS.slotSource}:`) ||
+            id === STRUCTURE_QUESTIONS.blockLayout,
+        ),
     );
     assert.ok(countBatches.length > 0, '没有单独问过数量');
     for (const batch of decision.batches) {
@@ -962,8 +973,8 @@ describe('结构规划器：slot_source（每个 slot 由谁实现）', () => {
     assert.ok(plans !== undefined, '问过之后要落到块上');
     assert.equal(plans['title'], 'generative');
     assert.equal(plans['actionText'], 'deterministic');
-    // 图像类 slot 不问：生图逐张计费，不能因为"这个 slot 是图"就自动扣钱。
-    assert.equal(plans['media'], undefined);
+    // 图像类也由决策层决定：没选生成就回落到"网上找图"，不再出占位。
+    assert.equal(plans['media'], 'web');
   });
 
   it('一次执笔模式不问 slot_source：谁写不再由决策层决定', async () => {
@@ -1224,8 +1235,8 @@ describe('结构规划器：留痕', () => {
       candidateBlockIds: CANDIDATES,
     });
     assert.equal(result.decisionCalls, decision.batches.length);
-    // 3 轮选块 + 1 次数量 + 1 次评分。
-    assert.ok(result.decisionCalls <= 6, `调了 ${result.decisionCalls} 次，超出预期`);
+    // 3 轮选块 + 1 次数量 + 2 次版式（hero / cta）+ 1 次评分。
+    assert.ok(result.decisionCalls <= 8, `调了 ${result.decisionCalls} 次，超出预期`);
   });
 
   it('onStep 回调抛错不影响规划', async () => {

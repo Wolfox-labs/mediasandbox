@@ -68,7 +68,6 @@ interface WorkbenchSnapshot {
   newTemplateDescription: string;
   maxBlocks: number;
   brand: string;
-  useGenerative: boolean;
   annotate: boolean;
   screenshot: boolean;
   provider: SandboxProvider;
@@ -107,7 +106,9 @@ function asEnvType(value: unknown): EnvType {
 }
 
 function asTemplateMode(value: unknown): TemplateMode {
-  return value === 'saved' || value === 'new' ? value : 'blank';
+  // 默认走「历史模板」：页面骨架由固定模板给，模型只写内容。
+  // 「空白模板」仍然可选，但它意味着让模型自由排结构——不是默认路径。
+  return value === 'blank' || value === 'new' ? value : 'saved';
 }
 
 function asProvider(value: unknown): SandboxProvider {
@@ -160,7 +161,6 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
 
   const maxBlocks = ref(typeof saved.maxBlocks === 'number' ? saved.maxBlocks : 6);
   const brand = ref(asString(saved.brand, ''));
-  const useGenerative = ref(asBoolean(saved.useGenerative, false));
   const annotate = ref(asBoolean(saved.annotate, true));
   const screenshot = ref(asBoolean(saved.screenshot, true));
 
@@ -279,7 +279,15 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
                 ? {}
                 : { candidateBlockIds: [...candidateBlockIds.value] }),
             maxBlocks: maxBlocks.value,
-            useGenerative: useGenerative.value,
+            /*
+             * 文案**固定走生成层**，不再给开关。
+             *
+             * 之前它在「高级参数」里、默认关：不打开就整页是
+             * "这里展示与目标直接相关的说明，内容由确定性填充器生成"——
+             * 文案本身就是页面，不该让用户去折叠面板里发现并打开它。
+             * 想要零成本只看结构，仍可在 API 上显式传 `useGenerative: false`。
+             */
+            useGenerative: true,
             ...(isWebpage.value ? { annotate: annotate.value } : {}),
             screenshot: screenshot.value,
             ...(brand.value.trim() === '' ? {} : { brand: brand.value.trim() }),
@@ -522,7 +530,6 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
     templateSaved.value = false;
     maxBlocks.value = 6;
     brand.value = '';
-    useGenerative.value = false;
     annotate.value = true;
     screenshot.value = true;
     providerPinned.value = false;
@@ -546,7 +553,6 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
       newTemplateDescription,
       maxBlocks,
       brand,
-      useGenerative,
       annotate,
       screenshot,
       provider,
@@ -565,7 +571,6 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
         newTemplateDescription: newTemplateDescription.value,
         maxBlocks: maxBlocks.value,
         brand: brand.value,
-        useGenerative: useGenerative.value,
         annotate: annotate.value,
         screenshot: screenshot.value,
         provider: provider.value,
@@ -594,7 +599,6 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
     templateSaved,
     maxBlocks,
     brand,
-    useGenerative,
     annotate,
     screenshot,
     provider,

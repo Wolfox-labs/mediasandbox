@@ -64,16 +64,25 @@ export const STRUCTURE_QUESTIONS = {
   continueStruct: 'continue_structuring',
   slotCount: 'slot_count',
   slotSource: 'slot_source',
+  blockLayout: 'block_layout',
   structureQuality: 'structure_quality',
 } as const;
 
 /**
  * 可能走生成层的 slot 类型。
  *
- * 图像类**不在里面**：生图逐张计费，必须由显式开关控制，
- * 不能因为"这个 slot 是图"就自动扣钱（与 `tools.ts` 的 slot 生成器同一条理由）。
+ * 图像类也在里面：**要不要真生成图片由决策层按张决定**（`slot_source` 问句会
+ * 明确写"按张计费"）。填充器只对答了 `generative` 的那些调图像端点，
+ * 没答或答确定性就出占位——钱花在哪一块，结构里查得到。
  */
-const GENERATIVE_ELIGIBLE: readonly SlotSpec['type'][] = ['text', 'title', 'code', 'list-text'];
+const GENERATIVE_ELIGIBLE: readonly SlotSpec['type'][] = [
+  'text',
+  'title',
+  'code',
+  'list-text',
+  'image',
+  'list-image',
+];
 
 /**
  * `noul` 判定阈值。**刻意避开 0.5**。
@@ -125,8 +134,8 @@ export type StructureErrorCode =
 export interface StructureStep {
   /** 轮次，从 0 开始。 */
   readonly round: number;
-  /** 本轮的决策来源。`counts` 单独一批时是 `count_only`。 */
-  readonly kind: 'select' | 'count_only' | 'quality';
+  /** 本轮的决策来源。`count_only` 只问数量/来源；`layout` 问版式（可与数量同批）。 */
+  readonly kind: 'select' | 'count_only' | 'layout' | 'quality';
   /** 本轮问了哪些问题（键名）。 */
   readonly questionIds: readonly string[];
   /** 决策层给出的原始答案，按问题 id 索引。 */
@@ -256,6 +265,12 @@ export class StructurePlanner {
       throw new StructureError('本次候选集为空，无法开始结构决策', 'NO_CANDIDATES');
     }
 
+    // 整页模板：结构由模板定死，**不再逐块决策**。
+    // 段落数、顺序、版式、项数、收尾都在模板里；模型只回答"内容由谁生成"。
+    if (request.template?.kind === 'page') {
+      return this.planFixed(request, request.template, candidateIds);
+    }
+
     const steps: StructureStep[] = [];
     const rationale: string[] = [];
     let decisionCalls = 0;
@@ -341,9 +356,16 @@ export class StructurePlanner {
 
       // 首块没什么可"继续"的，不问。
       if (!isFirst) {
+        const coverage = planCoverage(page, request.blueprint);
         questions[STRUCTURE_QUESTIONS.continueStruct] = {
           type: 'noul',
-          instructions: `${surface}已经有 ${page.blocks.length} ${unit}（${describePageSpec(page)}）。` +
+          instructions:
+            `${surface}已经有 ${page.blocks.length} ${unit}（${describePageSpec(page)}）。` +
+            (coverage.remaining.length > 0
+              ? `统筹计划共 ${coverage.total} 段，还有 ${coverage.remaining.length} 段没排` +
+                `（下一段建议：${coverage.remaining[0]!.blockIds.join('/') || '自由发挥'}）。` +
+                '计划没走完就停下，页面会缺内容。'
+              : '计划里的段落已经排完。') +
             `再补一${unit}能让它更完整吗？如果已经齐全，答否。`,
         };
       }
@@ -408,6 +430,9 @@ export class StructurePlanner {
         continueRationale = verdict.rationale;
 
         if (!verdict.continued) {
+          // 计划覆盖只作为**事实**进入 continue 问句，不在这里强行续块。
+          // 强推会把"计划 6 段"变成"凑满 8 块"（实测排出了三连图集＋九张图）。
+          // 页面长度交给整页模板保证，自由模式尊重决策层的停止判断。
           const stopRationale = `第 ${round + 1} 轮：${verdict.rationale}，结构定稿`;
           emit({
             round,
@@ -480,15 +505,16 @@ export class StructurePlanner {
       lastSpec = picked;
       lastBlockId = blockId;
 
-      // ── "要几个" 与 "由谁实现" ────────────────────────────────────
+      // ── "要几个"、"由谁实现" 与 "用哪种版式" ──────────────────────
       //
-      // 两者都以"选中了哪块"为前提，彼此没有依赖，所以**同批**问出去。
+      // 三者都以"选中了哪块"为前提，彼此没有依赖，所以**同批**问出去。
       const listSlots = picked.slots.filter((s) => s.countRange !== undefined);
       const sourceSlots =
         request.useGenerative === true && request.askSlotSource !== false
           ? picked.slots.filter((s) => GENERATIVE_ELIGIBLE.includes(s.type))
           : [];
-      if (listSlots.length > 0 || sourceSlots.length > 0) {
+      const asksLayout = (picked.layouts?.length ?? 0) > 1;
+      if (listSlots.length > 0 || sourceSlots.length > 0 || asksLayout) {
         const blockResult = await this.askBlockQuestions({
           request,
           page,
@@ -512,16 +538,20 @@ export class StructurePlanner {
                   // 没问过就不写这个字段——"问过且都答确定性"与"没问过"
                   // 在填充器里是两种行为，不能混成一种。
                   ...(sourceSlots.length > 0 ? { slotPlans: blockResult.plans } : {}),
+                  ...(blockResult.layout !== undefined ? { layout: blockResult.layout } : {}),
                 }
               : b,
           ),
         };
         emit({
           round,
-          kind: 'count_only',
+          // 有数量/来源问题时这仍是"定细节"那一批；只有单独问版式时才另起一类，
+          // 前端据此显示"选版式"，而不是把版式混进数量里。
+          kind: listSlots.length > 0 || sourceSlots.length > 0 ? 'count_only' : 'layout',
           questionIds: [
             ...listSlots.map((s) => `${STRUCTURE_QUESTIONS.slotCount}:${s.name}`),
             ...sourceSlots.map((s) => `${STRUCTURE_QUESTIONS.slotSource}:${s.name}`),
+            ...(asksLayout ? [STRUCTURE_QUESTIONS.blockLayout] : []),
           ],
           answers: blockResult.answers,
           pickedBlockId: picked.id,
@@ -804,13 +834,15 @@ export class StructurePlanner {
       rationale: pickRationale,
     });
 
-    // 补进来的块同样要问数量与"由谁实现"，否则它的列表型 slot 会缺项数。
+    // 补进来的块同样要问数量、来源与版式，否则它的列表型 slot 会缺项数、
+    // 版式也会停在默认值上。
     const listSlots = picked.slots.filter((s) => s.countRange !== undefined);
     const sourceSlots =
       args.request.useGenerative === true && args.request.askSlotSource !== false
         ? picked.slots.filter((s) => GENERATIVE_ELIGIBLE.includes(s.type))
         : [];
-    if (listSlots.length > 0 || sourceSlots.length > 0) {
+    const asksLayout = (picked.layouts?.length ?? 0) > 1;
+    if (listSlots.length > 0 || sourceSlots.length > 0 || asksLayout) {
       try {
         const blockResult = await this.askBlockQuestions({
           request: args.request,
@@ -832,16 +864,18 @@ export class StructurePlanner {
                   ...b,
                   slots: buildCountSlots(listSlots, blockResult.counts),
                   ...(sourceSlots.length > 0 ? { slotPlans: blockResult.plans } : {}),
+                  ...(blockResult.layout !== undefined ? { layout: blockResult.layout } : {}),
                 }
               : b,
           ),
         };
         args.emit({
           round: args.page.blocks.length,
-          kind: 'count_only',
+          kind: listSlots.length > 0 || sourceSlots.length > 0 ? 'count_only' : 'layout',
           questionIds: [
             ...listSlots.map((s) => `${STRUCTURE_QUESTIONS.slotCount}:${s.name}`),
             ...sourceSlots.map((s) => `${STRUCTURE_QUESTIONS.slotSource}:${s.name}`),
+            ...(asksLayout ? [STRUCTURE_QUESTIONS.blockLayout] : []),
           ],
           answers: blockResult.answers,
           pickedBlockId: picked.id,
@@ -950,6 +984,178 @@ export class StructurePlanner {
    * 两个问题**同批**：它们都以"选中了哪块"为前提，彼此没有依赖。
    * 分成两批只会白白多一次往返。
    */
+  /**
+   * 整页模板的规划：**结构照抄，只问内容由谁生成**。
+   *
+   * 这是"固定排版"的落点：段落数、顺序、版式、列表项数、收尾全部来自模板，
+   * 决策模型没有"再补一块"的机会，也就不会跑出三连图集或半截页面。
+   */
+  private async planFixed(
+    request: PlanStructureRequest,
+    template: TemplateSpec,
+    candidateIds: readonly string[],
+  ): Promise<PlanStructureResult> {
+    const steps: StructureStep[] = [];
+    const rationale: string[] = [];
+    let decisionCalls = 0;
+    let decisionLatencyMs = 0;
+    const usage = { inputTokens: 0, outputTokens: 0 };
+
+    let page = createPageSpec({
+      projectId: request.projectId,
+      goal: request.goal,
+      templateId: template.id,
+      candidateBlockIds: candidateIds,
+    });
+    rationale.push(
+      `使用整页模板 ${template.id}（${template.label}）：` +
+        `${template.blocks.length} 段固定结构，顺序与收尾不再由模型决定`,
+    );
+
+    for (const [index, entry] of template.blocks.entries()) {
+      const spec = this.blocks.get(entry.type);
+      const blockId = nextBlockId(page);
+
+      // 模板写死的项数先落成占位列表；没写死的列表型 slot 交给决策层选数量。
+      const slots: Record<string, SlotValue> = { ...(entry.slots ?? {}) };
+      const fixedCounts: Record<string, number> = {};
+      for (const slot of spec.slots) {
+        if (slot.countRange === undefined) continue;
+        const count = entry.counts?.[slot.name];
+        if (count === undefined) continue;
+        fixedCounts[slot.name] = count;
+        if (slot.type === 'list-image') {
+          slots[slot.name] = {
+            kind: 'list-image',
+            refs: Array.from({ length: count }, () => ({ ref: '', alt: '' })),
+          };
+        } else if (slot.type === 'list-text') {
+          slots[slot.name] = { kind: 'list', items: Array.from({ length: count }, () => '') };
+        }
+      }
+
+      page = appendBlock(page, {
+        id: blockId,
+        type: entry.type,
+        slots,
+        status: 'pending',
+        sources: {},
+        ...(entry.layout === undefined ? {} : { layout: entry.layout }),
+      });
+
+      const listSlots = spec.slots.filter(
+        (slot) => slot.countRange !== undefined && fixedCounts[slot.name] === undefined,
+      );
+      const sourceSlots =
+        request.useGenerative === true && request.askSlotSource !== false
+          ? spec.slots.filter((slot) => GENERATIVE_ELIGIBLE.includes(slot.type))
+          : [];
+      const asksLayout = entry.layout === undefined && (spec.layouts?.length ?? 0) > 1;
+
+      let stepRationale = `第 ${index + 1} 段：${spec.label}（${spec.id}）` +
+        `，版式 ${entry.layout ?? '由模型选'}，固定项数 ${JSON.stringify(fixedCounts)}`;
+
+      if (listSlots.length > 0 || sourceSlots.length > 0 || asksLayout) {
+        const result = await this.askBlockQuestions({
+          request,
+          page,
+          spec,
+          blockId,
+          listSlots,
+          sourceSlots,
+          ...(asksLayout ? {} : { askLayout: false }),
+        });
+        decisionCalls += 1;
+        decisionLatencyMs += result.latencyMs;
+        usage.inputTokens += result.usage.inputTokens;
+        usage.outputTokens += result.usage.outputTokens;
+        const counts = { ...fixedCounts, ...result.counts };
+        page = {
+          ...page,
+          blocks: page.blocks.map((block) =>
+            block.id === blockId
+              ? {
+                  ...block,
+                  slots: { ...block.slots, ...buildCountSlots(listSlots, result.counts) },
+                  ...(sourceSlots.length > 0 ? { slotPlans: result.plans } : {}),
+                  ...(result.layout === undefined ? {} : { layout: result.layout }),
+                }
+              : block,
+          ),
+        };
+        steps.push({
+          round: index,
+          kind: listSlots.length > 0 || sourceSlots.length > 0 ? 'count_only' : 'layout',
+          questionIds: [
+            ...listSlots.map((slot) => `${STRUCTURE_QUESTIONS.slotCount}:${slot.name}`),
+            ...sourceSlots.map((slot) => `${STRUCTURE_QUESTIONS.slotSource}:${slot.name}`),
+            ...(asksLayout ? [STRUCTURE_QUESTIONS.blockLayout] : []),
+          ],
+          answers: result.answers,
+          pickedBlockId: spec.id,
+          continueProbability: null,
+          continued: null,
+          counts,
+          score: null,
+          latencyMs: result.latencyMs,
+          rationale: result.rationale,
+        });
+        stepRationale += `；${result.rationale}`;
+      } else {
+        steps.push({
+          round: index,
+          kind: 'count_only',
+          questionIds: [],
+          answers: {},
+          pickedBlockId: spec.id,
+          continueProbability: null,
+          continued: null,
+          counts: fixedCounts,
+          score: null,
+          latencyMs: 0,
+          rationale: '固定结构，无需决策',
+        });
+      }
+      rationale.push(stepRationale);
+    }
+
+    const normalized = normalizePageSpec(page, this.blocks);
+    page = normalized.page;
+    for (const fix of normalized.fixes) rationale.push(`版式规范化：${fix.detail}`);
+
+    const quality = await this.askQuality(request, page);
+    decisionCalls += 1;
+    decisionLatencyMs += quality.latencyMs;
+    usage.inputTokens += quality.usage.inputTokens;
+    usage.outputTokens += quality.usage.outputTokens;
+    page = { ...page, qualityScore: quality.score };
+    steps.push({
+      round: template.blocks.length,
+      kind: 'quality',
+      questionIds: [STRUCTURE_QUESTIONS.structureQuality],
+      answers: { [STRUCTURE_QUESTIONS.structureQuality]: quality.raw },
+      pickedBlockId: null,
+      continueProbability: null,
+      continued: null,
+      counts: {},
+      score: quality.score,
+      latencyMs: quality.latencyMs,
+      rationale: quality.rationale,
+    });
+    rationale.push(quality.rationale);
+
+    validatePageSpec(page, this.blocks);
+    return {
+      page,
+      steps,
+      rationale,
+      decisionLatencyMs,
+      decisionCalls,
+      usage,
+      fixes: [...normalized.fixes],
+    };
+  }
+
   private async askBlockQuestions(args: {
     readonly request: PlanStructureRequest;
     readonly page: PageSpec;
@@ -957,9 +1163,12 @@ export class StructurePlanner {
     readonly blockId: string;
     readonly listSlots: readonly SlotSpec[];
     readonly sourceSlots: readonly SlotSpec[];
+    /** 整页模板已把版式写死，不再问"用哪种版式"。 */
+    readonly askLayout?: boolean | undefined;
   }): Promise<{
     readonly counts: Record<string, number>;
     readonly plans: Record<string, SlotFillPlan>;
+    readonly layout: string | undefined;
     readonly answers: Record<string, unknown>;
     readonly latencyMs: number;
     readonly rationale: string;
@@ -977,16 +1186,44 @@ export class StructurePlanner {
       };
     }
     for (const slot of args.sourceSlots) {
+      const isImage = slot.type === 'image' || slot.type === 'list-image';
       questions[`${STRUCTURE_QUESTIONS.slotSource}:${slot.name}`] = {
         type: 'choice',
+        instructions: isImage
+          ? `页面上 ${args.spec.label}（${args.spec.id}）的「${slot.description}」` +
+            '配图从哪来？只能二选一：' +
+            '「生成」按张计费、画面最贴合但每块最多 2 张，适合独一无二的主视觉；' +
+            '「网上找图」用 Bing 搜真实照片、不花生图费用，适合校园/产品实景。' +
+            '默认优先网上找图；只有需要不存在于现实的画面时才选生成。'
+          : `页面上 ${args.spec.label}（${args.spec.id}）的「${slot.description}」` +
+            `该由谁来写？「生成层」写得具体但要花生成额度；「确定性」零成本、` +
+            `内容朴素但一定完整。需要贴合目标的表达就选生成层，套话够用就选确定性。`,
+        criteria: isImage
+          ? {
+              generative: '调用生图模型（按张计费，最多 2 张；适合独一无二的主视觉）',
+              web: '网上找图（Bing 搜真实照片，不花生图费用；适合校园/产品实景）',
+            }
+          : {
+              generative: '生成层写（调用模型，花生成额度，内容更贴合目标）',
+              deterministic: '确定性拼（零成本，内容朴素但完整、可复现）',
+            },
+      };
+    }
+
+    // ── 版式：同一类内容怎么摆 ──────────────────────────────────────
+    //
+    // 版式不改内容，只改摆法（左右分栏/居中、卡片/列表行……）。
+    // 它与"要几项""谁来写"互不依赖，所以同批问出去。
+    const layouts = args.spec.layouts ?? [];
+    if (layouts.length > 1 && args.askLayout !== false) {
+      questions[STRUCTURE_QUESTIONS.blockLayout] = {
+        type: 'choice',
         instructions:
-          `页面上 ${args.spec.label}（${args.spec.id}）的「${slot.description}」` +
-          `该由谁来写？「生成层」写得具体但要花生成额度；「确定性」零成本、` +
-          `内容朴素但一定完整。需要贴合目标的表达就选生成层，套话够用就选确定性。`,
-        criteria: {
-          generative: '生成层写（调用模型，花生成额度，内容更贴合目标）',
-          deterministic: '确定性拼（零成本，内容朴素但完整、可复现）',
-        },
+          `页面上 ${args.spec.label}（${args.spec.id}）用哪种版式？` +
+          '版式只改变内容的摆法，不改变内容本身；按这一块想让人先看到什么来选。',
+        criteria: Object.fromEntries(
+          layouts.map((layout) => [layout.id, `${layout.label}：${layout.description}`]),
+        ),
       };
     }
 
@@ -1013,7 +1250,7 @@ export class StructurePlanner {
       degraded = true;
       decided = await this.decision.decide(
         context,
-        { ...choiceQuestionsFor(args.listSlots), ...sourceQuestionsOf(questions) },
+        { ...choiceQuestionsFor(args.listSlots), ...choiceQuestionsOf(questions) },
         timeout,
       );
     }
@@ -1022,6 +1259,7 @@ export class StructurePlanner {
     const plans: Record<string, SlotFillPlan> = {};
     const answers: Record<string, unknown> = {};
     const notes: string[] = [];
+    let layout: string | undefined;
     for (const slot of args.listSlots) {
       const key = `${STRUCTURE_QUESTIONS.slotCount}:${slot.name}`;
       const answer = decided.answers[key];
@@ -1066,16 +1304,44 @@ export class StructurePlanner {
       if (answer === undefined || answer.type !== 'choice') {
         throw new StructureError(`决策层未返回 ${key} 的答案`, 'INVALID_PAGE');
       }
-      // 弃权时取概率最高的那个；再没有就回落到确定性——**零成本是默认值**。
+      // 弃权时取概率最高的那个；再没有就按类型回落：
+      // 图片回落到"网上找图"（有真图才成立），文字回落到确定性（零成本）。
       const picked = answer.value ?? argmaxDeterministic(Object.keys(answer.probabilities), answer.probabilities);
-      const plan: SlotFillPlan = picked === 'generative' ? 'generative' : 'deterministic';
+      const isImageSlot = slot.type === 'image' || slot.type === 'list-image';
+      const plan: SlotFillPlan =
+        picked === 'generative' ? 'generative' : isImageSlot ? 'web' : 'deterministic';
       plans[slot.name] = plan;
-      notes.push(`${slot.name}→${plan === 'generative' ? '生成层' : '确定性'}`);
+      notes.push(
+        `${slot.name}→${plan === 'generative' ? '生成层' : plan === 'web' ? '网上找图' : '确定性'}`,
+      );
+    }
+
+    // 版式：弃权或给了不认识的 id 都用默认（第一个），但要在依据里说清，
+    // 否则"选了却没生效"只能靠翻结构才发现。
+    if (layouts.length > 1 && args.askLayout !== false) {
+      const key = STRUCTURE_QUESTIONS.blockLayout;
+      const answer = decided.answers[key];
+      answers[key] = answer;
+      const fallback = layouts[0]!.id;
+      if (answer === undefined || answer.type !== 'choice') {
+        layout = fallback;
+        notes.push(`版式=${layout}（未作答，用默认）`);
+      } else {
+        const picked =
+          answer.value ?? argmaxDeterministic(Object.keys(answer.probabilities), answer.probabilities);
+        layout = layouts.some((candidate) => candidate.id === picked) ? picked : fallback;
+        notes.push(
+          picked === layout
+            ? `版式=${layout}`
+            : `版式=${layout}（模型给了未知版式 ${String(picked)}，回落默认）`,
+        );
+      }
     }
 
     return {
       counts,
       plans,
+      layout,
       answers,
       latencyMs: decided.meta.latencyMs,
       rationale:
@@ -1148,6 +1414,15 @@ export class StructurePlanner {
       Object.assign(facts, blueprintFacts(request.blueprint));
       // 已排几块 / 计划几段：这是"还要不要继续"这一问最直接的依据。
       facts['已排块数'] = String(page.blocks.length);
+      const coverage = planCoverage(page, request.blueprint);
+      if (coverage.total > 0) {
+        facts['计划覆盖'] = `${coverage.total - coverage.remaining.length}/${coverage.total} 段`;
+        const next = coverage.remaining[0];
+        if (next !== undefined) {
+          facts['下一段建议'] =
+            `${next.purpose}（建议块 ${next.blockIds.join('/') || '自由发挥'}）`;
+        }
+      }
     }
     if (page.blocks.length > 0) {
       facts['当前结构'] = describePageSpec(page);
@@ -1161,8 +1436,28 @@ export class StructurePlanner {
   }
 }
 
-/** 把数量答案转成 pending 块的初始 slot 值（占位空串，等填充器补内容）。 */
-function buildCountSlots(
+/**
+ * 计划覆盖率：哪些段落已经有对应的块落下去了。
+ *
+ * 判定用"这一段建议的块里至少有一个已经排进页面"。计划允许一段给 1–2 个建议块，
+ * 全要命中太苛刻；反过来，一段都没命中才叫没覆盖。
+ */
+function planCoverage(
+  page: PageSpec,
+  blueprint: PageBlueprint | undefined,
+): {
+  readonly total: number;
+  readonly remaining: readonly { purpose: string; blockIds: readonly string[] }[];
+} {
+  const sections = (blueprint?.sections ?? []).filter((section) => section.blockIds.length > 0);
+  const placed = new Set(page.blocks.map((block) => block.type));
+  const remaining = sections
+    .filter((section) => !section.blockIds.some((id) => placed.has(id)))
+    .map((section) => ({ purpose: section.purpose, blockIds: section.blockIds }));
+  return { total: sections.length, remaining };
+}
+
+/** 把数量答案转成 pending 块的初始 slot 值（占位空串，等填充器补内容）。 */function buildCountSlots(
   listSlots: readonly SlotSpec[],
   counts: Readonly<Record<string, number>>,
 ): Record<string, SlotValue> {
@@ -1221,13 +1516,16 @@ function choiceQuestionsFor(listSlots: readonly SlotSpec[]): Record<string, Ques
   return out;
 }
 
-/** 从一批问题里挑出 `slot_source` 那些。降级重发时用——它们本来就是 choice。 */
-function sourceQuestionsOf(
+/**
+ * 从一批问题里挑出本来就是 `choice` 的那些。降级重发时用——
+ * `slot_source` 与 `block_layout` 都不需要换问法，只有数量要换。
+ */
+function choiceQuestionsOf(
   questions: Readonly<Record<string, Question>>,
 ): Record<string, Question> {
   const out: Record<string, Question> = {};
   for (const [id, question] of Object.entries(questions)) {
-    if (id.startsWith(`${STRUCTURE_QUESTIONS.slotSource}:`)) out[id] = question;
+    if (question.type === 'choice') out[id] = question;
   }
   return out;
 }

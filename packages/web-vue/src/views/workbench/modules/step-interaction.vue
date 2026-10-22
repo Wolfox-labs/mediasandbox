@@ -108,7 +108,8 @@ onMounted(async () => {
           :bordered="false"
           class="mb-2"
         >
-          本机没有可用的浏览器驱动：接口会返回 503，这一步只能跳过，结果页仍可看产物。
+          浏览器驱动未就绪：交互测试依赖 Docker Desktop 里的 Chromium。
+          启动 Docker Desktop 后刷新本页即可；这一步仍可跳过，结果页照样能看产物。
         </NAlert>
         <NAlert v-if="healthError" type="default" :bordered="false" class="mb-2">
           读取本机能力失败（不影响尝试）：{{ healthError }}

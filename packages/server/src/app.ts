@@ -1726,7 +1726,12 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         label: t.label,
         description: t.description,
         builtin: t.builtin,
-        blocks: t.blocks.map((b) => ({ type: b.type })),
+        kind: t.kind ?? 'starter',
+        blocks: t.blocks.map((b) => ({
+          type: b.type,
+          layout: b.layout ?? null,
+          counts: b.counts ?? null,
+        })),
         allowedBlockIds: t.allowedBlockIds ?? null,
       })),
     });

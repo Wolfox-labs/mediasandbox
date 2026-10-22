@@ -84,6 +84,22 @@ export const BLOCK_GROUP_LABELS: Readonly<Record<BlockGroup, string>> = {
  */
 export type BlockPlacement = 'any' | 'first' | 'last';
 
+/**
+ * block 的一种版式。
+ *
+ * 版式**不改内容**：slot 还是那些 slot，只是它们在页面上的摆法不同
+ * （首屏左右分栏 / 居中通栏、特性卡片 / 列表行……）。
+ * 所以它不是一个新 block 类型，而是同一类内容的一种构图。
+ */
+export interface BlockLayoutSpec {
+  /** 稳定 id，写进结构留痕（`BlockInstance.layout`）。 */
+  readonly id: string;
+  /** 展示给决策模型的名字。 */
+  readonly label: string;
+  /** 一句话说清这种版式长什么样、什么时候更合适。 */
+  readonly description: string;
+}
+
 /** 一个具名 slot 的声明。 */
 export interface SlotSpec {
   readonly name: string;
@@ -125,6 +141,13 @@ export interface BlockSpec {
    * 其余一律不设——把 `gallery` 钉死在某个位置会夺走决策模型的判断空间。
    */
   readonly placement?: BlockPlacement | undefined;
+  /**
+   * 可选版式。省略表示这类内容只有一种写法，规划器不会为它多问一题。
+   *
+   * 至少给两种才有意义：只给一种等于"没得选"，却要多一轮决策往返。
+   * 第一个视为默认版式（决策层弃权时用它）。
+   */
+  readonly layouts?: readonly BlockLayoutSpec[] | undefined;
   /** 实现成本提示，供决策模型权衡。 */
   readonly costHint: 'fast' | 'medium' | 'slow';
   /**
@@ -263,6 +286,42 @@ function validateSpec(spec: BlockSpec): void {
     }
     names.add(slot.name);
     validateSlot(spec, slot);
+  }
+
+  if (spec.layouts !== undefined) {
+    if (spec.layouts.length < 2) {
+      throw new BlockError(
+        `block ${spec.id} 只声明了 ${spec.layouts.length} 种版式；` +
+          `至少两种才值得问决策层，否则应省略 layouts`,
+        'BAD_SPEC',
+        spec.id,
+      );
+    }
+    const layoutIds = new Set<string>();
+    for (const layout of spec.layouts) {
+      if (!/^[a-z][a-z0-9-]*$/.test(layout.id)) {
+        throw new BlockError(
+          `block ${spec.id} 的版式 id 只允许小写字母、数字与连字符: ${layout.id}`,
+          'BAD_SPEC',
+          spec.id,
+        );
+      }
+      if (layoutIds.has(layout.id)) {
+        throw new BlockError(
+          `block ${spec.id} 的版式 id 重复: ${layout.id}`,
+          'BAD_SPEC',
+          spec.id,
+        );
+      }
+      layoutIds.add(layout.id);
+      if (layout.label.trim() === '' || layout.description.trim() === '') {
+        throw new BlockError(
+          `block ${spec.id} 的版式 ${layout.id} 缺少 label 或 description`,
+          'BAD_SPEC',
+          spec.id,
+        );
+      }
+    }
   }
 }
 
@@ -461,6 +520,12 @@ const BLOCKS: readonly BlockSpec[] = [
     ],
     canLead: true,
     repeatable: false,
+    layouts: [
+      { id: 'split', label: '左右分栏', description: '标题与按钮在左，主视觉在右。信息与图各占一半，最适合有主视觉的落地页' },
+      { id: 'center', label: '居中通栏', description: '标题、副标题、按钮居中，主视觉在下方整宽铺开。更聚焦文字、气势更足' },
+      { id: 'immersive', label: '全幅背景', description: '主视觉铺满整屏当页面背景，文字叠在暗色蒙层上。适合画面本身就足够强的宣传页；没有图时自动退回居中通栏' },
+      { id: 'mirror', label: '镜像分栏', description: '主视觉在左、文字在右，与左右分栏互为镜像。相邻两页都用分栏时换它，避免两段长得一样' },
+    ],
     costHint: 'medium',
   },
   {
@@ -474,6 +539,11 @@ const BLOCKS: readonly BlockSpec[] = [
     ],
     canLead: false,
     repeatable: true,
+    layouts: [
+      { id: 'cards', label: '卡片网格', description: '每条一张卡片，列数随条数自适应。适合并列、互不依赖的要点' },
+      { id: 'rows', label: '列表行', description: '每条一行，序号在左、说明在右。适合有先后或需要逐条读的要点' },
+      { id: 'bento', label: 'Bento 混排', description: '首条占两格的大卡，其余填满网格。适合有主次之分、想做一个视觉重点的要点' },
+    ],
     costHint: 'fast',
   },
   {
@@ -487,6 +557,11 @@ const BLOCKS: readonly BlockSpec[] = [
     ],
     canLead: false,
     repeatable: true,
+    layouts: [
+      { id: 'grid', label: '等宽网格', description: '每张图同样大小、对齐排列。整齐，适合产品截图' },
+      { id: 'masonry', label: '瀑布流', description: '按列纵向排布，允许图高不一。更灵动，适合作品集' },
+      { id: 'collage', label: '一大两小拼贴', description: '首图占大格、其余小图填满网格。三张图讲主次时最有版面感' },
+    ],
     costHint: 'slow',
   },
   {
@@ -501,6 +576,10 @@ const BLOCKS: readonly BlockSpec[] = [
     ],
     canLead: false,
     repeatable: true,
+    layouts: [
+      { id: 'banner', label: '横幅', description: '通栏背景带，文字与按钮同一行。收尾利落' },
+      { id: 'card', label: '卡片', description: '独立卡片，文字与按钮居中堆叠。更强调、更像一个独立行动区' },
+    ],
     costHint: 'fast',
   },
   {
