@@ -132,6 +132,13 @@ export interface CreateRunInput {
   /** 页面 block 数上限。 */
   readonly maxBlocks?: number | undefined;
   readonly brand?: string | undefined;
+  /**
+   * 用户自己的图片素材（`POST /api/assets` 返回的 assetId，按顺序）。
+   *
+   * 按块序号轮转填进图片 slot，来源记为 `user`，优先于生成与搜图。
+   * 只对 `webpage` 生效。
+   */
+  readonly assets?: readonly string[] | undefined;
   /** 文案是否走生成层。**默认 false**，零成本。 */
   readonly useGenerative?: boolean | undefined;
   /** 页面上是否标注每块的来源。 */
@@ -412,6 +419,37 @@ export const api = {
       throw new ApiError(`读取产物失败（HTTP ${response.status}）`, response.status);
     }
     return await response.text();
+  },
+
+  /**
+   * 上传一张用户素材。
+   *
+   * body 直接是文件字节（不用 FormData）：后端用 `express.raw` 收，
+   * 省掉 multipart 解析，也就没有"边界符写错"这一类失败。
+   * 返回的 `assetId` 放进 `POST /api/runs` 的 `assets` 里即可。
+   */
+  async uploadAsset(file: File): Promise<{ assetId: string; mime: string; bytes: number }> {
+    const response = await fetch('/api/assets', {
+      method: 'POST',
+      headers: { 'content-type': file.type || 'application/octet-stream' },
+      body: file
+    });
+    const body = (await response.json().catch(() => ({}))) as {
+      assetId?: string;
+      mime?: string;
+      bytes?: number;
+      error?: string;
+      detail?: string;
+    };
+    if (!response.ok || body.assetId === undefined) {
+      throw new ApiError(body.error ?? `上传失败（HTTP ${response.status}）`, response.status, body.detail);
+    }
+    return { assetId: body.assetId, mime: body.mime ?? file.type, bytes: body.bytes ?? file.size };
+  },
+
+  /** 素材预览地址。 */
+  assetUrl(assetId: string): string {
+    return `/api/assets/${encodeURIComponent(assetId)}`;
   }
 };
 

@@ -60,6 +60,8 @@ interface WorkbenchSnapshot {
   goal: string;
   envType: EnvType;
   candidateBlockIds: string[];
+  /** 已上传的用户素材 id（按顺序进页面的图片 slot）。 */
+  assetIds: string[];
   poolSkipped: boolean;
   poolMode: PoolMode;
   templateMode: TemplateMode;
@@ -146,6 +148,12 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
   const envType = ref<EnvType>(asEnvType(saved.envType));
   /** 选中的候选 block 类型。空数组 = 没选（提交时不传，等于用池子全集）。 */
   const candidateBlockIds = ref<string[]>(asStringList(saved.candidateBlockIds));
+  /**
+   * 用户自己的图片素材（已上传的 assetId，按添加顺序）。
+   *
+   * 顺序有意义：第 N 块取第 N 张，取完回绕。所以这里用数组而不是集合。
+   */
+  const assetIds = ref<string[]>(asStringList(saved.assetIds));
   /** 跳过 block 选择：本次不限定候选集，把选块的决定权全交给模型。 */
   const poolSkipped = ref(asBoolean(saved.poolSkipped, false));
   const poolMode = ref<PoolMode>(saved.poolMode === 'seed' ? 'seed' : 'candidate');
@@ -291,6 +299,10 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
             ...(isWebpage.value ? { annotate: annotate.value } : {}),
             screenshot: screenshot.value,
             ...(brand.value.trim() === '' ? {} : { brand: brand.value.trim() }),
+            // 用户素材只对网页链路有意义（服务端也会拒其它模态）。
+            ...(isWebpage.value && assetIds.value.length > 0
+              ? { assets: [...assetIds.value] }
+              : {}),
             ...(useSavedTemplate ? { templateId: templateId.value } : {})
           }
         : {})
@@ -545,6 +557,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
       goal,
       envType,
       candidateBlockIds,
+      assetIds,
       poolSkipped,
       poolMode,
       templateMode,
@@ -563,6 +576,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
         goal: goal.value,
         envType: envType.value,
         candidateBlockIds: [...candidateBlockIds.value],
+        assetIds: [...assetIds.value],
         poolSkipped: poolSkipped.value,
         poolMode: poolMode.value,
         templateMode: templateMode.value,
@@ -590,6 +604,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
     goal,
     envType,
     candidateBlockIds,
+    assetIds,
     poolSkipped,
     poolMode,
     templateMode,

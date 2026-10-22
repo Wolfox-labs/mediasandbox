@@ -221,6 +221,12 @@ export async function assembleStructured(args: {
             brand: { kind: 'literal', value: request.brand ?? '' },
             index: { kind: 'literal', value: index },
             useGenerative: { kind: 'literal', value: request.useGenerative === true },
+            // 用户素材**整份**下发给每个块，由块按自己的序号轮转取用：
+            // 只在节点上算好切片的话，"哪块拿哪张"就散落在计划里，
+            // 重跑一次（块序变了）就对不上了。
+            ...(request.userAssets !== undefined && request.userAssets.length > 0
+              ? { userAssets: { kind: 'literal', value: JSON.stringify(request.userAssets) } as const }
+              : {}),
             ...(writeNodeId === undefined
               ? {}
               : { written: { kind: 'ref', nodeId: writeNodeId, port: 'written' } as const }),

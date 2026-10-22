@@ -57,6 +57,13 @@ export interface AssembleRequest {
   readonly maxBlocks?: number | undefined;
   /** 站点名。结构化链路里由用户或确定性代码给，不让模型编。 */
   readonly brand?: string | undefined;
+  /**
+   * 用户自己的图片素材（宿主绝对路径 + mime）。
+   *
+   * 只在 `webpage` 的结构化链路里生效：按块序号轮转填进图片 slot，
+   * 来源记为 `user`，优先于生成与搜图。
+   */
+  readonly userAssets?: readonly { readonly path: string; readonly mime: string }[] | undefined;
   /** 文案是否走生成层。默认 false —— **零成本是默认值**。 */
   readonly useGenerative?: boolean | undefined;
   /** 页面上是否标注每块的来源，便于演示与排查。 */

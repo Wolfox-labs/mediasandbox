@@ -365,6 +365,7 @@ async function main(): Promise<void> {
     persist,
     workflows: workflowStore,
     nodeCacheDir,
+    assetsDir: path.join(dataDir, 'assets'),
     projectsDir: PROJECTS_ROOT,
     onLog: (message) => log(`  ${message}`),
     decision,

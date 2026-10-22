@@ -36,8 +36,10 @@
  * 现在池子从外面注入一次，三处共用。不注入时退回内置池，
  * 保证"什么都不配也能跑通"这条底线不变。
  */
+import { readFile } from 'node:fs/promises';
 import { ToolError, type ToolRegistration, type ToolResult, type ToolRuntime } from '../tools/types.js';
 import type { LlmClient } from '../llm/types.js';
+import { sniffImageMime } from '../llm/openai-client.js';
 import { DEFAULT_VIEWPORT, defaultScreenshotDriver, type ScreenshotDriver } from '../render/screenshot.js';
 import { createBlockRegistry, type BlockRegistry } from './block-spec.js';
 import { deriveBrand, fillBlock, type GenerateSlotResult } from './filler.js';
@@ -107,6 +109,12 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
           required: false,
           description: '整页执笔结果里属于本块的 slot 文案 JSON（有就优先用，省掉逐 slot 调用）',
         },
+        {
+          name: 'userAssets',
+          type: 'text',
+          required: false,
+          description: '用户素材 JSON：[{path,mime}]，按块序号轮转填入图片 slot（优先于生成与搜图）',
+        },
       ],
       outputs: [
         { name: 'block', type: 'text', required: true, description: '填好的 block JSON' },
@@ -157,6 +165,9 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
         }
       }
 
+      // 用户素材：读字节并按块序号轮转。空数组表示这次没带素材，一切照旧。
+      const userImages = await loadUserAssets(runtime.inputs['userAssets'], index, runtime);
+
       // 生成式实现：只对"归生成层填"的 slot 类型调模型，其余仍是确定性。
       // 粒度是 **slot**，不是 block —— "这块标题用确定性的、主视觉用生成式的"
       // 必须表达得出来，否则素材层又退化成一揽子。
@@ -187,10 +198,11 @@ export function createFillBlockTool(blocks: BlockRegistry): ToolRegistration {
         // 页面上顶着的仍是一句在词中间切断的残句（「…含首屏、特」）。
         // 兜底只能有一处，否则改了 A 忘了 B，表现是"修了但没生效"。
         brand: brand === '' ? deriveBrand(goal) : brand,
-        options:
-          generate === undefined
-            ? {}
-            : { generate, ...(written !== undefined ? { written } : {}) },
+        options: {
+          ...(generate === undefined ? {} : { generate }),
+          ...(written !== undefined ? { written } : {}),
+          ...(userImages.length > 0 ? { userImages } : {}),
+        },
         index,
         counts,
       });
@@ -453,6 +465,49 @@ interface ImageSlotRequest {
   readonly context: Readonly<Record<string, string>>;
   /** 决策层的选择：生成 / 网上找图 / 占位。省略时按环境变量。 */
   readonly source?: 'generative' | 'web' | 'deterministic' | undefined;
+}
+
+/**
+ * 读用户素材并**按块序号轮转**。
+ *
+ * 素材是按顺序分配而不是"谁先跑完谁先拿"：块是并发填充的，
+ * 用完成顺序分配会得到一个每次都不一样、也复现不了的页面。
+ * 第 N 块从第 N 张开始取，取完回绕。
+ */
+async function loadUserAssets(
+  raw: unknown,
+  blockIndex: number,
+  runtime: ToolRuntime,
+): Promise<{ bytes: Uint8Array; mime: string }[]> {
+  if (typeof raw !== 'string' || raw.trim() === '') return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    runtime.log('userAssets 不是合法 JSON，已忽略');
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const entries = parsed.filter(
+    (item): item is { path: string } =>
+      item !== null && typeof item === 'object' && typeof (item as { path?: unknown }).path === 'string',
+  );
+  if (entries.length === 0) return [];
+
+  const offset = blockIndex % entries.length;
+  const rotated = [...entries.slice(offset), ...entries.slice(0, offset)];
+  const out: { bytes: Uint8Array; mime: string }[] = [];
+  for (const entry of rotated) {
+    try {
+      const file = await readFile(entry.path);
+      const bytes = new Uint8Array(file);
+      out.push({ bytes, mime: sniffImageMime(bytes) });
+    } catch (error_) {
+      runtime.log(`用户素材读取失败，已跳过：${String(error_)}`);
+    }
+  }
+  if (out.length > 0) runtime.log(`本块可用用户素材 ${out.length} 张`);
+  return out;
 }
 
 /**

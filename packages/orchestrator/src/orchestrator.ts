@@ -75,6 +75,11 @@ export interface RunRequest {
   readonly maxBlocks?: number | undefined;
   /** 站点名。由用户或确定性代码给，不让模型编。 */
   readonly brand?: string | undefined;
+  /**
+   * 用户自己的图片素材（宿主绝对路径 + mime）。只在 `webpage` 结构化链路里生效：
+   * 按块序号轮转填进图片 slot，来源记为 `user`。
+   */
+  readonly userAssets?: readonly { readonly path: string; readonly mime: string }[] | undefined;
   /** 文案是否走生成层。**默认 false**——零成本是默认值。 */
   readonly useGenerative?: boolean | undefined;
   /** 页面上是否标注每块的来源（生成式/确定性/用户），便于演示与排查。 */
@@ -437,6 +442,7 @@ export class Orchestrator {
               : {}),
             ...(request.maxBlocks !== undefined ? { maxBlocks: request.maxBlocks } : {}),
             ...(request.brand !== undefined ? { brand: request.brand } : {}),
+            ...(request.userAssets !== undefined ? { userAssets: request.userAssets } : {}),
             ...(request.useGenerative !== undefined ? { useGenerative: request.useGenerative } : {}),
             ...(request.annotate !== undefined ? { annotate: request.annotate } : {}),
             ...(request.screenshot !== undefined ? { screenshot: request.screenshot } : {}),

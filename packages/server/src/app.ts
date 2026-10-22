@@ -64,6 +64,7 @@ import {
   validateStructureInput,
 } from './structure-input.js';
 import { createZip, type ZipEntry } from './zip.js';
+import { createAssetStore, MAX_ASSET_BYTES } from './assets.js';
 
 export interface ServerDeps {
   readonly registry: ToolRegistry;
@@ -104,6 +105,13 @@ export interface ServerDeps {
    * 节点级缓存目录。省略则不启用缓存——每次运行都真跑，行为与从前一致。
    */
   readonly nodeCacheDir?: string | undefined;
+  /**
+   * 用户素材目录。省略则 `/api/assets` 不可用（上传一律 503）。
+   *
+   * 与产物目录分开：产物是"这次跑出来的"，素材是"我手里本来就有、
+   * 要跨多次运行复用"的东西，生命周期不同。
+   */
+  readonly assetsDir?: string | undefined;
   /**
    * 交付物落定目录。
    *
@@ -257,6 +265,12 @@ function errorResponse(res: Response, status: number, message: string, detail?: 
 
 export function createServer(deps: ServerDeps): CreateServerResult {
   const store = new RunStore(deps.persist);
+
+  /**
+   * 用户素材库。没配 `assetsDir` 就没有——此时 `/api/assets` 一律 503，
+   * `/api/runs` 收到 `assets` 也会明确拒绝，而不是静默忽略。
+   */
+  const assetStore = deps.assetsDir === undefined ? undefined : createAssetStore(deps.assetsDir);
 
   // 沙盒 id 记在**运行记录**上（`record.sandboxId`），不再单独维护一张内存表。
   // 两张表就意味着两处真相：重启后内存表空了、产物明明还在那个沙盒里，
@@ -631,6 +645,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       readonly brand?: string | undefined;
       readonly useGenerative?: boolean | undefined;
       readonly annotate?: boolean | undefined;
+      /** 用户自己的图片素材（已落盘的绝对路径 + mime）。 */
+      readonly userAssets?: readonly { readonly path: string; readonly mime: string }[] | undefined;
       /** 已从模板池解析出来的模板（不是 id）。 */
       readonly template?: TemplateSpec | undefined;
       /** 既定结构：照它跑，结构不再由决策模型决定（"带指定 PageSpec 重跑"）。 */
@@ -837,9 +853,75 @@ export function createServer(deps: ServerDeps): CreateServerResult {
     app.use(express.static(webRoot, { index: 'index.html' }));
   }
 
+  // ── 用户素材 ────────────────────────────────────────────────────────
+  //
+  // 收的是**裸 body**（`content-type: image/*`），不走 multipart：
+  // 前端 `fetch('/api/assets', { method: 'POST', body: file })` 就能发，
+  // 服务端也不必为此多一个解析器依赖。类型以魔数为准（见 assets.ts）。
+  app.post(
+    '/api/assets',
+    express.raw({ type: () => true, limit: MAX_ASSET_BYTES }),
+    async (req: Request, res: Response) => {
+      if (assetStore === undefined) {
+        errorResponse(res, 503, '素材库未启用', '服务端没有配置 assetsDir');
+        return;
+      }
+      const raw = req.body;
+      const bytes = Buffer.isBuffer(raw) ? new Uint8Array(raw) : new Uint8Array(0);
+      if (bytes.length === 0) {
+        errorResponse(res, 400, '请求体是空的：请把图片字节直接放在 body 里');
+        return;
+      }
+      try {
+        const stored = await assetStore.save(bytes, String(req.headers['content-type'] ?? ''));
+        res.status(201).json({
+          assetId: stored.assetId,
+          mime: stored.mime,
+          bytes: stored.bytes,
+          url: `/api/assets/${stored.assetId}`,
+        });
+      } catch (error_) {
+        errorResponse(res, 400, error_ instanceof Error ? error_.message : String(error_));
+      }
+    },
+  );
+
+  /** 素材清单。目前给界面用：列出已上传的图，免得重复传。 */
+  app.get('/api/assets', async (_req: Request, res: Response) => {
+    if (assetStore === undefined) {
+      errorResponse(res, 503, '素材库未启用');
+      return;
+    }
+    const assets = await assetStore.list();
+    res.json({
+      assets: assets.map((item) => ({
+        assetId: item.assetId,
+        mime: item.mime,
+        bytes: item.bytes,
+        url: `/api/assets/${item.assetId}`,
+      })),
+    });
+  });
+
+  /** 取素材字节。内容寻址 + 不可变，所以可以放心长缓存。 */
+  app.get('/api/assets/:assetId', async (req: Request, res: Response) => {
+    if (assetStore === undefined) {
+      errorResponse(res, 503, '素材库未启用');
+      return;
+    }
+    const found = await assetStore.locate(String(req.params['assetId']));
+    if (found === undefined) {
+      errorResponse(res, 404, '素材不存在');
+      return;
+    }
+    const bytes = await readFile(found.path);
+    res.setHeader('content-type', found.mime);
+    res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+    res.end(bytes);
+  });
+
   // ── 健康检查 ────────────────────────────────────────────────────────
-  app.get('/api/health', async (_req: Request, res: Response) => {
-    const decisionHealth = await deps.decision.health().catch((error: unknown) => ({
+  app.get('/api/health', async (_req: Request, res: Response) => {    const decisionHealth = await deps.decision.health().catch((error: unknown) => ({
       ok: false,
       detail: String(error),
     }));
@@ -1222,6 +1304,28 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
 
+    // ── 用户素材：只认已入库的 id ──────────────────────────────────────
+    //
+    // 不接受路径、不接受 URL：素材必须先经过 `POST /api/assets` 落盘，
+    // 这样"这次运行用了哪几张图"才是可追溯的，也顺手挡住了任意文件读取。
+    const userAssets: { path: string; mime: string }[] = [];
+    {
+      const rawAssets = Array.isArray(body['assets']) ? (body['assets'] as unknown[]) : [];
+      const assetIds = rawAssets.filter((item): item is string => typeof item === 'string').slice(0, 12);
+      for (const assetId of assetIds) {
+        const found = await assetStore?.locate(assetId);
+        if (found === undefined) {
+          errorResponse(res, 400, `素材不存在: ${assetId}`, '先 POST /api/assets 上传，再把这个 id 放进 assets');
+          return;
+        }
+        userAssets.push({ path: found.path, mime: found.mime });
+      }
+      if (assetIds.length > 0 && envType !== 'webpage') {
+        errorResponse(res, 400, '用户素材目前只接 webpage 链路', `envType 是 ${envType}`);
+        return;
+      }
+    }
+
     // 两种"结构不由模型决定"的输入方式，最后都落到 `structureInput` 上：
     //   - `redoFrom` + `blockIds`：只重做某次运行里的几块
     //   - `pageSpec`：照一份完整的结构跑
@@ -1581,6 +1685,8 @@ export function createServer(deps: ServerDeps): CreateServerResult {
             ...(template !== undefined ? { template } : {}),
             ...(typeof body['maxBlocks'] === 'number' ? { maxBlocks: body['maxBlocks'] } : {}),
             ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
+            // 用户素材：路径已在入口处解析并校验过，这里只往下传。
+            ...(userAssets.length > 0 ? { userAssets } : {}),
             /*
              * 文案是否走生成层。
              *

@@ -55,6 +55,14 @@ export interface FillOptions {
    * 回落，而不是硬塞进去——那样版式会在渲染前就崩掉。
    */
   readonly written?: Readonly<Record<string, unknown>> | undefined;
+  /**
+   * **用户自己的图片素材**（已解码的字节）。
+   *
+   * 按声明顺序消费：第一个图片 slot 拿第一张，图集拿接下来几张，取完回绕。
+   * 给了素材的 slot 记为 `user`，不再走生成/搜图——人已经指定了画面，
+   * 就不该再让模型猜一张差不多的顶上去。
+   */
+  readonly userImages?: readonly { readonly bytes: Uint8Array; readonly mime: string }[] | undefined;
   /** 单个 slot 生成失败时是否让整块失败。默认 false——回落到确定性内容。 */
   readonly failOnGenerateError?: boolean | undefined;
 }
@@ -450,6 +458,39 @@ export async function fillBlock(args: {
     }
   }
 
+  // ── 第二遍半：用户素材 ────────────────────────────────────────────────
+  //
+  // 放在生成式覆盖**之前**：人已经把图递过来了，就不该再让模型生成一张
+  // "差不多意思"的插画顶上去。消费顺序是声明顺序，取完回绕——
+  // 与"哪个 slot 先填完"无关，所以每次跑出来的分配是一样的。
+  const userFilled = new Set<string>();
+  if (options.userImages !== undefined && options.userImages.length > 0) {
+    const pool = options.userImages;
+    let cursor = 0;
+    const takeUserImage = (): { readonly bytes: Uint8Array; readonly mime: string } => {
+      const image = pool[cursor % pool.length]!;
+      cursor += 1;
+      return image;
+    };
+    for (const slot of spec.slots) {
+      if (slot.type !== 'image' && slot.type !== 'list-image') continue;
+      if (slot.type === 'image') {
+        const image = takeUserImage();
+        slots[slot.name] = { kind: 'image', ref: bytesToDataUri(image.bytes, image.mime), alt: '' };
+      } else {
+        const count = Math.max(1, counts[slot.name] ?? countOf(slots[slot.name]));
+        const refs: ImageRef[] = [];
+        for (let i = 0; i < count; i += 1) {
+          const image = takeUserImage();
+          refs.push({ ref: bytesToDataUri(image.bytes, image.mime), alt: '' });
+        }
+        slots[slot.name] = { kind: 'list-image', refs };
+      }
+      sources[slot.name] = 'user';
+      userFilled.add(slot.name);
+    }
+  }
+
   // ── 第三遍：生成式覆盖 ────────────────────────────────────────────────
   if (options.generate !== undefined) {
     const context: Record<string, string> = { goal, brand };
@@ -462,6 +503,8 @@ export async function fillBlock(args: {
       // 归生成层，link/literal 由下面的生成器自己拒掉。
       const plan = block.slotPlans?.[slot.name];
       if (block.slotPlans !== undefined && plan !== 'generative' && plan !== 'web') continue;
+      // 已经由用户素材填过的 slot：不再让生成层覆盖。
+      if (userFilled.has(slot.name)) continue;
       // 执笔已经写好的 slot 不再逐 slot 调用：再写一遍等于把连贯的文案重新切碎。
       if (writtenApplied.has(slot.name)) continue;
 

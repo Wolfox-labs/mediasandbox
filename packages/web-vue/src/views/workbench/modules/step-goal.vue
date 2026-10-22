@@ -380,6 +380,49 @@ function goNext(): void {
   emit('next');
 }
 
+// ── 我的素材 ────────────────────────────────────────────────────────
+//
+// 顺序有意义：第 N 块取第 N 张。所以这里用数组，并且给上下移——
+// 想换"谁是主视觉"就挪一下，而不是重新传一遍。
+const uploading = ref(false);
+const uploadError = ref<string | undefined>(undefined);
+
+async function onPickFiles(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const files = [...(input.files ?? [])];
+  // 清空 value：否则选同一个文件第二次不会触发 change。
+  input.value = '';
+  if (files.length === 0) return;
+  uploading.value = true;
+  uploadError.value = undefined;
+  try {
+    for (const file of files) {
+      const uploaded = await api.uploadAsset(file);
+      if (!store.assetIds.includes(uploaded.assetId)) {
+        store.assetIds = [...store.assetIds, uploaded.assetId];
+      }
+    }
+  } catch (error) {
+    uploadError.value = error instanceof ApiError ? error.message : '素材上传失败';
+  } finally {
+    uploading.value = false;
+  }
+}
+
+function removeAsset(assetId: string): void {
+  store.assetIds = store.assetIds.filter(id => id !== assetId);
+}
+
+function moveAsset(index: number, delta: number): void {
+  const next = [...store.assetIds];
+  const target = index + delta;
+  if (target < 0 || target >= next.length) return;
+  const [moved] = next.splice(index, 1);
+  if (moved === undefined) return;
+  next.splice(target, 0, moved);
+  store.assetIds = next;
+}
+
 onMounted(async () => {
   // 只有结构化模态才有"单元池"要挑；模板池是按 block 建的，只对网页有意义。
   // 无差别地拉一遍会在图像/文案模态上打出一个无关的 503。
@@ -424,8 +467,7 @@ onMounted(async () => {
       </label>
 
       <!-- ② 目标类型 -->
-      <div class="wb__section">
-        <div class="wb__section-head">
+      <div class="wb__section">        <div class="wb__section-head">
           <span class="wb__label" style="margin: 0">目标类型</span>
           <span class="wb__section-count">网页与演示文稿才需要挑{{ store.unitNoun }}</span>
         </div>
@@ -435,6 +477,57 @@ onMounted(async () => {
             <span class="wb__radio-hint">{{ option.hint }}</span>
           </NRadio>
         </NRadioGroup>
+      </div>
+
+      <!-- ②.5 我的素材：用户自己的图，按顺序进页面的图片位 -->
+      <div v-if="store.isWebpage" class="wb__section">
+        <div class="wb__section-head">
+          <span class="wb__label" style="margin: 0">我的素材</span>
+          <span class="wb__section-count">
+            {{ store.assetIds.length }} 张 · 第 N 块用第 N 张，取完回绕
+          </span>
+          <span class="wb__actions-fill" />
+          <label class="wb__upload">
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              multiple
+              class="wb__upload-input"
+              @change="onPickFiles"
+            />
+            <span class="wb__upload-btn">{{ uploading ? '上传中…' : '选择图片' }}</span>
+          </label>
+        </div>
+        <span class="wb__hint wb__hint--block">
+          上传自己的图（≤8MB，png / jpg / webp / gif）。页面里的图片位优先用它们，
+          不再让模型生成或搜图；顺序决定分配，可以上下调。
+        </span>
+        <NAlert v-if="uploadError" type="error" :bordered="false" class="mb-2">
+          {{ uploadError }}
+        </NAlert>
+        <div v-if="store.assetIds.length > 0" class="wb__assets">
+          <div v-for="(assetId, index) in store.assetIds" :key="assetId" class="wb__asset">
+            <img :src="api.assetUrl(assetId)" :alt="assetId" class="wb__asset-img" />
+            <span class="wb__asset-no">#{{ index + 1 }}</span>
+            <div class="wb__asset-actions">
+              <NButton text size="tiny" :disabled="index === 0" @click="moveAsset(index, -1)">
+                上移
+              </NButton>
+              <NButton
+                text
+                size="tiny"
+                :disabled="index === store.assetIds.length - 1"
+                @click="moveAsset(index, 1)"
+              >
+                下移
+              </NButton>
+              <NButton text size="tiny" type="error" @click="removeAsset(assetId)">移除</NButton>
+            </div>
+          </div>
+        </div>
+        <span v-else class="wb__hint wb__hint--block">
+          还没传素材：这次页面里的图会由模型生成或从网上取。
+        </span>
       </div>
 
       <!-- ③ 单元池：网页是页面区块，演示文稿是每页的版式 -->
@@ -850,5 +943,64 @@ onMounted(async () => {
 /* 这一页只多一个间距规则，其余视觉全在 modules/workbench.css 里 */
 .wb__template-preview {
   margin-top: 2px;
+}
+
+/* ── 我的素材 ─────────────────────────────────────────────────────── */
+.wb__upload {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.wb__upload-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.wb__upload-btn {
+  padding: 2px 10px;
+  border: 1px solid var(--n-border-color, #e0e0e6);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.wb__upload-btn:hover {
+  border-color: var(--n-color-target, #70c0e8);
+}
+.wb__assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.wb__asset {
+  position: relative;
+  width: 104px;
+  border: 1px solid var(--n-border-color, #e0e0e6);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.wb__asset-img {
+  display: block;
+  width: 100%;
+  height: 76px;
+  object-fit: cover;
+  background: #f5f5f5;
+}
+.wb__asset-no {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+}
+.wb__asset-actions {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 2px 0;
 }
 </style>

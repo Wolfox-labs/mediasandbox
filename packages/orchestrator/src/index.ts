@@ -9,6 +9,7 @@ export * from './llm/types.js';
 export {
   OpenAiCompatibleClient,
   PROVIDERS,
+  sniffImageMime,
   type OpenAiCompatibleOptions,
   type ProviderProfile,
 } from './llm/openai-client.js';
