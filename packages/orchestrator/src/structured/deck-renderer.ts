@@ -43,7 +43,46 @@ export type SlideLayoutId =
   | 'stats'
   | 'timeline'
   | 'manifesto'
-  | 'image-text';
+  | 'image-text'
+  | 'chart'
+  | 'beveled-cards'
+  | 'image-text-card'
+  | 'icon-grid'
+  | 'process-flow'
+  | 'metric-grid'
+  | 'data-table'
+  | 'arch-diagram'
+  | 'node-graph'
+  | 'phone-row'
+  | 'roadmap'
+  | 'composite';
+
+/**
+ * 母版（chrome）：整份文稿**每页复用**的页眉与页脚。
+ *
+ * 为什么它不属于版式：参考稿里"章节标题 / 章节导航 / 结论行 / 页码"每页都在，
+ * 它们表达的是**这份文稿的骨架**，不是这一页的信息结构。版式负责 body，
+ * 母版负责 chrome，两者相加才是一页。把母版做成版式，等于复制 18 份。
+ */
+export interface DeckChromePage {
+  /** 左上角章节标题（如"整体方案"）。省略则这一页不显示。 */
+  readonly section?: string | undefined;
+  /** 底部章节导航里哪一段高亮（0 起）。省略表示不高亮。 */
+  readonly sectionIndex?: number | undefined;
+  /** 底部结论行：这一页要留给人记住的那一句。 */
+  readonly note?: string | undefined;
+}
+
+export interface DeckChrome {
+  /** 右上角品牌字。 */
+  readonly brand?: string | undefined;
+  /** 品牌前的记号（一个字或 emoji；不填则只显示品牌字）。 */
+  readonly mark?: string | undefined;
+  /** 底部章节导航的段名。 */
+  readonly sections?: readonly string[] | undefined;
+  /** 逐页的章节标题 / 高亮段 / 结论行，下标与页序一致。 */
+  readonly pages?: readonly DeckChromePage[] | undefined;
+}
 
 export interface RenderDeckOptions {
   /** 文档标题。省略用页面目标。 */
@@ -64,6 +103,11 @@ export interface RenderDeckOptions {
    * 省略时按 `ranked` 处理：信息量更大的那一种。
    */
   readonly composition?: 'parallel' | 'ranked' | undefined;
+  /**
+   * 母版。**省略时保持旧行为**（每页只有页码芯片与调试标注），
+   * 所以这次改动对已有调用方是纯增量。
+   */
+  readonly chrome?: DeckChrome | undefined;
 }
 
 // ── slot 取值 ───────────────────────────────────────────────────────────────
@@ -357,6 +401,110 @@ const renderImageText: SlideRenderer = (block) => {
   );
 };
 
+// ── 卡片类版式 ──────────────────────────────────────────────────────────────
+//
+// 这两个版式的形状直接来自创赛 PPT 素材：那一批稿子的主体信息几乎都是
+// 「三栏并列、每栏一块卡片」——上排是卡片（小标题 + 若干要点），下排是配图。
+// 现有 13 个版式里没有任何一个能表达"并列多块卡片"，所以补上。
+
+/** 取一组图（data URI 或路径）与替代文本。`imageOf` 只取第一张，卡片行要全部。 */
+function imageRefsOf(block: BlockInstance, name: string): { ref: string; alt: string }[] {
+  const value = slotOf(block, name);
+  if (value === undefined) return [];
+  if (value.kind === 'list-image') {
+    return value.refs.filter((ref) => ref.ref.trim() !== '').map((ref) => ({ ref: ref.ref, alt: ref.alt }));
+  }
+  if (value.kind === 'image') {
+    return value.ref.trim() === '' ? [] : [{ ref: value.ref, alt: value.alt }];
+  }
+  return [];
+}
+
+/**
+ * 「小标题|要点一；要点二」→ 一栏卡片的内容。
+ *
+ * **不复用 `splitHeadTail`**：那个函数按"谁像数字"决定谁在前后，是为
+ * 「指标|数值」设计的。卡片的小标题里常常没数字，会被判反。
+ */
+function splitCard(item: string): { title: string; points: string[] } {
+  const matched = /^(.{1,24}?)\s*[|｜]\s*(.+)$/.exec(item);
+  return {
+    title: (matched?.[1] ?? item).trim(),
+    points: (matched?.[2] ?? '')
+      .split(/[；;]\s*/)
+      .map((point) => point.trim())
+      .filter((point) => point !== ''),
+  };
+}
+
+/** 斜角卡片行：三到四栏并列，每栏一块切角面板 + 小标题 + 要点。 */
+const renderBeveledCards: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const cards = listOf(block, 'cards');
+  const cols = Math.min(Math.max(cards.length, 1), 4);
+  const cells = cards
+    .map((card, i) => {
+      const { title, points } = splitCard(card);
+      const list = points.map((point) => `<li>${inline(point)}</li>`).join('');
+      return (
+        `<div class="sk-bevel">` +
+        `<span class="sk-bevel__no">${String(i + 1).padStart(2, '0')}</span>` +
+        `<h3 class="sk-bevel__title">${inline(title)}</h3>` +
+        (list === '' ? '' : `<ul class="sk-bevel__list">${list}</ul>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-cards">` +
+    `<header class="sk-cards__head">` +
+    `<h2 class="sk-cards__title">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-cards__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-cards__grid" style="--sk-cols:${cols}">${cells}</div>` +
+    `</div>`
+  );
+};
+
+/** 三栏图文卡：上排卡片（小标题 + 要点）、下排配图，两种信息上下对齐同一栏。 */
+const renderImageTextCard: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const cards = listOf(block, 'cards');
+  const images = imageRefsOf(block, 'images');
+  const cols = Math.min(Math.max(cards.length, 1), 4);
+  const cells = cards
+    .map((card, i) => {
+      const { title, points } = splitCard(card);
+      const image = images[i];
+      const list = points.map((point) => `<li>${inline(point)}</li>`).join('');
+      const media =
+        image === undefined
+          ? `<div class="sk-itc__art" aria-hidden="true"></div>`
+          : `<img src="${escapeHtml(image.ref)}" alt="${escapeHtml(image.alt)}" />`;
+      return (
+        `<div class="sk-itc__col">` +
+        `<div class="sk-itc__card">` +
+        `<h3 class="sk-itc__title">${inline(title)}</h3>` +
+        (list === '' ? '' : `<ul class="sk-itc__list">${list}</ul>`) +
+        `</div>` +
+        `<figure class="sk-itc__media">${media}</figure>` +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-itc">` +
+    `<header class="sk-itc__head">` +
+    `<h2 class="sk-itc__heading">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-itc__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-itc__grid" style="--sk-cols:${cols}">${cells}</div>` +
+    `</div>`
+  );
+};
+
 /** 版式 id → 渲染函数。找不到时走兜底，而不是抛错——渲染一页失败不该毁掉整份文稿。 *//**
  * 每页的视觉调性。
  *
@@ -372,7 +520,27 @@ const renderImageText: SlideRenderer = (block) => {
  */
 function toneForLayout(type: string): 'plain' | 'tinted' | 'accent' {
   if (['cover', 'section', 'manifesto', 'quote-slide', 'closing'].includes(type)) return 'accent';
-  if (['stats', 'timeline', 'image-text'].includes(type)) return 'tinted';
+  if (
+    [
+      'stats',
+      'timeline',
+      'image-text',
+      'beveled-cards',
+      'image-text-card',
+      'icon-grid',
+      'process-flow',
+      'metric-grid',
+      'data-table',
+      'arch-diagram',
+      'node-graph',
+      'phone-row',
+      'roadmap',
+      'composite',
+    ].includes(
+      type,
+    )
+  )
+    return 'tinted';
   return 'plain';
 }
 
@@ -425,6 +593,315 @@ const renderChart: SlideRenderer = (block) => {
   );
 };
 
+/** 按 `|` 切成 2~3 段。多段版式用；空段保留位置，调用方自己决定怎么补。 */
+function splitParts(item: string): string[] {
+  return item.split(/[|｜]/).map((part) => part.trim());
+}
+
+/** 图标网格：3×2 或 2×3，每格一个大图标 + 小标题 + 一句说明。 */
+const renderIconGrid: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const items = listOf(block, 'items');
+  const cols = items.length > 4 ? 3 : 2;
+  const cells = items
+    .map((item) => {
+      const [icon = '', title = '', note = ''] = splitParts(item);
+      return (
+        `<div class="sk-ig__cell">` +
+        `<div class="sk-ig__icon" aria-hidden="true">${inline(icon)}</div>` +
+        `<div class="sk-ig__title">${inline(title)}</div>` +
+        (note === '' ? '' : `<div class="sk-ig__note">${inline(note)}</div>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-ig">` +
+    `<header class="sk-ig__head">` +
+    `<h2 class="sk-ig__heading">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-ig__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-ig__grid" style="--sk-cols:${cols}">${cells}</div>` +
+    `</div>`
+  );
+};
+
+/** 流程条：横向三到五步，进度线贯穿，箭头分隔。 */
+const renderProcessFlow: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const steps = listOf(block, 'steps');
+  const cells = steps
+    .map((step, i) => {
+      const [title = step, note = ''] = splitParts(step);
+      return (
+        `<div class="sk-flow__step">` +
+        `<div class="sk-flow__no">${String(i + 1).padStart(2, '0')}</div>` +
+        `<div class="sk-flow__title">${inline(title)}</div>` +
+        (note === '' ? '' : `<div class="sk-flow__note">${inline(note)}</div>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-flow">` +
+    `<header class="sk-flow__head">` +
+    `<h2 class="sk-flow__heading">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-flow__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-flow__track" style="--sk-cols:${Math.min(Math.max(steps.length, 2), 5)}">${cells}</div>` +
+    `</div>`
+  );
+};
+
+/** 指标卡组：两行三列，每格一个大数字 + 标签 + 一句说明。 */
+const renderMetricGrid: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const note = textOf(block, 'note');
+  const metrics = listOf(block, 'metrics');
+  const cols = metrics.length > 3 ? 3 : Math.max(metrics.length, 1);
+  const cells = metrics
+    .map((metric) => {
+      const [value = '', label = '', desc = ''] = splitParts(metric);
+      return (
+        `<div class="sk-mg__cell">` +
+        `<div class="sk-mg__value">${inline(value)}</div>` +
+        `<div class="sk-mg__label">${inline(label)}</div>` +
+        (desc === '' ? '' : `<div class="sk-mg__desc">${inline(desc)}</div>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-mg">` +
+    `<header class="sk-mg__head"><h2 class="sk-mg__heading">${inline(heading)}</h2></header>` +
+    `<div class="sk-mg__grid" style="--sk-cols:${cols}">${cells}</div>` +
+    (note === '' ? '' : `<p class="sk-mg__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
+
+/** 表格页：必须逐项对齐的内容用表格，比并列卡片省地方，也更容易被逐行读完。 */
+const renderTable: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const note = textOf(block, 'note');
+  const columns = listOf(block, 'columns');
+  const rows = listOf(block, 'rows').map((row) => row.split('|').map((cell) => cell.trim()));
+  const head = columns.map((column) => `<th>${inline(column)}</th>`).join('');
+  const body = rows
+    .map((cells) => '<tr>' + columns.map((_, i) => `<td>${inline(cells[i] ?? '')}</td>`).join('') + '</tr>')
+    .join('');
+  return (
+    `<div class="sk-tbl">` +
+    `<header class="sk-tbl__head"><h2 class="sk-tbl__heading">${inline(heading)}</h2></header>` +
+    `<table class="sk-tbl__table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+    (note === '' ? '' : `<p class="sk-tbl__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
+/**
+ * 架构图页：方框 + 带标注的连线 + 可选底部横带。
+ *
+ * 为什么必须有它：并列卡片表达不了「谁连谁」。一条端到端链路的重点
+ * 恰恰在连接上（哪段走 WebSocket、哪段走 HTTP），这层信息只能画出来。
+ */
+const renderArch: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const band = textOf(block, 'band');
+  const nodes = listOf(block, 'nodes').map((node) => splitCard(node));
+  const links = listOf(block, 'links').map((link) => splitCard(link));
+  const parts: string[] = [];
+  nodes.forEach((node, i) => {
+    const points = node.points.map((point) => `<li>${inline(point)}</li>`).join('');
+    parts.push(
+      `<div class="sk-arch__node">` +
+        `<h3 class="sk-arch__node-title">${inline(node.title)}</h3>` +
+        (points === '' ? '' : `<ul class="sk-arch__node-list">${points}</ul>`) +
+        `</div>`,
+    );
+    if (i < nodes.length - 1) {
+      const link = links[i];
+      parts.push(
+        `<div class="sk-arch__link">` +
+          (link === undefined ? '' : `<span class="sk-arch__link-label">${inline(link.title)}</span>`) +
+          `<span class="sk-arch__arrow" aria-hidden="true">⟷</span>` +
+          (link === undefined || link.points.length === 0
+            ? ''
+            : `<span class="sk-arch__link-caption">${inline(link.points.join(' '))}</span>`) +
+          `</div>`,
+      );
+    }
+  });
+  return (
+    `<div class="sk-arch">` +
+    `<header class="sk-arch__head">` +
+    `<h2 class="sk-arch__heading">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-arch__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-arch__flow">${parts.join('')}</div>` +
+    (band === '' ? '' : `<div class="sk-arch__band">${inline(band)}</div>`) +
+    `</div>`
+  );
+};
+
+/** 把「名称|说明」拆成两段。字符串里没有竖线时整条当名称。 */
+function splitNameDesc(raw: string): { name: string; desc: string } {
+  const at = raw.indexOf('|');
+  if (at < 0) return { name: raw.trim(), desc: '' };
+  return { name: raw.slice(0, at).trim(), desc: raw.slice(at + 1).trim() };
+}
+
+/** 节点图页：左右两列节点夹一个中枢，连线画在两侧。 */
+const renderNodeGraph: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const note = textOf(block, 'note');
+  const hub = splitNameDesc(textOf(block, 'hub'));
+  const chip = (node: { name: string; desc: string }): string =>
+    `<div class="sk-ng__chip">` +
+    `<span class="sk-ng__chip-name">${inline(node.name)}</span>` +
+    (node.desc === '' ? '' : `<span class="sk-ng__chip-desc">${inline(node.desc)}</span>`) +
+    `</div>`;
+  const side = (raw: string[], cls: string): string =>
+    `<div class="sk-ng__side ${cls}">` +
+    raw
+      .map((item) => splitNameDesc(item))
+      .map((node) => chip(node))
+      .join('') +
+    `</div>`;
+  return (
+    `<div class="sk-ng">` +
+    `<header class="sk-ng__head">` +
+    `<h2 class="sk-ng__heading">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-ng__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-ng__flow">` +
+    side(listOf(block, 'left'), 'sk-ng__side--left') +
+    `<span class="sk-ng__arrow" aria-hidden="true">⟷</span>` +
+    `<div class="sk-ng__hub">` +
+    `<span class="sk-ng__hub-name">${inline(hub.name)}</span>` +
+    (hub.desc === '' ? '' : `<span class="sk-ng__hub-desc">${inline(hub.desc)}</span>`) +
+    `</div>` +
+    `<span class="sk-ng__arrow" aria-hidden="true">⟷</span>` +
+    side(listOf(block, 'right'), 'sk-ng__side--right') +
+    `</div>` +
+    (note === '' ? '' : `<p class="sk-ng__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
+/** 竖图三列页：三列竖图 + 标题 + 说明；没有图时是**设计过的空**，不是一个白块。 */
+const renderPhoneRow: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const lede = textOf(block, 'lede');
+  const items = listOf(block, 'items').map((item) => splitCard(item));
+  const images = imageRefsOf(block, 'images');
+  const cols = Math.min(Math.max(items.length, 1), 3);
+  const cells = items
+    .map((item, i) => {
+      const image = images[i];
+      const media =
+        image === undefined
+          ? `<div class="sk-pr__art is-empty"><span class="sk-pr__hint">留空：放截图或生成图</span></div>`
+          : `<img class="sk-pr__img" src="${escapeHtml(image.ref)}" alt="${escapeHtml(image.alt)}" />`;
+      return (
+        `<div class="sk-pr__col">` +
+        `<figure class="sk-pr__figure">${media}</figure>` +
+        `<h3 class="sk-pr__title">${inline(item.title)}</h3>` +
+        (item.points.length === 0 ? '' : `<p class="sk-pr__desc">${inline(item.points.join(' '))}</p>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-pr">` +
+    `<header class="sk-pr__head">` +
+    `<h2 class="sk-pr__heading">${inline(heading)}</h2>` +
+    (lede === '' ? '' : `<p class="sk-pr__lede">${inline(lede)}</p>`) +
+    `</header>` +
+    `<div class="sk-pr__grid" style="--sk-cols:${cols}">${cells}</div>` +
+    `</div>`
+  );
+};
+
+/** 路线图页：两到三个阶段列，每列一个标签、一个标题、几条编号要点。 */
+const renderRoadmap: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const note = textOf(block, 'note');
+  const stages = listOf(block, 'stages').map((raw) => {
+    const parts = raw.split('|').map((part) => part.trim());
+    const phase = parts[0] ?? '';
+    const title = parts[1] ?? '';
+    const points = (parts.slice(2).join('|') || '')
+      .split(/[；;]/)
+      .map((point) => point.trim())
+      .filter((point) => point !== '');
+    return { phase, title, points };
+  });
+  const cols = Math.min(Math.max(stages.length, 1), 3);
+  const cells = stages
+    .map((stage) => {
+      const items = stage.points
+        .map((point, i) => `<li><span class="sk-rm__no">${pad2(i + 1)}</span><span>${inline(point)}</span></li>`)
+        .join('');
+      return (
+        `<div class="sk-rm__col">` +
+        `<span class="sk-rm__phase">${inline(stage.phase)}</span>` +
+        `<h3 class="sk-rm__title">${inline(stage.title)}</h3>` +
+        (items === '' ? '' : `<ol class="sk-rm__list">${items}</ol>`) +
+        `</div>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="sk-rm">` +
+    `<header class="sk-rm__head"><h2 class="sk-rm__heading">${inline(heading)}</h2></header>` +
+    `<div class="sk-rm__grid" style="--sk-cols:${cols}">${cells}</div>` +
+    (note === '' ? '' : `<p class="sk-rm__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
+/** 复合页：上半卡片、下半编号流程。一页说两件有因果关系的事。 */
+const renderComposite: SlideRenderer = (block) => {
+  const heading = textOf(block, 'heading');
+  const note = textOf(block, 'note');
+  const cards = listOf(block, 'cards').map((card) => splitCard(card));
+  const steps = listOf(block, 'steps').map((step) => splitCard(step));
+  const cols = Math.min(Math.max(cards.length, 1), 4);
+  const cardCells = cards
+    .map(
+      (card) =>
+        `<div class="sk-cp__card">` +
+        `<h3 class="sk-cp__card-title">${inline(card.title)}</h3>` +
+        (card.points.length === 0 ? '' : `<p class="sk-cp__card-desc">${inline(card.points.join(' '))}</p>`) +
+        `</div>`,
+    )
+    .join('');
+  const stepCells = steps
+    .map(
+      (step, i) =>
+        `<div class="sk-cp__step">` +
+        `<span class="sk-cp__step-no">${pad2(i + 1)}</span>` +
+        `<span class="sk-cp__step-name">${inline(step.title)}</span>` +
+        (step.points.length === 0 ? '' : `<span class="sk-cp__step-desc">${inline(step.points.join(' '))}</span>`) +
+        `</div>`,
+    )
+    .join('');
+  return (
+    `<div class="sk-cp">` +
+    `<header class="sk-cp__head"><h2 class="sk-cp__heading">${inline(heading)}</h2></header>` +
+    `<div class="sk-cp__cards" style="--sk-cols:${cols}">${cardCells}</div>` +
+    `<div class="sk-cp__steps">${stepCells}</div>` +
+    (note === '' ? '' : `<p class="sk-cp__note">${inline(note)}</p>`) +
+    `</div>`
+  );
+};
+
 const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   cover: renderCover,
   agenda: renderAgenda,
@@ -439,6 +916,17 @@ const RENDERERS: Readonly<Record<string, SlideRenderer>> = {
   manifesto: renderManifesto,
   'image-text': renderImageText,
   chart: renderChart,
+  'beveled-cards': renderBeveledCards,
+  'image-text-card': renderImageTextCard,
+  'icon-grid': renderIconGrid,
+  'process-flow': renderProcessFlow,
+  'metric-grid': renderMetricGrid,
+  'data-table': renderTable,
+  'arch-diagram': renderArch,
+  'node-graph': renderNodeGraph,
+  'phone-row': renderPhoneRow,
+  roadmap: renderRoadmap,
+  composite: renderComposite,
 };
 
 /**
@@ -500,6 +988,14 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .deck__hud{display:flex;justify-content:center;padding:0 0 1rem}
 .deck__counter{font-size:.82rem;letter-spacing:.08em;color:#7b8494}
 .deck__meta{position:absolute;right:1.6cqw;bottom:1.2cqw;font-size:1.1cqw;color:#8b93a1}
+/* 页码芯片：切角矩形一排，当前页用强调色描边而不是实心填充——
+   实心填充在亮色主题（土黄国风）和亮强调色主题（科技风蓝）上都会让数字看不清。 */
+.sk-pager{position:absolute;right:1.5cqw;bottom:1.05cqw;display:flex;gap:.34cqw;align-items:flex-end}
+.sk-pager__dot{display:inline-flex;align-items:center;justify-content:center;min-width:1.45cqw;height:1.18cqw;padding:0 .34cqw;
+  font-size:.84cqw;line-height:1;color:var(--sk-muted,#8b93a1);
+  background:color-mix(in srgb,var(--sk-fg,#fff) 9%,transparent);
+  clip-path:polygon(.4cqw 0,100% 0,calc(100% - .4cqw) 100%,0 100%)}
+.sk-pager__dot.is-on{color:var(--sk-accent,#3b6df5);font-weight:700;box-shadow:inset 0 0 0 .12cqw var(--sk-accent,#3b6df5)}
 
 /* 封面 */
 .sk-cover{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:1.6cqw;padding:0 9cqw;background:linear-gradient(135deg,#151a24 0%,#1f2a3d 55%,#28364e 100%);color:#fff}
@@ -669,6 +1165,76 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
 .sk-stats{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:3.4cqw}
 .sk-stats__title{margin:0;font-size:3.4cqw;font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
 .sk-stats__grid{display:grid;grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:2.2cqw;align-items:start}
+
+/* ── 卡片类版式 ─────────────────────────────────────────────────────────────
+   形状取自创赛 PPT 素材：主体信息是「三栏并列、上卡片下配图」。
+   切角面板对应素材里的「剪去左右顶角」矩形——用 clip-path 实现，
+   因为 border-radius 只能做圆角，做不出斜切。 */
+.sk-cards,.sk-itc{position:absolute;inset:0;display:flex;flex-direction:column;gap:2.2cqw;padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,8cqw)}
+.sk-cards__head,.sk-itc__head{display:flex;flex-direction:column;gap:.8cqw;flex:0 0 auto}
+.sk-cards__title,.sk-itc__heading{margin:0;font-size:var(--fs-h2);font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-cards__lede,.sk-itc__lede{margin:0;font-size:calc(var(--fs-body) * .92);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+.sk-cards__grid,.sk-itc__grid{display:grid;grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:2cqw;flex:1;min-height:0;align-items:stretch}
+/* 内容顶部对齐：卡片等高等宽，三栏的编号与标题因此落在同一条基线上。
+   垂直居中会让条数不同的卡片标题各自错位，看起来像没对齐。 */
+.sk-bevel{position:relative;display:flex;flex-direction:column;gap:.9cqw;padding:2.2cqw 2cqw;
+  background:linear-gradient(160deg,color-mix(in srgb,var(--sk-accent,#3b6df5) 30%,transparent),color-mix(in srgb,var(--sk-accent,#3b6df5) 10%,transparent));
+  clip-path:polygon(1.6cqw 0,100% 0,100% calc(100% - 1.6cqw),calc(100% - 1.6cqw) 100%,0 100%,0 1.6cqw)}
+/* 大号编号打头：素材里那套稿子的卡片就是这个写法（标题上方一个很大的数字），
+   它同时解决了「卡片下半截空着」的观感问题——留白读起来像排版，而不像没填满。 */
+.sk-bevel__no{font-size:2.7cqw;font-weight:800;line-height:1;letter-spacing:.02em;color:var(--sk-accent,#3b6df5);opacity:.62}
+.sk-bevel__title{margin:0;font-size:calc(var(--fs-body) * 1.14);font-weight:700;line-height:1.3}
+.sk-bevel__list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:.5cqw}
+.sk-bevel__list li{position:relative;padding-left:1.5cqw;font-size:calc(var(--fs-body) * .86);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+.sk-bevel__list li::before{content:"";position:absolute;left:0;top:.66cqw;width:.72cqw;height:.16cqw;background:var(--sk-accent,#3b6df5)}
+.sk-itc__col{display:flex;flex-direction:column;gap:1cqw;min-height:0}
+.sk-itc__card{flex:0 0 auto;display:flex;flex-direction:column;gap:.6cqw;padding:1.7cqw 1.7cqw;
+  background:var(--sk-surface,rgba(255,255,255,.06));border-radius:calc(var(--sk-radius,.8cqw) * .8);
+  border-top:.32cqw solid var(--sk-accent,#3b6df5)}
+.sk-itc__title{margin:0;font-size:calc(var(--fs-body) * 1.08);font-weight:700;line-height:1.3}
+.sk-itc__list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:.4cqw}
+.sk-itc__list li{position:relative;padding-left:1.4cqw;font-size:calc(var(--fs-body) * .8);line-height:1.4;color:var(--sk-muted,#9aa7bd)}
+.sk-itc__list li::before{content:"";position:absolute;left:0;top:.56cqw;width:.56cqw;height:.56cqw;border-radius:50%;background:var(--sk-accent,#3b6df5)}
+.sk-itc__media{margin:0;flex:1;min-height:0;overflow:hidden;border-radius:var(--sk-radius,.8cqw);background:var(--sk-surface,rgba(255,255,255,.06))}
+.sk-itc__media img{width:100%;height:100%;object-fit:cover;display:block}
+.sk-itc__art{width:100%;height:100%;
+  background:radial-gradient(circle at 70% 28%,color-mix(in srgb,var(--sk-accent,#3b6df5) 34%,transparent),transparent 62%),
+    linear-gradient(150deg,var(--sk-surface,rgba(255,255,255,.06)),transparent 78%)}
+
+/* ── 高密度版式 ─────────────────────────────────────────────────────────────
+   参照稿一页有十来块信息（图片卡 / 标签对 / 大字+说明框 / 图标格），
+   而原有版式每页只放得下三块。以下三个版式就是为「一页塞满」准备的：
+   信息块多、每块带自己的边框或底色，靠分区而不是靠留白撑起版面。 */
+.sk-ig,.sk-flow,.sk-mg{position:absolute;inset:0;display:flex;flex-direction:column;gap:2cqw;padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,8cqw)}
+.sk-ig__head,.sk-flow__head,.sk-mg__head{display:flex;flex-direction:column;gap:.7cqw;flex:0 0 auto}
+.sk-ig__heading,.sk-flow__heading,.sk-mg__heading{margin:0;font-size:var(--fs-h2);font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,normal);font-family:var(--sk-display,inherit)}
+.sk-ig__lede,.sk-flow__lede{margin:0;font-size:calc(var(--fs-body) * .9);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+.sk-ig__grid,.sk-mg__grid{display:grid;grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:1.6cqw;flex:1;min-height:0;align-content:start}
+.sk-ig__cell{display:flex;flex-direction:column;gap:.55cqw;padding:1.6cqw 1.6cqw;
+  background:color-mix(in srgb,var(--sk-fg,#fff) 6%,transparent);
+  border-left:.28cqw solid var(--sk-accent,#3b6df5);border-radius:0 calc(var(--sk-radius,.8cqw) * .6) calc(var(--sk-radius,.8cqw) * .6) 0}
+.sk-ig__icon{font-size:3.1cqw;line-height:1}
+.sk-ig__title{font-size:calc(var(--fs-body) * 1.02);font-weight:700;line-height:1.3}
+.sk-ig__note{font-size:calc(var(--fs-body) * .8);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+/* 流程条：一条贯穿的进度线 + 每步一个编号节点，箭头靠伪元素画 */
+.sk-flow__track{position:relative;display:grid;grid-template-columns:repeat(var(--sk-cols,4),minmax(0,1fr));gap:1.4cqw;flex:1;min-height:0;align-content:center}
+.sk-flow__track::before{content:"";position:absolute;left:0;right:0;top:2.15cqw;height:.14cqw;
+  background:linear-gradient(90deg,var(--sk-accent,#3b6df5),color-mix(in srgb,var(--sk-accent,#3b6df5) 25%,transparent))}
+.sk-flow__step{position:relative;display:flex;flex-direction:column;gap:.6cqw;padding-top:3.6cqw}
+.sk-flow__no{position:absolute;left:0;top:0;display:inline-flex;align-items:center;justify-content:center;
+  width:2.9cqw;height:2.9cqw;border-radius:50%;font-size:1.15cqw;font-weight:700;
+  color:var(--sk-bg,#0b1220);background:var(--sk-accent,#3b6df5)}
+.sk-flow__title{font-size:calc(var(--fs-body) * 1.02);font-weight:700;line-height:1.28}
+.sk-flow__note{font-size:calc(var(--fs-body) * .8);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+/* 指标卡组：大数字是主角，标签次之，说明最小——三层字号差拉开 */
+.sk-mg__grid{grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:1.5cqw}
+.sk-mg__cell{display:flex;flex-direction:column;gap:.3cqw;padding:1.7cqw 1.6cqw;
+  background:color-mix(in srgb,var(--sk-fg,#fff) 5%,transparent);
+  border-top:.3cqw solid var(--sk-accent,#3b6df5);border-radius:0 0 calc(var(--sk-radius,.8cqw) * .5) calc(var(--sk-radius,.8cqw) * .5)}
+.sk-mg__value{font-size:calc(var(--fs-metric) * .58);font-weight:800;line-height:1.05;color:var(--sk-accent,#3b6df5);letter-spacing:-.01em}
+.sk-mg__label{font-size:calc(var(--fs-body) * .94);font-weight:700;line-height:1.3}
+.sk-mg__desc{font-size:calc(var(--fs-body) * .76);line-height:1.42;color:var(--sk-muted,#9aa7bd)}
+.sk-mg__note{margin:0;font-size:calc(var(--fs-body) * .76);color:var(--sk-muted,#9aa7bd)}
 .sk-stats__item{border-top:.24cqw solid var(--sk-accent,#3b6df5);padding-top:1.3cqw}
 .sk-stats__value{font-size:7.4cqw;line-height:.94;font-weight:800;letter-spacing:-.03em;color:inherit}
 .sk-stats__label{margin-top:1cqw;font-size:1.75cqw;line-height:1.45;color:var(--sk-muted,#8b93a1)}
@@ -759,8 +1325,17 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
   --fs-display:5.2cqw;--fs-h1:4cqw;--fs-h2:2.8cqw;--fs-body:2.05cqw;--fs-caption:1.7cqw;--fs-metric:7.2cqw;
 }
 .slide[data-tone="accent"] .slide__frame{
-  background:linear-gradient(135deg,color-mix(in srgb,var(--sk-accent,#3b6df5) 34%,var(--sk-bg,#10151f)) 0%,
-    var(--sk-bg,#10151f) 62%);
+  /* 这里原先是 color-mix(in srgb, var(--sk-accent) 34%, var(--sk-bg))，
+     但 --sk-bg 是**渐变**（8 套主题里 7 套都是），不是颜色。把渐变塞进
+     color-mix 的第二个参数会让整条 background 在计算值阶段失效，结果是
+     background:unset —— 页面变透明、露出 body 的深底。
+     封面/章节/主张/引用/结尾页全属这一档，所以主题背景在它们上面从来没生效过。
+
+     改成「一层半透明强调色 叠在 主题底 之上」：transparent 是合法颜色，
+     渐变底与纯色底都能这样叠。 */
+  background:
+    linear-gradient(135deg,color-mix(in srgb,var(--sk-accent,#3b6df5) 34%,transparent) 0%,transparent 62%),
+    var(--sk-bg,#10151f);
 }
 .slide[data-tone="accent"] .slide__frame::before{opacity:.26}
 .slide[data-tone="tinted"] .slide__frame::after{height:.5cqw;opacity:.95}
@@ -858,11 +1433,145 @@ body{background:#101216;color:#f5f6f8;font-family:"PingFang SC","Microsoft YaHei
  */
 .slide[data-side="right"] .sk-chart__svg{max-height:62%}
 
+/* ── 母版（chrome）──────────────────────────────────────────────────────
+ * 版式负责 body，母版负责页眉页脚，两者相加才是一页。
+ * 母版占的是**预留带**（上下各一条），不覆盖正文——覆盖式母版在内容变多时
+ * 会压住最后一行，这是这类模板最常见的翻车方式。
+ */
+.deck__body{position:absolute;inset:0}
+.slide[data-chrome="band"] .deck__body{inset:9.9cqw 0 10.6cqw}
+.slide[data-chrome="band"] .deck__body > *{padding-top:1.1cqw!important;padding-bottom:1.1cqw!important}
+.slide[data-chrome="band"] .deck__anno,.slide[data-chrome="band"] .sk-pager{display:none}
+.sk-chrome{position:absolute;left:0;right:0;pointer-events:none}
+.sk-chrome--top{top:0;height:9.9cqw;padding:1.9cqw 4.4cqw 0}
+.sk-chrome__section{margin:0;font-family:var(--sk-display,inherit);font-size:3.05cqw;line-height:1.15;font-weight:800;color:var(--sk-fg,#fff)}
+.sk-chrome__rule{display:block;width:5.6cqw;height:.32cqw;margin-top:.85cqw;border-radius:.2cqw;background:linear-gradient(90deg,var(--sk-accent,#6ea8ff),transparent)}
+.sk-chrome__brand{position:absolute;right:4.4cqw;top:2.1cqw;display:flex;align-items:center;gap:.8cqw;font-size:1.72cqw;font-weight:700;color:var(--sk-fg,#fff)}
+.sk-chrome__mark{display:inline-flex;align-items:center;justify-content:center;width:2.1cqw;height:2.1cqw;border-radius:.42cqw;font-size:1.3cqw;background:color-mix(in srgb,var(--sk-accent,#6ea8ff) 22%,transparent);color:var(--sk-accent,#6ea8ff)}
+.sk-chrome--bottom{bottom:0;height:10.6cqw;padding:0 4.4cqw}
+.sk-chrome__note{margin:0 0 .9cqw;font-size:2cqw;font-weight:700;letter-spacing:.01em;color:var(--sk-accent,#ffd166)}
+.sk-chrome__hr{display:block;height:1px;background:color-mix(in srgb,var(--sk-fg,#fff) 18%,transparent);margin-bottom:.85cqw}
+.sk-chrome__nav{display:flex;align-items:center;gap:2.9cqw}
+.sk-chrome__tab{font-size:1.28cqw;color:var(--sk-muted,#93a4bf);white-space:nowrap}
+.sk-chrome__tab.is-on{color:var(--sk-accent,#ffd166);font-weight:700}
+.sk-chrome__brandnote{margin-left:auto;font-size:1.45cqw;font-weight:800;color:var(--sk-accent,#ffd166)}
+.sk-chrome__page{font-size:1.28cqw;color:var(--sk-muted,#93a4bf);font-variant-numeric:tabular-nums}
+.sk-chrome__total{font-size:1.15cqw;color:var(--sk-muted,#93a4bf);opacity:.7;font-variant-numeric:tabular-nums}
+
+/* 母版占掉上下两条带之后，正文只剩约 64% 高度：整套字号降一档，
+ * 否则两行栅格会压到结论行上——这是"加母版"最典型的副作用。
+ * 降在六个字号档上而不是逐个版式改，是为了保持"页与页字号有秩序"这条约定。 */
+.slide[data-chrome="band"] .slide__frame{
+  --fs-display:4.3cqw;--fs-h1:3.35cqw;--fs-h2:2.35cqw;--fs-body:1.72cqw;--fs-caption:1.45cqw;--fs-metric:5.9cqw;
+}
+.slide[data-chrome="band"] .deck__body{overflow:hidden}
+.slide[data-chrome="band"] .sk-ig__grid,.slide[data-chrome="band"] .sk-mg__grid{align-content:stretch}
+
+/* 导语带：参考稿每页的标题都压在一整幅半透明带上，左侧一根金条。
+ * 只改标题容器、不动版式内部结构——于是所有版式一次性对齐，
+ * 而不是 18 个版式各调一遍（那正是"加母版"最容易失控的地方）。 */
+.slide[data-chrome="band"] :is(.sk-bullets__head,.sk-cards__head,.sk-flow__head,.sk-ig__head,.sk-itc__head,.sk-mg__head){
+  background:color-mix(in srgb,var(--sk-accent,#ffe296) 9%,transparent);
+  border-left:.42cqw solid var(--sk-accent,#ffe296);
+  padding:.85cqw 1.4cqw;gap:.35cqw;
+}
+.slide[data-chrome="band"] :is(.sk-two__title,.sk-image__title,.sk-stats__title,.sk-timeline__title,.sk-chart__title){
+  border-left:.42cqw solid var(--sk-accent,#ffe296);padding-left:1.2cqw;
+}
+.slide[data-chrome="band"] :is(.sk-ig__heading,.sk-mg__heading,.sk-flow__heading,.sk-bullets__title,.sk-cards__title,.sk-itc__heading,.sk-two__title,.sk-image__title,.sk-stats__title,.sk-timeline__title,.sk-chart__title){
+  color:var(--sk-accent,#ffe296);
+}
+
+/* 表格页 / 架构图页 */
+.sk-tbl,.sk-arch{position:absolute;inset:0;display:flex;flex-direction:column;gap:1.5cqw;padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,8cqw)}
+.sk-tbl__head,.sk-arch__head{display:flex;flex-direction:column;gap:.35cqw;flex:0 0 auto}
+.sk-tbl__heading,.sk-arch__heading{margin:0;font-size:var(--fs-h2);font-weight:var(--sk-display-weight,700);letter-spacing:var(--sk-display-tracking,0);line-height:1.2}
+.sk-arch__lede{margin:0;font-size:calc(var(--fs-body) * .9);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+.sk-tbl__table{width:100%;border-collapse:collapse;table-layout:fixed;flex:1;min-height:0}
+.sk-tbl__table th{font-size:calc(var(--fs-body) * .84);font-weight:700;text-align:left;padding:.95cqw .9cqw;
+  color:var(--sk-accent,#3b6df5);border-bottom:.12cqw solid color-mix(in srgb,var(--sk-accent,#3b6df5) 48%,transparent)}
+.sk-tbl__table td{font-size:calc(var(--fs-body) * .84);line-height:1.45;padding:.9cqw .9cqw;vertical-align:top;
+  color:var(--sk-fg,#fff);border-bottom:1px solid color-mix(in srgb,var(--sk-fg,#fff) 13%,transparent)}
+.sk-tbl__table tbody tr:first-child td{font-weight:600}
+.sk-tbl__table td:first-child{font-weight:700}
+.sk-tbl__note{margin:0;font-size:calc(var(--fs-body) * .78);color:var(--sk-muted,#9aa7bd)}
+.sk-arch__flow{display:flex;align-items:stretch;flex:1;min-height:0}
+.sk-arch__node{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:.7cqw;padding:1.5cqw 1.4cqw;
+  border-radius:.45cqw;background:var(--sk-surface,rgba(120,170,255,.10));
+  border:.09cqw solid color-mix(in srgb,var(--sk-fg,#fff) 16%,transparent)}
+.sk-arch__node-title{margin:0;font-size:calc(var(--fs-body) * 1.06);font-weight:700;color:var(--sk-fg,#fff)}
+.sk-arch__node-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:.3cqw}
+.sk-arch__node-list li{font-size:calc(var(--fs-body) * .84);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+.sk-arch__link{flex:0 0 8.6cqw;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.35cqw;text-align:center;padding:0 .3cqw}
+.sk-arch__link-label{font-size:calc(var(--fs-body) * .82);font-weight:700;color:var(--sk-accent,#3b6df5)}
+.sk-arch__arrow{font-size:2.1cqw;line-height:1;color:var(--sk-accent,#3b6df5)}
+.sk-arch__link-caption{font-size:calc(var(--fs-caption) * .86);line-height:1.35;color:var(--sk-muted,#9aa7bd)}
+.sk-arch__band{padding:1.05cqw 1.4cqw;border-radius:.4cqw;text-align:center;
+  background:var(--sk-surface,rgba(120,170,255,.10));font-size:calc(var(--fs-body) * .9);font-weight:700;color:var(--sk-accent,#3b6df5)}
+.slide[data-chrome="band"] :is(.sk-tbl__head,.sk-arch__head){
+  background:color-mix(in srgb,var(--sk-accent,#ffe296) 9%,transparent);
+  border-left:.42cqw solid var(--sk-accent,#ffe296);padding:.85cqw 1.4cqw;gap:.35cqw;
+}
+.slide[data-chrome="band"] :is(.sk-tbl__heading,.sk-arch__heading){color:var(--sk-accent,#ffe296)}
+
+/* 节点图 / 竖图列 / 路线图 / 复合页 */
+.sk-ng,.sk-pr,.sk-rm,.sk-cp{position:absolute;inset:0;display:flex;flex-direction:column;gap:1.5cqw;padding:var(--sk-pad-y,6cqw) var(--sk-pad-x,8cqw)}
+.sk-ng__head,.sk-pr__head,.sk-rm__head,.sk-cp__head{display:flex;flex-direction:column;gap:.35cqw;flex:0 0 auto}
+.sk-ng__heading,.sk-pr__heading,.sk-rm__heading,.sk-cp__heading{margin:0;font-size:var(--fs-h2);font-weight:var(--sk-display-weight,700);line-height:1.2}
+.sk-ng__lede,.sk-pr__lede{margin:0;font-size:calc(var(--fs-body) * .9);line-height:1.45;color:var(--sk-muted,#9aa7bd)}
+.sk-ng__flow{display:grid;grid-template-columns:1fr auto 1.25fr auto 1fr;align-items:center;gap:.6cqw;flex:1;min-height:0}
+.sk-ng__side{display:flex;flex-direction:column;gap:.9cqw;justify-content:center;min-width:0}
+.sk-ng__chip{display:flex;flex-direction:column;gap:.25cqw;padding:1cqw 1.1cqw;border-radius:.42cqw;
+  background:var(--sk-surface,rgba(120,170,255,.10));border:.08cqw solid color-mix(in srgb,var(--sk-fg,#fff) 16%,transparent)}
+.sk-ng__chip-name{font-size:calc(var(--fs-body) * .95);font-weight:700;color:var(--sk-fg,#fff)}
+.sk-ng__chip-desc{font-size:calc(var(--fs-caption) * .92);line-height:1.4;color:var(--sk-muted,#9aa7bd)}
+.sk-ng__arrow{font-size:2cqw;color:var(--sk-accent,#3b6df5);line-height:1}
+.sk-ng__hub{display:flex;flex-direction:column;align-items:center;gap:.45cqw;padding:1.6cqw 1.2cqw;border-radius:.5cqw;text-align:center;
+  background:color-mix(in srgb,var(--sk-accent,#3b6df5) 16%,transparent);
+  border:.1cqw solid color-mix(in srgb,var(--sk-accent,#3b6df5) 55%,transparent)}
+.sk-ng__hub-name{font-size:calc(var(--fs-body) * 1.05);font-weight:800;color:var(--sk-accent,#3b6df5)}
+.sk-ng__hub-desc{font-size:calc(var(--fs-caption) * .94);line-height:1.42;color:var(--sk-muted,#9aa7bd)}
+.sk-ng__note,.sk-rm__note,.sk-cp__note{margin:0;font-size:calc(var(--fs-body) * .78);color:var(--sk-muted,#9aa7bd)}
+.sk-pr__grid{display:grid;grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:1.8cqw;flex:1;min-height:0}
+.sk-pr__col{display:flex;flex-direction:column;gap:.7cqw;min-height:0}
+.sk-pr__figure{margin:0;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  border-radius:.5cqw;background:var(--sk-surface,rgba(120,170,255,.08))}
+.sk-pr__img{width:100%;height:100%;object-fit:cover;display:block}
+.sk-pr__art{display:flex;align-items:center;justify-content:center;width:100%;height:100%;border-radius:.5cqw;
+  border:.12cqw dashed color-mix(in srgb,var(--sk-fg,#fff) 26%,transparent)}
+.sk-pr__hint{font-size:calc(var(--fs-caption) * .9);color:var(--sk-muted,#9aa7bd);opacity:.85}
+.sk-pr__title{margin:0;font-size:calc(var(--fs-body) * .95);font-weight:700;color:var(--sk-fg,#fff)}
+.sk-pr__desc{margin:0;font-size:calc(var(--fs-caption) * .95);line-height:1.42;color:var(--sk-muted,#9aa7bd)}
+.sk-rm__grid{display:grid;grid-template-columns:repeat(var(--sk-cols,3),minmax(0,1fr));gap:1.9cqw;flex:1;min-height:0}
+.sk-rm__col{display:flex;flex-direction:column;gap:.75cqw;min-height:0;padding:1.4cqw 1.3cqw;border-radius:.5cqw;
+  background:var(--sk-surface,rgba(120,170,255,.08));border-top:.16cqw solid var(--sk-accent,#3b6df5)}
+.sk-rm__phase{font-size:calc(var(--fs-caption) * .95);font-weight:700;letter-spacing:.08em;color:var(--sk-accent,#3b6df5)}
+.sk-rm__title{margin:0;font-size:calc(var(--fs-body) * 1.02);font-weight:700;color:var(--sk-fg,#fff)}
+.sk-rm__list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:.6cqw}
+.sk-rm__list li{display:flex;gap:.6cqw;align-items:baseline;font-size:calc(var(--fs-body) * .84);line-height:1.42;color:var(--sk-muted,#9aa7bd)}
+.sk-rm__no{font-size:calc(var(--fs-caption) * .86);font-weight:700;color:var(--sk-accent,#3b6df5);font-variant-numeric:tabular-nums}
+.sk-cp__cards{display:grid;grid-template-columns:repeat(var(--sk-cols,4),minmax(0,1fr));gap:1.4cqw;flex:1.05;min-height:0}
+.sk-cp__card{display:flex;flex-direction:column;gap:.4cqw;padding:1.3cqw 1.2cqw;border-radius:.45cqw;
+  background:var(--sk-surface,rgba(120,170,255,.10));border-left:.3cqw solid var(--sk-accent,#3b6df5)}
+.sk-cp__card-title{margin:0;font-size:calc(var(--fs-body) * .95);font-weight:700;color:var(--sk-fg,#fff)}
+.sk-cp__card-desc{margin:0;font-size:calc(var(--fs-caption) * .95);line-height:1.42;color:var(--sk-muted,#9aa7bd)}
+.sk-cp__steps{display:flex;gap:1.2cqw;flex:0 0 auto;padding:1.1cqw 1.2cqw;border-radius:.45cqw;
+  background:color-mix(in srgb,var(--sk-accent,#3b6df5) 8%,transparent)}
+.sk-cp__step{display:flex;flex-direction:column;gap:.25cqw;flex:1;min-width:0}
+.sk-cp__step-no{font-size:calc(var(--fs-caption) * .9);font-weight:700;color:var(--sk-accent,#3b6df5)}
+.sk-cp__step-name{font-size:calc(var(--fs-body) * .9);font-weight:700;color:var(--sk-fg,#fff)}
+.sk-cp__step-desc{font-size:calc(var(--fs-caption) * .9);line-height:1.4;color:var(--sk-muted,#9aa7bd)}
+.slide[data-chrome="band"] :is(.sk-ng__head,.sk-pr__head,.sk-rm__head,.sk-cp__head){
+  background:color-mix(in srgb,var(--sk-accent,#ffe296) 9%,transparent);
+  border-left:.42cqw solid var(--sk-accent,#ffe296);padding:.85cqw 1.4cqw;gap:.35cqw;
+}
+.slide[data-chrome="band"] :is(.sk-ng__heading,.sk-pr__heading,.sk-rm__heading,.sk-cp__heading){color:var(--sk-accent,#ffe296)}
+
 /* 打印 / 导出 PDF：一页一张 */
 @media print{
   @page{size:1280px 720px;margin:0}
   body{background:#fff}
-  .deck__nav,.deck__hud,.deck__meta,.deck__anno{display:none!important}
+  .deck__nav,.deck__hud,.deck__meta,.deck__anno,.sk-pager{display:none!important}
   .deck__stage{display:block;padding:0}
   .slide{display:block!important}
   .slide[hidden]{display:block!important}
@@ -931,6 +1640,65 @@ const DECK_SCRIPT = `<script>
 })();
 </script>`;
 
+/** 封面 / 结尾 / 章节分隔自己就是整页视觉，不套母版。 */
+const CHROME_EXEMPT: ReadonlySet<string> = new Set(['cover', 'closing', 'section']);
+
+function pad2(n: number): string {
+  return n < 10 ? '0' + n : String(n);
+}
+
+/**
+ * 渲染一页的母版：页眉（章节标题 + 品牌）与页脚（结论行 + 章节导航 + 页码）。
+ *
+ * 全部 aria-hidden：母版是**排版骨架**，读屏用户需要的是这一页的内容，
+ * 重复念一遍"解决方案 / 技术创新"只是噪音。
+ */
+function renderChromeBlock(chrome: DeckChrome, index: number, pageCount: number): string {
+  const page = chrome.pages?.[index];
+  const sections = chrome.sections ?? [];
+  const brand = chrome.brand ?? '';
+  const mark = chrome.mark ?? '';
+  const section = page?.section ?? '';
+  const note = page?.note ?? '';
+  const active = page?.sectionIndex;
+
+  const tabs = sections
+    .map((name, i) =>
+      '<span class="sk-chrome__tab' + (i === active ? ' is-on' : '') + '">' + escapeHtml(name) + '</span>',
+    )
+    .join('');
+
+  const headParts: string[] = [];
+  if (section !== '') {
+    headParts.push('<h2 class="sk-chrome__section">' + escapeHtml(section) + '</h2>');
+    headParts.push('<span class="sk-chrome__rule"></span>');
+  }
+  if (brand !== '') {
+    headParts.push(
+      '<div class="sk-chrome__brand">' +
+        (mark === '' ? '' : '<span class="sk-chrome__mark">' + escapeHtml(mark) + '</span>') +
+        '<span class="sk-chrome__name">' + escapeHtml(brand) + '</span>' +
+        '</div>',
+    );
+  }
+
+  const footParts: string[] = [];
+  if (note !== '') {
+    footParts.push('<p class="sk-chrome__note">' + escapeHtml(note) + '</p>');
+  }
+  footParts.push('<span class="sk-chrome__hr"></span>');
+  footParts.push(
+    '<nav class="sk-chrome__nav">' + tabs +
+      (brand === '' ? '' : '<span class="sk-chrome__brandnote">' + escapeHtml(brand) + '</span>') +
+      '<span class="sk-chrome__page">' + pad2(index + 1) + '</span>' +
+      '<span class="sk-chrome__total">/ ' + pad2(pageCount) + '</span>' +
+      '</nav>',
+  );
+
+  return '<header class="sk-chrome sk-chrome--top" aria-hidden="true">' + headParts.join('') + '</header>' +
+    '<footer class="sk-chrome sk-chrome--bottom" aria-hidden="true">' + footParts.join('') + '</footer>';
+}
+
 /**
  * 把结构渲染成完整 HTML 文档。
  *
@@ -945,6 +1713,8 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
   const theme = resolveDeckTheme(options.themeId);
   // 构图节奏也是决策层定的：`parallel` 每页同一套排法，`ranked` 偶数页换一种。
   const composition = options.composition ?? 'ranked';
+  // 母版：省略时整页仍是「版式占满」的旧样子，所以这次改动对老调用方是纯增量。
+  const chrome = options.chrome;
 
   const dots = slides
     .map((_, i) => {
@@ -960,13 +1730,24 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
   const pages = slides
     .map((block, i) => {
       const n = i + 1;
+      const chromeOn = chrome !== undefined && !CHROME_EXEMPT.has(block.type);
       return (
         `<section class="slide" id="deck-s${n}" role="tabpanel" aria-labelledby="deck-t${n}" ` +
         `data-ms-panel="deck:${n}" data-ms-layout="${escapeHtml(block.type)}" ` +
-        `data-tone="${toneForLayout(block.type)}" data-side="${composition === 'ranked' && i % 2 === 1 ? 'right' : 'left'}"${i === 0 ? '' : ' hidden'}>` +
-        `<div class="slide__frame">${renderSlide(block)}` +
+        `data-tone="${toneForLayout(block.type)}" data-side="${composition === 'ranked' && i % 2 === 1 ? 'right' : 'left'}"` +
+        (chromeOn ? ' data-chrome="band"' : '') +
+        `${i === 0 ? '' : ' hidden'}>` +
+        `<div class="slide__frame">` +
+        `<div class="deck__body">${renderSlide(block)}</div>` +
+        (chromeOn ? renderChromeBlock(chrome as DeckChrome, i, slides.length) : '') +
         `<span class="deck__anno" aria-hidden="true">${n} · ${escapeHtml(block.type)}</span>` +
-        `<span class="deck__meta" aria-hidden="true">${n} / ${slides.length}</span>` +
+        // 页码从「1 / 7」改成一排切角小芯片：素材里每页右上/右下都有一条
+        // 平行四边形章节条，这是最能一眼认出"创赛稿"的那种装饰。
+        `<nav class="sk-pager" aria-hidden="true">` +
+        slides
+          .map((_, k) => `<span class="sk-pager__dot${k === i ? ' is-on' : ''}">${k + 1}</span>`)
+          .join('') +
+        `</nav>` +
         `</div></section>`
       );
     })
@@ -977,7 +1758,10 @@ export function renderDeck(spec: PageSpec, options: RenderDeckOptions = {}): str
     `<meta name="viewport" content="width=device-width,initial-scale=1">\n` +
     `<title>${escapeHtml(title)}</title>\n<style>${DECK_CSS}</style>\n</head>\n<body>\n` +
     `<main class="deck" data-ms-project="${escapeHtml(spec.projectId)}" ` +
-    `data-ms-theme="${escapeHtml(theme.id)}" style="${deckThemeCssVars(theme)}" ` +
+    // 主题变量里含字体名（如 `"PingFang SC"`），原样放进 `style="..."` 会被第一个双引号
+    // 截断，`--sk-display` 之后的变量全部丢失——字体、字重、字距、内边距、圆角都不生效。
+    // 所以这里必须转义：属性值内的 `&quot;` 解析回来仍是合法的 CSS 引号。
+    `data-ms-theme="${escapeHtml(theme.id)}" style="${escapeHtml(deckThemeCssVars(theme))}" ` +
     `data-ms-slides="${slides.length}" data-ms-goal="${escapeHtml(spec.goal)}">\n` +
     `<nav class="deck__nav" data-ms-tabs="deck" role="tablist" aria-label="页序">${dots}</nav>\n` +
     `<div class="deck__stage">${pages}</div>\n` +

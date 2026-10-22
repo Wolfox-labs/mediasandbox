@@ -10,7 +10,7 @@
  *
  * ## 所以主题是一个 `choice` 问题
  *
- * `deck-assembler` 在逐页选版式**之前**问一次 `deck_theme`，候选是这里的四套。
+ * `deck-assembler` 在逐页选版式**之前**问一次 `deck_theme`，候选是 `DECK_THEMES` 里的全部。
  * 决定结果：
  *   - 进 `plan.rationale`（看得见"为什么是这个气质"）
  *   - 作为 `assemble-deck` 的入参（渲染时用）
@@ -57,8 +57,9 @@ export interface DeckTheme {
 /**
  * 内置主题。
  *
- * 四套的气质差别是**一眼能看出来**的（深冷 / 暖纸 / 极简 / 高饱和），
- * 因为决策模型只能读描述、用户只能看结果——中间没有任何解释环节。
+ * 每套的气质差别是**一眼能看出来**的（深冷 / 暖纸 / 极简 / 高饱和 / 科技蓝 /
+ * 红旅红金 / 土黄国风 / 黑金），因为决策模型只能读描述、用户只能看结果——
+ * 中间没有任何解释环节。后四套取自创赛 PPT 素材的实际配色，不是凭空造的。
  */
 export const DECK_THEMES: readonly DeckTheme[] = [
   {
@@ -131,6 +132,115 @@ export const DECK_THEMES: readonly DeckTheme[] = [
       padX: '9',
       padY: '6',
       radius: '1.2',
+    },
+  },
+  // ── 以下四套来自创赛 PPT 素材的实际配色（科技风蓝 / 红旅红金 / 土黄国风 / 黑金）──
+  // 它们的底色不是单层渐变，而是「一层光斑 + 一层渐变」：原稿的视觉重量主要来自
+  // 左下或顶部的光晕，纯线性渐变复现不出来。`background` 支持多层，所以不必新增变量。
+  {
+    id: 'tech-cyan',
+    label: '科技风蓝',
+    description: '近黑的深海军蓝，左下角一片青色光晕、右下角一片电蓝光晕，亮青强调。适合硬科技方案、架构图、数据看板这类"要显得精密"的场合',
+    vars: {
+      bg:
+        'radial-gradient(120% 95% at 6% 102%,rgba(0,224,255,.28) 0%,transparent 58%),' +
+        'radial-gradient(90% 75% at 94% -8%,rgba(1,109,255,.45) 0%,transparent 66%),' +
+        'linear-gradient(140deg,#061a33 0%,#0a2b4e 52%,#0d3a63 100%)',
+      fg: '#e9f3ff',
+      accent: '#35d7ff',
+      muted: '#8ba7c7',
+      surface: 'rgba(53,215,255,.10)',
+      display: '"PingFang SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif',
+      displayWeight: '700',
+      displayTracking: '-0.01em',
+      padX: '8',
+      padY: '6',
+      radius: '0.5',
+    },
+  },
+  {
+    id: 'red-gold',
+    label: '红旅红金',
+    description: '深红底、顶部一片暖金光，标题用宋体。适合红色文旅、非遗传承、公益赛道这类"要显得庄重"的场合',
+    vars: {
+      bg:
+        'radial-gradient(110% 85% at 50% -10%,rgba(232,183,82,.20) 0%,transparent 62%),' +
+        'linear-gradient(160deg,#3a0c10 0%,#5a1216 48%,#280708 100%)',
+      fg: '#f8ecdf',
+      accent: '#e8b752',
+      muted: '#c9a58f',
+      surface: 'rgba(232,183,82,.10)',
+      display: '"Songti SC","Source Han Serif SC","Noto Serif SC",serif',
+      displayWeight: '700',
+      displayTracking: '0.01em',
+      padX: '9',
+      padY: '6',
+      radius: '0.2',
+    },
+  },
+  {
+    id: 'opera-sand',
+    label: '土黄国风',
+    description: '宣纸米黄底、墨褐字、赭红强调、宋体标题，右上角一点朱砂色晕。适合传统文化、戏曲、中医药这类"要显得有年头的"场合',
+    vars: {
+      bg:
+        'radial-gradient(95% 80% at 88% 6%,rgba(156,43,28,.14) 0%,transparent 60%),' +
+        'linear-gradient(170deg,#f6ecd6 0%,#e9d7b3 58%,#dcc59b 100%)',
+      fg: '#2a2018',
+      accent: '#9c2b1c',
+      muted: '#7b6650',
+      surface: 'rgba(156,43,28,.08)',
+      display: '"Songti SC","Source Han Serif SC","Noto Serif SC",serif',
+      displayWeight: '600',
+      displayTracking: '0.02em',
+      padX: '9',
+      padY: '7',
+      radius: '0',
+    },
+  },
+  {
+    id: 'ink-gold',
+    label: '黑金',
+    description: '近黑的暖底、左上角一片金色光晕、金色强调。适合高端品牌、颁奖、投资路演这类"要显得贵"的场合',
+    vars: {
+      bg:
+        'radial-gradient(90% 75% at 16% 4%,rgba(200,162,74,.22) 0%,transparent 58%),' +
+        'linear-gradient(135deg,#09090b 0%,#15120c 55%,#211b11 100%)',
+      fg: '#f4efe4',
+      accent: '#c8a24a',
+      muted: '#9a8d74',
+      surface: 'rgba(200,162,74,.09)',
+      display: '"PingFang SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif',
+      displayWeight: '700',
+      displayTracking: '-0.01em',
+      padX: '8',
+      padY: '6',
+      radius: '0.3',
+    },
+  },
+  // ── 基准稿取色（创赛路演稿的实际配色）──
+  // 不是"再调一版深蓝"，是把"深蓝底 + 金强调 + 青次强调"这套
+  // 已经被验证能过评委眼睛的组合固化成一套可复用气质。
+  // 金色只给"要记住的那一句"，青色只给面板与连线。
+  {
+    id: 'deep-navy',
+    label: '深蓝科技',
+    description: '深海蓝底、右上角一片电蓝光晕、左下角一点青色微光，金色强调、浅蓝灰次要文字。适合创赛路演、技术方案、政企汇报这类"要显得正式又有科技感"的场合',
+    vars: {
+      bg:
+        'radial-gradient(120% 90% at 88% -6%,rgba(41,110,220,.42) 0%,transparent 62%),' +
+        'radial-gradient(85% 70% at 2% 104%,rgba(0,205,246,.20) 0%,transparent 56%),' +
+        'linear-gradient(155deg,#041024 0%,#082545 55%,#0b3358 100%)',
+      fg: '#f4faff',
+      accent: '#ffe296',
+      muted: '#b7cdeb',
+      surface: 'rgba(83,223,252,.10)',
+      display: '"PingFang SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif',
+      displayWeight: '800',
+      displayTracking: '0',
+      padX: '7',
+      padY: '5',
+      radius: '0.5',
     },
   },
 ];

@@ -1,0 +1,169 @@
+{
+ "spec": {
+  "projectId": "bench2",
+  "goal": "版式族实验",
+  "templateId": null,
+  "candidateBlockIds": [
+   "node-graph",
+   "phone-row",
+   "roadmap",
+   "composite"
+  ],
+  "blocks": [
+   {
+    "id": "n1",
+    "type": "node-graph",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "手机经 Relay 连接执行宿主，跨越本地网络边界"
+     },
+     "lede": {
+      "kind": "text",
+      "text": "两台手机与一台电脑之间没有直连条件时，由中转服务配对与转发。"
+     },
+     "left": {
+      "kind": "list",
+      "items": [
+       "手机端 A|OPPO，同城移动网络",
+       "手机端 B|Redmi，异地热点"
+      ]
+     },
+     "hub": {
+      "kind": "text",
+      "text": "Relay 配对与转发|按会话配对，只转发指令事件流"
+     },
+     "right": {
+      "kind": "list",
+      "items": [
+       "电脑 Agent|宿主执行，产物落本地目录"
+      ]
+     },
+     "note": {
+      "kind": "text",
+      "text": "2 台手机经中转接入同一台电脑，指令与事件都不落地第三方"
+     }
+    }
+   },
+   {
+    "id": "n2",
+    "type": "phone-row",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "原生移动工作台贯通文件、编辑与远程终端"
+     },
+     "lede": {
+      "kind": "text",
+      "text": "三个界面就是移动端的全部入口，其余都在宿主上跑。"
+     },
+     "items": {
+      "kind": "list",
+      "items": [
+       "文件浏览|定位目录中的实际产物",
+       "文本编辑|改完直接保存回宿主",
+       "远程终端|执行宿主命令核对结果"
+      ]
+     }
+    }
+   },
+   {
+    "id": "n3",
+    "type": "roadmap",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "以场景深化、接入扩展与部署推广推进产品演进"
+     },
+     "stages": {
+      "kind": "list",
+      "items": [
+       "近期|协同体验完善|设备作用域与通知管理；弱网重连与长期后台体验；文件审校与交互细节",
+       "中期|数媒场景深化|沉淀文旅脚本文案工作流；探索字幕与素材处理接入；形成可复用的任务模板",
+       "后续|接入与部署推广|扩展多元助手与模型工具；完善手机 Agent 配置；探索更多终端与部署形态"
+      ]
+     },
+     "note": {
+      "kind": "text",
+      "text": "让跨设备协同成为可复用的智能生产能力"
+     }
+    }
+   },
+   {
+    "id": "n4",
+    "type": "composite",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "多协议智能体统一接入与动态能力识别"
+     },
+     "cards": {
+      "kind": "list",
+      "items": [
+       "Codex|原生线程与事件，历史与审批语义",
+       "DSH SDK|实时宿主接入，持续会话与事件回传",
+       "ACP|协议握手与共享适配，按能力启用功能",
+       "CLI|命令与输出契约，接入已声明的执行方式"
+      ]
+     },
+     "steps": {
+      "kind": "list",
+      "items": [
+       "安装发现|扫描本机已安装的助手",
+       "能力声明|读取协议与能力清单",
+       "配置检查|登录态与权限校验",
+       "实际回合验证|跑一轮真实交互再准入"
+      ]
+     },
+     "note": {
+      "kind": "text",
+      "text": "统一接入入口，按助手能力启用功能"
+     }
+    }
+   }
+  ],
+  "qualityScore": 0,
+  "createdAt": 1792641940600
+ },
+ "chrome": {
+  "brand": "智驭寰枢",
+  "mark": "驭",
+  "sections": [
+   "项目背景",
+   "解决方案",
+   "技术创新",
+   "演示验证",
+   "应用展望"
+  ],
+  "pages": [
+   {
+    "section": "技术创新",
+    "sectionIndex": 3,
+    "note": "跨网络接入，指令与事件都不落地第三方"
+   },
+   {
+    "section": "解决方案",
+    "sectionIndex": 1,
+    "note": "三个界面就是移动端的全部入口"
+   },
+   {
+    "section": "应用展望",
+    "sectionIndex": 4,
+    "note": "让跨设备协同成为可复用的智能生产能力"
+   },
+   {
+    "section": "技术创新",
+    "sectionIndex": 2,
+    "note": "统一接入入口，按助手能力启用功能"
+   }
+  ]
+ }
+}

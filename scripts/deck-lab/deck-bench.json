@@ -1,0 +1,276 @@
+{
+ "spec": {
+  "projectId": "bench",
+  "goal": "智驭寰枢 · 路演稿（母版对照）",
+  "templateId": null,
+  "candidateBlockIds": [
+   "cover",
+   "icon-grid",
+   "beveled-cards",
+   "process-flow",
+   "arch-diagram",
+   "data-table",
+   "metric-grid",
+   "closing"
+  ],
+  "blocks": [
+   {
+    "id": "b1",
+    "type": "cover",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "eyebrow": {
+      "kind": "text",
+      "text": "智驭寰枢 · 2025 数字媒体科技作品竞赛"
+     },
+     "title": {
+      "kind": "text",
+      "text": "让创作在手机上继续"
+     },
+     "subtitle": {
+      "kind": "text",
+      "text": "跨设备 AI 智能体协同与数媒生产平台：手机随时参与，生产持续推进"
+     }
+    }
+   },
+   {
+    "id": "b2",
+    "type": "icon-grid",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "人机协同正在成为新的工作形态"
+     },
+     "lede": {
+      "kind": "text",
+      "text": "国务院《关于深入实施「人工智能+」行动的意见》提出，新一代智能终端与智能体应用普及率要超过 70%"
+     },
+     "items": {
+      "kind": "list",
+      "items": [
+       "📱|随时参与|创作者在现场用手机补充线索、审校文案，不必回到工位",
+       "🖥️|宿主执行|任务仍在工作站上跑，复用已装的助手、文件与工具链",
+       "🔗|同一会话|手机与桌面是同一次会话，产物落在同一个目录",
+       "🎬|数媒落地|文旅短片、脚本文案这类现场驱动的创作最先受益"
+      ]
+     }
+    }
+   },
+   {
+    "id": "b3",
+    "type": "beveled-cards",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "创作者移动了，流程仍被留在工位"
+     },
+     "lede": {
+      "kind": "text",
+      "text": "不是没人想做移动创作，是三个环节各自断了一截。"
+     },
+     "cards": {
+      "kind": "list",
+      "items": [
+       "灵感在野外|补拍想法只能记在备忘录，回到工位再重述一遍；线索和素材对不上",
+       "文案在路上|审校意见靠微信口述，改稿的人拿不到上下文；一轮往返要等半天",
+       "进度不可见|任务在工作站跑到哪一步，手机上完全看不到；只能回来守着"
+      ]
+     }
+    }
+   },
+   {
+    "id": "b4",
+    "type": "process-flow",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "一次任务，四步走完"
+     },
+     "lede": {
+      "kind": "text",
+      "text": "从发起到产物落盘，全程同一条会话。"
+     },
+     "steps": {
+      "kind": "list",
+      "items": [
+       "发起|手机选择工作站，确定助手与项目目录",
+       "执行|宿主持续跑任务，过程事件实时回传",
+       "审校|手机改文案、补充要求，继续同一段会话",
+       "交付|产物直接写进宿主目录，桌面随时接手"
+      ]
+     }
+    }
+   },
+   {
+    "id": "arch1",
+    "type": "arch-diagram",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "指令事件流与文件传输流分离"
+     },
+     "lede": {
+      "kind": "text",
+      "text": "移动交互与宿主执行之间，两条通道各走各的，互不阻塞。"
+     },
+     "nodes": {
+      "kind": "list",
+      "items": [
+       "Android 原生客户端|Kotlin / Compose；AgentClient / StateFlow",
+       "Node.js Agent|认证与会话编排；事件分发与控制权；文件系统与终端",
+       "助手协议适配层|Codex app-server；DSH SDK；ACP / CLI 契约"
+      ]
+     },
+     "links": {
+      "kind": "list",
+      "items": [
+       "WebSocket|指令、增量事件与审批",
+       "HTTP|文件、上传与运行载荷"
+      ]
+     },
+     "band": {
+      "kind": "text",
+      "text": "宿主环境：电脑或手机私有运行环境"
+     }
+    }
+   },
+   {
+    "id": "tbl1",
+    "type": "data-table",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "创作者移动之后，四个环节各自断在哪"
+     },
+     "columns": {
+      "kind": "list",
+      "items": [
+       "环节",
+       "工位上的做法",
+       "移动后的缺口",
+       "后果"
+      ]
+     },
+     "rows": {
+      "kind": "list",
+      "items": [
+       "取景|回到工位再回放素材|现场不能立刻标注|灵感与素材对不上",
+       "文案|桌面端改稿、即时预览|手机只能看不能说清|一轮往返半天",
+       "审校|面对面过一遍分镜|意见靠口述转述|改稿丢上下文",
+       "交付|产物落在本机目录|看不到进度与结果|必须回来守着"
+      ]
+     },
+     "note": {
+      "kind": "text",
+      "text": "四段全部发生在同一次会话里，缺的不是工具，是连接。"
+     }
+    }
+   },
+   {
+    "id": "b5",
+    "type": "metric-grid",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "heading": {
+      "kind": "text",
+      "text": "自动化回归与真实设备互证"
+     },
+     "metrics": {
+      "kind": "list",
+      "items": [
+       "137|项自动化测试|覆盖沙盒、编排、服务三层",
+       "4|类智能体接入|Codex / DSH / ACP / CLI",
+       "2|台手机实测|OPPO 与 Redmi 经中转接入同一台电脑",
+       "0.8s|事件回传延迟|同一局域网内的中位值",
+       "3|类产物|文案、分镜、截图可直接在桌面打开",
+       "100%|产物落在宿主|不依赖云端存储，断网可复现"
+      ]
+     },
+     "note": {
+      "kind": "text",
+      "text": "统计口径：2026 年 10 月，本地与 Docker 两种沙盒各跑一遍"
+     }
+    }
+   },
+   {
+    "id": "b6",
+    "type": "closing",
+    "status": "filled",
+    "sources": {},
+    "slots": {
+     "headline": {
+      "kind": "text",
+      "text": "让创作持续，让协同随行"
+     },
+     "note": {
+      "kind": "text",
+      "text": "智驭寰枢 · 2025"
+     },
+     "contact": {
+      "kind": "text",
+      "text": "team@termdesk.example"
+     }
+    }
+   }
+  ],
+  "qualityScore": 0,
+  "createdAt": 1792640068881
+ },
+ "chrome": {
+  "brand": "智驭寰枢",
+  "mark": "驭",
+  "sections": [
+   "项目背景",
+   "解决方案",
+   "技术创新",
+   "演示验证",
+   "应用展望"
+  ],
+  "pages": [
+   {},
+   {
+    "section": "项目背景",
+    "sectionIndex": 0,
+    "note": "把智能体执行与移动决策连接起来"
+   },
+   {
+    "section": "项目背景",
+    "sectionIndex": 0,
+    "note": "三个断点，一条会话接住"
+   },
+   {
+    "section": "解决方案",
+    "sectionIndex": 1,
+    "note": "同一会话推进任务，同一目录承接产物"
+   },
+   {
+    "section": "技术创新",
+    "sectionIndex": 2,
+    "note": "两条通道各走各的，互不阻塞"
+   },
+   {
+    "section": "技术创新",
+    "sectionIndex": 2,
+    "note": "四个环节的缺口，逐一被连接补上"
+   },
+   {
+    "section": "演示验证",
+    "sectionIndex": 3,
+    "note": "137 项自动化测试与两台真机互证"
+   },
+   {}
+  ]
+ }
+}
