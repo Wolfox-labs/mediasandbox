@@ -1,0 +1,25 @@
+[
+  {
+    "id": "promo-banner",
+    "label": "改过的横幅",
+    "description": "页面顶部的促销条",
+    "group": "content",
+    "slots": [
+      {
+        "name": "title",
+        "type": "title",
+        "required": true,
+        "description": "横幅标题"
+      },
+      {
+        "name": "body",
+        "type": "text",
+        "required": false,
+        "description": "横幅正文"
+      }
+    ],
+    "canLead": false,
+    "repeatable": false,
+    "costHint": "fast"
+  }
+]

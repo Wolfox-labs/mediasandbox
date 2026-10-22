@@ -91,7 +91,8 @@ describe('chromium 截图驱动', () => {
     assert.equal(options['Image'], BROWSER_IMAGE);
     const cmd = options['Cmd'] as string[];
     assert.equal(cmd[0], '/usr/bin/chromium-browser');
-    assert.ok(cmd.includes('--headless=new'));
+    // old headless：new 的视口比窗口矮 88px，截图底部会多一条白边（实测过海报）。
+    assert.ok(cmd.includes('--headless=old'));
     assert.ok(cmd.includes('--window-size=1024,640'), `视口没传对：${cmd.join(' ')}`);
     assert.ok(cmd.includes('--screenshot=/workspace/artifacts/screenshot.png'));
     assert.ok(

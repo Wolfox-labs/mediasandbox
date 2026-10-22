@@ -113,13 +113,29 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
+export interface PosterRenderOptions {
+  /**
+   * 背景图：`data:image/...` 或 http(s) 地址。
+   *
+   * 给了就压一层深色蒙版：海报上的字必须始终可读，而背景图的明暗不可控。
+   * 这也让"换一张背景"不需要改版式。
+   */
+  readonly background?: string | undefined;
+  /** 叠在图上的落款 logo 文字（通常品牌名）。 */
+  readonly logo?: string | undefined;
+}
+
 /**
  * 渲染一张海报的完整 HTML。
  *
  * 用内联样式与 `clamp()` 字号：一组 CSS 要适配四个尺寸，
  * 按尺寸写四套样式必然走样。这里只让 `--base` 随尺寸变，其余按比例缩。
  */
-export function renderPosterHtml(brief: PosterBrief, size: PosterSize): string {
+export function renderPosterHtml(
+  brief: PosterBrief,
+  size: PosterSize,
+  options: PosterRenderOptions = {},
+): string {
   const { from, to, accent, ink } = brief.palette;
   const points = brief.points
     .map(
@@ -128,6 +144,9 @@ export function renderPosterHtml(brief: PosterBrief, size: PosterSize): string {
     )
     .join('');
   const wide = size.width > size.height;
+  const hasBackground =
+    options.background !== undefined && options.background.trim() !== '';
+  const cssUrl = hasBackground ? JSON.stringify(options.background!.trim()) : '';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -146,25 +165,54 @@ export function renderPosterHtml(brief: PosterBrief, size: PosterSize): string {
     --h: ${size.height}px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--from); }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  html { background: linear-gradient(155deg, var(--from) 0%, var(--to) 100%); }
   body {
     font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
     color: var(--ink);
+    background: transparent;
   }
   /* 背景铺在**固定定位**的图层上：截图工具的视口高度与实际画布偶尔差几像素，
      用 body 的高度去铺会漏出一条白边；fixed 图层永远铺满可见区域。 */
   body::before {
     content: "";
     position: fixed;
-    inset: 0;
-    z-index: -1;
+    /* 上下各外扩 100px：截图工具的窗口高度与 CSS 视口偶尔差几十像素，
+       只铺 inset:0 会在底部漏出一条底色。固定层外扩后永远盖过边界。 */
+    inset: -100px 0 -100px 0;
+    z-index: 0;
     background:
       radial-gradient(120% 80% at 12% 0%, color-mix(in srgb, var(--accent) 26%, transparent) 0%, transparent 60%),
       radial-gradient(90% 70% at 100% 100%, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 55%),
       linear-gradient(155deg, var(--from) 0%, var(--to) 100%);
   }
+  ${
+    hasBackground
+      ? `body.has-bg::before {
+    background-image:
+      linear-gradient(100deg,
+        color-mix(in srgb, var(--from) 92%, transparent) 0%,
+        color-mix(in srgb, var(--from) 46%, transparent) 58%,
+        transparent 100%),
+      url(${cssUrl});
+    background-size: cover, cover;
+    background-position: center, center;
+    background-repeat: no-repeat, no-repeat;
+  }
+  .logo {
+    position: absolute;
+    top: calc(var(--base) * 1.1);
+    right: calc(var(--base) * 1.1);
+    z-index: 2;
+    font-size: calc(var(--base) * 0.3);
+    letter-spacing: 0.18em;
+    color: color-mix(in srgb, var(--ink) 78%, transparent);
+  }`
+      : ''
+  }
   .canvas {
     position: relative;
+    z-index: 1;
     width: 100%;
     height: 100%;
     padding: calc(var(--base) * 1.1);
@@ -255,7 +303,8 @@ export function renderPosterHtml(brief: PosterBrief, size: PosterSize): string {
   }
 </style>
 </head>
-<body>
+<body${hasBackground ? ' class="has-bg"' : ''}>
+  ${options.logo !== undefined && options.logo.trim() !== '' ? `<div class="logo">${escapeHtml(options.logo.trim())}</div>` : ''}
   <div class="canvas">
     <span class="ring a"></span>
     <span class="ring b"></span>

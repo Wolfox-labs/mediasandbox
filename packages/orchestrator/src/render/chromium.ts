@@ -94,7 +94,10 @@ export class ChromiumScreenshotDriver implements ScreenshotDriver {
       Env: ['HOME=/tmp'],
       Cmd: [
         '/usr/bin/chromium-browser',
-        '--headless=new',
+        // **old headless，不是 new**：实测 new headless 下 `--window-size=W,H`
+        // 得到的视口比窗口矮 88px（截图固定为窗口尺寸），底部于是多出一条白边；
+        // 海报这种整幅铺底的设计上非常明显。old headless 的视口 = 窗口，截图完整。
+        '--headless=old',
         // 见文件头第 1 条：外层容器才是沙盒。
         '--no-sandbox',
         '--disable-gpu',

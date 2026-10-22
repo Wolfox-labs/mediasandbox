@@ -24,6 +24,10 @@ export interface PosterWorkflowOptions {
   readonly tone?: string | undefined;
   /** 要导出的尺寸 id；省略就是四个全出。 */
   readonly sizeIds?: readonly string[] | undefined;
+  /** 是否搜一张实景图当背景（只搜图、不生图）。 */
+  readonly background?: boolean | undefined;
+  /** 叠在图上的品牌落款。 */
+  readonly logo?: string | undefined;
 }
 
 /**
@@ -57,6 +61,19 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
     },
   ];
 
+  if (options.background === true) {
+    nodes.push({
+      id: 'background',
+      toolId: 'poster-background',
+      inputs: {
+        goal: { value: options.goal },
+        source: { value: 'web' },
+      },
+      note: '找一张背景图',
+      position: { x: 0, y: 160 },
+    });
+  }
+
   sizes.forEach((size, index) => {
     const renderId = `render-${size.id}`;
     const exportId = `export-${size.id}`;
@@ -67,6 +84,8 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
         inputs: {
           brief: { from: 'brief', port: 'brief' },
           sizeId: { value: size.id },
+          ...(options.background === true ? { background: { from: 'background', port: 'image' } } : {}),
+          ...(options.logo !== undefined && options.logo !== '' ? { logo: { value: options.logo } } : {}),
         },
         note: `排版 ${size.label}`,
         position: { x: 320, y: index * 140 },
@@ -77,6 +96,7 @@ export function posterWorkflow(options: PosterWorkflowOptions): WorkflowDef {
         inputs: {
           file: { from: renderId, port: 'file' },
           sizeId: { value: size.id },
+          html: { from: renderId, port: 'html' },
         },
         note: `导出 ${size.label}`,
         position: { x: 640, y: index * 140 },

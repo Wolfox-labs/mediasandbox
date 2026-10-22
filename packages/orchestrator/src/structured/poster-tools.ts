@@ -18,6 +18,7 @@ import {
   resolvePosterSize,
   type PosterBrief,
 } from './poster.js';
+import { bingImageUrls, fetchImageBytes } from './tools.js';
 
 function requireString(inputs: Readonly<Record<string, unknown>>, key: string, toolId: string): string {
   const value = inputs[key];
@@ -123,6 +124,8 @@ export function createPosterRenderTool(): ToolRegistration {
       inputs: [
         { name: 'brief', type: 'text', required: true, description: '海报文案 JSON' },
         { name: 'sizeId', type: 'text', required: false, description: '尺寸 id：story/square/banner/a4' },
+        { name: 'background', type: 'text', required: false, description: '背景图（data URI 或 http 地址）' },
+        { name: 'logo', type: 'text', required: false, description: '叠在图上的品牌落款' },
       ],
       outputs: [
         { name: 'html', type: 'text', required: true, description: '海报 HTML' },
@@ -142,13 +145,21 @@ export function createPosterRenderTool(): ToolRegistration {
         throw new ToolError('poster-render 的 brief 不是合法 JSON', 'EXECUTION_FAILED', 'poster-render');
       }
       const brief = normalizeBrief(parsed);
-      const html = renderPosterHtml(brief, size);
+      const background =
+        typeof runtime.inputs['background'] === 'string' && runtime.inputs['background'].trim() !== ''
+          ? runtime.inputs['background']
+          : undefined;
+      const logo = typeof runtime.inputs['logo'] === 'string' ? runtime.inputs['logo'] : undefined;
+      const html = renderPosterHtml(brief, size, {
+        ...(background !== undefined ? { background } : {}),
+        ...(logo !== undefined && logo.trim() !== '' ? { logo } : {}),
+      });
       const file = `artifacts/poster-${size.id}.html`;
       await runtime.sandbox.writeFile(runtime.handle, file, html);
       return {
         outputs: { html, file },
         artifacts: [{ path: file, size: Buffer.byteLength(html, 'utf8'), mimeHint: 'text/html' }],
-        summary: `排版 ${size.label}（${size.width}×${size.height}）`,
+        summary: `排版 ${size.label}（${size.width}×${size.height}）${background === undefined ? '' : '，带背景图'}`,
       };
     },
   };
@@ -167,6 +178,9 @@ export function createPosterExportTool(driver: ScreenshotDriver): ToolRegistrati
       inputs: [
         { name: 'file', type: 'text', required: true, description: '海报 HTML 的相对路径' },
         { name: 'sizeId', type: 'text', required: false, description: '尺寸 id（决定画布像素）' },
+        // 内容指纹：导出读的是沙盒文件，但缓存键只看入参。
+        // 不把 HTML 接进来，就会出现"换背景了、导出的还是上一张"。
+        { name: 'html', type: 'text', required: false, description: '海报 HTML（仅用于缓存指纹）' },
       ],
       outputs: [{ name: 'path', type: 'file', required: true, description: 'PNG 相对路径' }],
       costHint: 'medium',
@@ -198,6 +212,83 @@ export function createPosterExportTool(driver: ScreenshotDriver): ToolRegistrati
   };
 }
 
+/**
+ * 找一张背景图。
+ *
+ * 只做搜图、不生图：生图是逐张计费的，而海报背景用一张真实场景照片往往更合适。
+ * 找不到就返回空串——渲染器会用纯渐变兜底，海报照样出得来。
+ */
+export function createPosterBackgroundTool(): ToolRegistration {
+  return {
+    spec: {
+      id: 'poster-background',
+      label: '找一张背景图',
+      description: '按目标/查询词搜一张实景图，作为海报背景；找不到就留空走渐变兜底',
+      envTypes: ['image'],
+      role: 'generate',
+      category: 'poster',
+      inputs: [
+        { name: 'goal', type: 'text', required: true, description: '海报目标（也当作默认查询词）' },
+        { name: 'query', type: 'text', required: false, description: '自定义查询词' },
+        { name: 'source', type: 'text', required: false, description: 'web（默认）| none（不要背景）' },
+      ],
+      outputs: [
+        { name: 'image', type: 'text', required: true, description: 'data URI；空串表示没有背景' },
+        { name: 'from', type: 'text', required: true, description: '来源：web / none / fallback' },
+      ],
+      costHint: 'medium',
+    },
+    execute: async (runtime: ToolRuntime): Promise<ToolResult> => {
+      const goal = requireString(runtime.inputs, 'goal', 'poster-background');
+      const source = typeof runtime.inputs['source'] === 'string' ? runtime.inputs['source'] : 'web';
+      if (source === 'none') {
+        return {
+          outputs: { image: '', from: 'none' },
+          artifacts: [],
+          summary: '背景：按配置不使用图片',
+        };
+      }
+      const query = typeof runtime.inputs['query'] === 'string' && runtime.inputs['query'].trim() !== ''
+        ? runtime.inputs['query'].trim()
+        : goal;
+
+      let urls: string[] = [];
+      try {
+        urls = await bingImageUrls(query);
+      } catch (error) {
+        runtime.log(`搜图失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      // 候选按顺序试：前几张 403/超时是常态，试到一张能用为止。
+      for (const url of urls.slice(0, 4)) {
+        try {
+          const image = await fetchImageBytes(url);
+          const dataUri = `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}`;
+          runtime.log(`背景图：${Math.round(image.bytes.length / 1024)} KB`);
+          return {
+            outputs: { image: dataUri, from: 'web' },
+            artifacts: [],
+            summary: `背景图 ${Math.round(image.bytes.length / 1024)} KB（查询：${query}）`,
+          };
+        } catch {
+          /* 换下一张 */
+        }
+      }
+
+      return {
+        outputs: { image: '', from: 'fallback' },
+        artifacts: [],
+        summary: `没有找到可用背景图（查询：${query}），改用渐变`,
+      };
+    },
+  };
+}
+
 export function createPosterTools(driver: ScreenshotDriver): readonly ToolRegistration[] {
-  return [createPosterBriefTool(), createPosterRenderTool(), createPosterExportTool(driver)];
+  return [
+    createPosterBriefTool(),
+    createPosterBackgroundTool(),
+    createPosterRenderTool(),
+    createPosterExportTool(driver),
+  ];
 }

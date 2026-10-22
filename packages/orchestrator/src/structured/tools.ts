@@ -643,9 +643,9 @@ function takeBingUrls(goal: string, urls: readonly string[], count: number): str
 /** 从 Bing 图片搜索结果里抠出原图地址。只做一次搜索，结果在进程内缓存。 */
 const bingUrlCache = new Map<string, string[]>();
 
-async function bingImageUrls(query: string): Promise<string[]> {
-  const cached = bingUrlCache.get(query);
-  if (cached !== undefined) return cached;
+/** 搜图：给一个查询词，返回候选图片 URL（已缓存）。海报背景等外部节点复用。 */
+export async function bingImageUrls(query: string): Promise<string[]> {
+  const cached = bingUrlCache.get(query);  if (cached !== undefined) return cached;
   const url = `https://www.bing.com/images/search?q=${encodeURIComponent(query)}&form=HDRSC2&first=1`;
   const response = await fetch(url, {
     headers: { 'user-agent': BING_UA, 'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8' },
@@ -663,7 +663,8 @@ async function bingImageUrls(query: string): Promise<string[]> {
   return urls;
 }
 
-async function fetchImageBytes(url: string): Promise<{ bytes: Uint8Array; mime: string }> {
+/** 下载一张图并归一成字节 + mime。失败抛错，由调用方决定是否回落。 */
+export async function fetchImageBytes(url: string): Promise<{ bytes: Uint8Array; mime: string }> {
   const response = await fetch(url, {
     headers: { 'user-agent': BING_UA, referer: 'https://www.bing.com/' },
     signal: AbortSignal.timeout(60_000),

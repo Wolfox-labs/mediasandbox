@@ -1043,7 +1043,9 @@ export function createServer(deps: ServerDeps): CreateServerResult {
         goal,
         ...(typeof body['brand'] === 'string' ? { brand: body['brand'] } : {}),
         ...(typeof body['tone'] === 'string' ? { tone: body['tone'] } : {}),
+        ...(typeof body['logo'] === 'string' ? { logo: body['logo'] } : {}),
         ...(sizeIds !== undefined && sizeIds.length > 0 ? { sizeIds } : {}),
+        ...(body['background'] === true ? { background: true } : {}),
       });
     } else if (id === 'page') {
       const templateId = typeof body['templateId'] === 'string' ? body['templateId'].trim() : '';
