@@ -125,7 +125,9 @@ async function refresh(): Promise<void> {
       selected.value === undefined ||
       !list.some(p => p.projectId === selected.value)
     ) {
-      selected.value = list[0]?.projectId;
+      // 默认选**最近一个有产物的**：列表第一条往往是刚跑失败的那次，
+      // 选中它只会得到一句"这个项目还没有产物"，看着像页面坏了。
+      selected.value = (list.find(p => p.artifactCount > 0) ?? list[0])?.projectId;
     }
   } catch (error) {
     projects.value = [];
@@ -248,7 +250,7 @@ onBeforeUnmount(() => {
   <div class="projects">
     <NGrid :cols="24" :x-gap="12" :y-gap="12" item-responsive responsive="screen">
       <!-- 左：项目列表 -->
-      <NGi span="24 m:24 l:7">
+      <NGi span="24 s:9 m:9 l:7">
         <NCard title="项目" size="small" :bordered="false" class="projects__card">
           <template #header-extra>
             <NButton text size="tiny" @click="refresh">刷新</NButton>
@@ -291,12 +293,12 @@ onBeforeUnmount(() => {
       </NGi>
 
       <!-- 中：文件树 -->
-      <NGi span="24 m:24 l:11">
+      <NGi span="24 s:15 m:15 l:11">
         <NCard
           size="small"
           :bordered="false"
           class="projects__card projects__card--grow"
-          :title="project === undefined ? '项目文件' : `项目文件 · ${project.projectId}`"
+          title="项目文件"
         >
           <template #header-extra>
             <NButton
@@ -346,7 +348,7 @@ onBeforeUnmount(() => {
       </NGi>
 
       <!-- 右：内置模板 -->
-      <NGi span="24 m:24 l:6">
+      <NGi span="24 s:24 m:24 l:6">
         <NCard title="内置模板" size="small" :bordered="false" class="projects__card">
           <p class="projects__hint">
             这些是起手式示例，不参与决策。点一下复制目标，到工作台粘贴即可。
@@ -414,6 +416,8 @@ onBeforeUnmount(() => {
 .projects {
   height: 100%;
   min-height: 0;
+  /* 窄窗口下三栏会换行，整页要能滚——否则第三块被切掉还找不到滚动条。 */
+  overflow-y: auto;
 }
 
 .projects__card {
@@ -432,7 +436,10 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
-  max-height: 100%;
+  /* 60 多个项目时列表会把整页撑到几千像素，把右边的文件树顶到看不见的地方。
+     这里硬性封顶：卡片的 `height: 100%` 在换行布局里没有可比对的参照高度，
+     `max-height: 100%` 等于没限制。 */
+  max-height: min(64vh, 620px);
 }
 
 .projects__item {
@@ -479,6 +486,7 @@ onBeforeUnmount(() => {
 
 .projects__tree {
   overflow-y: auto;
+  max-height: min(64vh, 620px);
   display: flex;
   flex-direction: column;
   gap: 12px;
