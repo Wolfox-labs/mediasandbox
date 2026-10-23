@@ -106,6 +106,23 @@ export async function runInteractionVerification(
   // 结果不是报错，而是解析到 0 个可点元素，看起来像"演示文稿没有交互"。
   const pagePath = envType === 'slides' ? DECK_PATH : PAGE_PATH;
 
+  /**
+   * 点之前先看**已经发出去的那份页面**，别拿结构重新渲染一遍。
+   *
+   * 重新渲染看似等价，实际不等价：`record.structure` 里的 slot 内容未必齐全，
+   * 渲出来是一张只有"标题 /（待补充）"的骨架页。点它照样能点成（锚点还在），
+   * 但点击截图会是一张没样式、没内容的空页——演示里就是一张错图。
+   * 我们要验证的是"发出去的那一页"，那就点那一页。
+   */
+  let shippedHtml: string | undefined;
+  if (envType === 'webpage') {
+    try {
+      shippedHtml = new TextDecoder().decode(await deps.provider.readFile(handle, pagePath));
+    } catch {
+      // 沙盒里读不到就退回按结构渲染（老数据 / 页面不在约定路径）。
+    }
+  }
+
   const verification = await verifyInteraction({
     structure: record.structure.page,
     decision: deps.decision,
@@ -114,7 +131,11 @@ export async function runInteractionVerification(
     pagePath,
     goal: record.goal,
     envType,
-    ...(envType === 'slides' ? { renderHtml: (structure) => renderDeck(structure, { title: record.goal }) } : {}),
+    ...(envType === 'slides'
+      ? { renderHtml: (structure) => renderDeck(structure, { title: record.goal }) }
+      : shippedHtml !== undefined
+        ? { renderHtml: () => shippedHtml! }
+        : {}),
   });
   return { ok: true, verification };
 }

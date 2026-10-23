@@ -169,7 +169,9 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
 
   const maxBlocks = ref(typeof saved.maxBlocks === 'number' ? saved.maxBlocks : 6);
   const brand = ref(asString(saved.brand, ''));
-  const annotate = ref(asBoolean(saved.annotate, true));
+  // 标注默认关：它把每块的来源（generative / user / deterministic）印在页面上，
+  // 是排查用的调试信息，默认打开等于把内部标签糊在成品页上。
+  const annotate = ref(asBoolean(saved.annotate, false));
   const screenshot = ref(asBoolean(saved.screenshot, true));
 
   const provider = ref<SandboxProvider>(asProvider(saved.provider));
@@ -542,7 +544,7 @@ export const useWorkbenchStore = defineStore(SetupStoreId.Workbench, () => {
     templateSaved.value = false;
     maxBlocks.value = 6;
     brand.value = '';
-    annotate.value = true;
+    annotate.value = false;
     screenshot.value = true;
     providerPinned.value = false;
     adoptRun(undefined);

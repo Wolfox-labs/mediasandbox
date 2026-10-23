@@ -1700,7 +1700,7 @@ export function createServer(deps: ServerDeps): CreateServerResult {
              */
             ...(typeof body['useGenerative'] === 'boolean'
               ? { useGenerative: body['useGenerative'] }
-              : envType === 'slides' && deps.llm !== undefined
+              : deps.llm !== undefined
                 ? { useGenerative: true }
                 : {}),
             ...(typeof body['annotate'] === 'boolean' ? { annotate: body['annotate'] } : {}),
@@ -2016,6 +2016,26 @@ export function createServer(deps: ServerDeps): CreateServerResult {
       return;
     }
     const { verification } = outcome;
+    // 点击截图必须能点开看：只回一个 `screenshotPath` 是不够的——
+    // 前端照这个路径取图会 404，界面上就是一个破图（演示里等于一个错误）。
+    // 所以把它登记成这次运行的产物，并落一份到落定目录（沙盒回收后也还在）。
+    const shot = verification.result?.screenshot;
+    if (shot !== undefined && !record!.artifacts.some((a) => a.path === shot.path)) {
+      (record!.artifacts as Artifact[]).push({
+        path: shot.path,
+        size: shot.bytes.byteLength,
+        mimeHint: 'image/png',
+      });
+      const target = settledPathFor(record!, shot.path);
+      if (target !== undefined) {
+        try {
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, shot.bytes);
+        } catch (error) {
+          deps.onLog?.(`交互验证截图落定失败：${String(error)}`);
+        }
+      }
+    }
     res.json({
       runId: record!.id,
       // `passed` 的判据是"确实点成了"，而不是"跑完了流程"：
